@@ -19,7 +19,7 @@ Up and down move. Enter or the number opens the line. Esc goes back.
 
 Select servers only lists channels the account can open and read. Enter ticks a whole server. Right arrow opens its channels.
 
-Webhook settings names the new server. On start, the same account creates that server, one channel for each channel you selected, and a webhook named the same as the channel. The next start reuses that server. "New server on next start" throws that away.
+Webhook settings names the new server. On start, the same account creates that server, one channel for each channel you selected, and a webhook named the same as the channel. The next start reuses that server. "New server on next start" throws that away. Left and right arrows change backfill and threads. Enter, the number, or a click steps backfill to the next amount and turns threads on or off. When typing a value, Enter keeps it and Esc cancels it.
 
 ## Run
 

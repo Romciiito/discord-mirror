@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+import time
+from typing import Any, Callable
 
 import aiohttp
 
@@ -11,20 +12,42 @@ from .discord_api import webhook_parts
 
 log = logging.getLogger("mirror.relay")
 
-BLOCKED_NAMES = {"clyde", "discord", "everyone", "here"}
+BLOCKED_WORDS = ("discord", "clyde")
+BLOCKED_NAMES = {"everyone", "here"}
 CDN_HOSTS = {"cdn.discordapp.com", "media.discordapp.net"}
+UPLOAD_FILES = 10
+UPLOAD_LIMIT = 10_000_000
+ATTEMPTS = 5
+RETRY_CAP = 60.0
+PACE = 0.5
+TEXT_FLOOR = 64
+JSON_HEADERS = {"Content-Type": "application/json"}
+
+
+def safe_name(name: str) -> str:
+    name = " ".join(str(name).split())
+    while True:
+        folded = ""
+        owner: list[int] = []
+        for index, char in enumerate(name):
+            part = char.casefold()
+            folded += part
+            owner.extend([index] * len(part))
+        hits = [spot for spot in (folded.find(word) for word in BLOCKED_WORDS) if spot >= 0]
+        if not hits:
+            break
+        cut = owner[min(hits) + 2] + 1
+        name = f"{name[:cut]}.{name[cut:]}"
+    if name.casefold() in BLOCKED_NAMES:
+        name = f"{name}."
+    return name[:80].strip() or "member"
 
 
 def author_name(message: dict[str, Any]) -> str:
     member = message.get("member") or {}
     author = message.get("author") or {}
     name = member.get("nick") or author.get("global_name") or author.get("username") or "member"
-    name = " ".join(str(name).split())
-    if not name:
-        name = "member"
-    if name.casefold() in BLOCKED_NAMES:
-        name = f"{name}."
-    return name[:80]
+    return safe_name(str(name))
 
 
 def avatar_url(message: dict[str, Any]) -> str | None:
@@ -149,6 +172,61 @@ def view_from_message(message: dict[str, Any], channel_name: str, guild_name: st
     }
 
 
+def host_of(url: str) -> str:
+    try:
+        return url.split("/", 3)[2].split(":", 1)[0].lower()
+    except Exception:
+        return ""
+
+
+def size_of(item: dict[str, Any]) -> int:
+    try:
+        return int(item.get("size") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def plan_uploads(attachments: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    upload: list[dict[str, Any]] = []
+    linked: list[dict[str, Any]] = []
+    total = 0
+    for item in attachments or []:
+        if not isinstance(item, dict):
+            continue
+        size = size_of(item)
+        if (
+            host_of(str(item.get("url") or "")) in CDN_HOSTS
+            and 0 < size <= UPLOAD_LIMIT
+            and len(upload) < UPLOAD_FILES
+            and total + size <= UPLOAD_LIMIT
+        ):
+            upload.append(item)
+            total += size
+        else:
+            linked.append(item)
+    return upload, linked
+
+
+def link_urls(view: dict[str, Any]) -> list[str]:
+    links = view.get("links")
+    if not isinstance(links, list):
+        links = [item.get("url") for item in plan_uploads(view.get("attachments") or [])[1]]
+    return [str(url) for url in links if url]
+
+
+def fit_content(text: str, urls: list[str]) -> str:
+    keep = list(urls)
+    floor = min(len(text), TEXT_FLOOR) + 1 if text else 0
+    while keep and len("\n".join(keep)) + floor > 2000:
+        keep.pop()
+    block = "\n".join(keep)
+    if not block:
+        return clip(text, 2000)
+    if not text:
+        return block
+    return clip(text, 2000 - len(block) - 1) + "\n" + block
+
+
 def payload_for(view: dict[str, Any], prefix: bool) -> dict[str, Any]:
     lines: list[str] = []
     if prefix and view.get("channel_name"):
@@ -163,10 +241,11 @@ def payload_for(view: dict[str, Any], prefix: bool) -> dict[str, Any]:
         lines.append("stickers: " + ", ".join(view["stickers"]))
     if view.get("deleted"):
         lines.append("(deleted)")
-    content = clip("\n".join(line for line in lines if line).strip(), 2000)
+    text = "\n".join(line for line in lines if line).strip()
+    content = fit_content(text, link_urls(view))
     body: dict[str, Any] = {
         "content": content or None,
-        "username": clip(str(view.get("author") or "member"), 80),
+        "username": safe_name(str(view.get("author") or "")),
         "embeds": view.get("embeds") or [],
         "allowed_mentions": {"parse": []},
     }
@@ -179,17 +258,37 @@ def payload_for(view: dict[str, Any], prefix: bool) -> dict[str, Any]:
     return body
 
 
-def host_of(url: str) -> str:
+def too_large(status: int, data: Any) -> bool:
+    return status == 413 or (isinstance(data, dict) and data.get("code") == 40005)
+
+
+def header_float(headers: Any, key: str) -> float | None:
     try:
-        return url.split("/", 3)[2].split(":", 1)[0].lower()
-    except Exception:
-        return ""
+        value = headers.get(key)
+        return None if value is None else float(value)
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def retry_delay(headers: Any, data: Any) -> float:
+    delay = None
+    if isinstance(data, dict):
+        try:
+            delay = float(data["retry_after"]) if data.get("retry_after") is not None else None
+        except (TypeError, ValueError):
+            delay = None
+    if delay is None:
+        delay = header_float(headers, "Retry-After")
+    if delay is None or delay != delay or delay < 0:
+        delay = 1.0
+    return min(delay, RETRY_CAP)
 
 
 class Relay:
     def __init__(self, session: aiohttp.ClientSession) -> None:
         self.session = session
         self._locks: dict[str, asyncio.Lock] = {}
+        self._next: dict[str, float] = {}
 
     def _lock(self, url: str) -> asyncio.Lock:
         lock = self._locks.get(url)
@@ -198,122 +297,168 @@ class Relay:
             self._locks[url] = lock
         return lock
 
+    async def _wait(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
+    def _hold(self, webhook_url: str, seconds: float) -> None:
+        self._next[webhook_url] = max(self._next.get(webhook_url, 0.0), time.monotonic() + seconds)
+
+    def _pace(self, webhook_url: str, headers: Any) -> None:
+        remaining = header_float(headers, "X-RateLimit-Remaining")
+        reset = header_float(headers, "X-RateLimit-Reset-After")
+        gap = PACE
+        if remaining is not None and remaining <= 0 and reset is not None and reset == reset:
+            gap = max(PACE, min(reset, RETRY_CAP))
+        self._next[webhook_url] = time.monotonic() + gap
+
+    async def _send(
+        self,
+        webhook_url: str,
+        method: str,
+        url: str,
+        make: Callable[[], dict[str, Any]],
+        timeout: float,
+    ) -> tuple[int, Any]:
+        status = 0
+        backoff = 1.0
+        for attempt in range(ATTEMPTS):
+            gap = self._next.get(webhook_url, 0.0) - time.monotonic()
+            if gap > 0:
+                await self._wait(gap)
+            try:
+                call = getattr(self.session, method)
+                async with call(url, timeout=aiohttp.ClientTimeout(total=timeout), **make()) as resp:
+                    status = resp.status
+                    try:
+                        data = await resp.json(content_type=None)
+                    except Exception:
+                        data = None
+                    self._pace(webhook_url, resp.headers)
+                    if status == 429:
+                        self._hold(webhook_url, retry_delay(resp.headers, data))
+                        continue
+                    if status < 500:
+                        return status, data
+            except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as exc:
+                log.info("webhook %s attempt %s failed: %s", method, attempt + 1, exc)
+            self._hold(webhook_url, backoff)
+            backoff = min(backoff * 2, 8.0)
+        log.warning("webhook %s gave up after %s attempts (last status %s)", method, ATTEMPTS, status)
+        return status, None
+
     async def create(self, webhook_url: str, view: dict[str, Any], prefix: bool) -> str | None:
-        parts = webhook_parts(webhook_url)
-        if parts is None:
+        if webhook_parts(webhook_url) is None:
             return None
-        async with self._lock(webhook_url):
-            message_id = await self._post(webhook_url, view, prefix)
-            await asyncio.sleep(0.45)
-            return message_id
-
-    async def edit(self, webhook_url: str, webhook_message_id: str, view: dict[str, Any], prefix: bool) -> None:
-        if webhook_parts(webhook_url) is None:
-            return
-        body = payload_for(view, prefix)
-        body.pop("username", None)
-        body.pop("avatar_url", None)
-        async with self._lock(webhook_url):
-            url = f"{webhook_url.rstrip('/')}/messages/{webhook_message_id}"
-            try:
-                async with self.session.patch(
-                    url,
-                    json=body,
-                    headers={"Content-Type": "application/json"},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    if resp.status == 429:
-                        await self._sleep_limited(resp)
-                    elif resp.status >= 400:
-                        log.warning("webhook edit %s", resp.status)
-            except Exception:
-                log.exception("webhook edit failed")
-            await asyncio.sleep(0.45)
-
-    async def remove(self, webhook_url: str, webhook_message_id: str) -> None:
-        if webhook_parts(webhook_url) is None:
-            return
-        async with self._lock(webhook_url):
-            url = f"{webhook_url.rstrip('/')}/messages/{webhook_message_id}"
-            try:
-                async with self.session.delete(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    if resp.status == 429:
-                        await self._sleep_limited(resp)
-                    elif resp.status >= 400 and resp.status != 404:
-                        log.warning("webhook delete %s", resp.status)
-            except Exception:
-                log.exception("webhook delete failed")
-            await asyncio.sleep(0.45)
-
-    async def _post(self, webhook_url: str, view: dict[str, Any], prefix: bool) -> str | None:
-        body = payload_for(view, prefix)
-        files = await self._files(view.get("attachments") or [])
-        url = webhook_url.rstrip("/") + "?wait=true"
         try:
-            if files:
-                form = aiohttp.FormData()
-                form.add_field("payload_json", json.dumps(body, separators=(",", ":"), ensure_ascii=False))
-                for index, (name, data, content_type) in enumerate(files):
-                    form.add_field(
-                        f"files[{index}]",
-                        data,
-                        filename=name,
-                        content_type=content_type or "application/octet-stream",
-                    )
-                async with self.session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                    return await self._message_id(resp)
-            async with self.session.post(
-                url,
-                json=body,
-                headers={"Content-Type": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                return await self._message_id(resp)
+            async with self._lock(webhook_url):
+                return await self._post(webhook_url, view, prefix)
         except Exception:
             log.exception("webhook post failed")
             return None
 
-    async def _message_id(self, resp: aiohttp.ClientResponse) -> str | None:
-        if resp.status == 429:
-            await self._sleep_limited(resp)
-            return None
-        if resp.status >= 400:
-            log.warning("webhook post %s", resp.status)
-            return None
+    async def edit(self, webhook_url: str, webhook_message_id: str, view: dict[str, Any], prefix: bool) -> None:
+        if webhook_parts(webhook_url) is None:
+            return
         try:
-            data = await resp.json(content_type=None)
+            body = payload_for(view, prefix)
+            body.pop("username", None)
+            body.pop("avatar_url", None)
+            url = f"{webhook_url.rstrip('/')}/messages/{webhook_message_id}"
+            async with self._lock(webhook_url):
+                status, _ = await self._send(
+                    webhook_url, "patch", url, lambda: {"json": body, "headers": dict(JSON_HEADERS)}, 30
+                )
+            if status == 404:
+                log.info("webhook edit 404")
+            elif 400 <= status < 500 and status != 429:
+                log.warning("webhook edit %s", status)
         except Exception:
-            return None
-        if isinstance(data, dict) and data.get("id"):
+            log.exception("webhook edit failed")
+
+    async def remove(self, webhook_url: str, webhook_message_id: str) -> None:
+        if webhook_parts(webhook_url) is None:
+            return
+        try:
+            url = f"{webhook_url.rstrip('/')}/messages/{webhook_message_id}"
+            async with self._lock(webhook_url):
+                status, _ = await self._send(webhook_url, "delete", url, dict, 30)
+            if 400 <= status < 500 and status not in (404, 429):
+                log.warning("webhook delete %s", status)
+        except Exception:
+            log.exception("webhook delete failed")
+
+    async def _post(self, webhook_url: str, view: dict[str, Any], prefix: bool) -> str | None:
+        attachments = [item for item in view.get("attachments") or [] if isinstance(item, dict)]
+        upload, _ = plan_uploads(attachments)
+        files, failed = await self._files(upload)
+        sent = {id(item) for item in upload} - {id(item) for item in failed}
+        links = [str(item.get("url")) for item in attachments if id(item) not in sent and item.get("url")]
+        url = webhook_url.rstrip("/") + "?wait=true"
+        body = payload_for({**view, "links": links}, prefix)
+        plain = not files
+        status, data = 0, None
+        if files:
+            text = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+
+            def make() -> dict[str, Any]:
+                form = aiohttp.FormData()
+                form.add_field("payload_json", text)
+                for index, (name, blob, content_type) in enumerate(files):
+                    form.add_field(
+                        f"files[{index}]",
+                        blob,
+                        filename=name,
+                        content_type=content_type or "application/octet-stream",
+                    )
+                return {"data": form}
+
+            status, data = await self._send(webhook_url, "post", url, make, 120)
+            if too_large(status, data):
+                log.info("webhook upload too large, sending links")
+                links = [str(item.get("url")) for item in attachments if item.get("url")]
+                body = payload_for({**view, "links": links}, prefix)
+                plain = True
+        if plain:
+            status, data = await self._send(
+                webhook_url, "post", url, lambda: {"json": body, "headers": dict(JSON_HEADERS)}, 30
+            )
+        view["links"] = links
+        if 200 <= status < 300 and isinstance(data, dict) and data.get("id"):
             return str(data["id"])
+        if 400 <= status < 500 and status != 429:
+            log.warning("webhook post %s", status)
         return None
 
-    async def _sleep_limited(self, resp: aiohttp.ClientResponse) -> None:
+    async def _files(
+        self, attachments: list[dict[str, Any]]
+    ) -> tuple[list[tuple[str, bytes, str]], list[dict[str, Any]]]:
+        files: list[tuple[str, bytes, str]] = []
+        failed: list[dict[str, Any]] = []
+        total = 0
+        for item in attachments:
+            data = None
+            if len(files) < UPLOAD_FILES:
+                data = await self._fetch(str(item.get("url") or ""), size_of(item))
+            if data is None or total + len(data) > UPLOAD_LIMIT:
+                failed.append(item)
+                continue
+            total += len(data)
+            files.append((str(item.get("name") or "file")[:80], data, str(item.get("content_type") or "")))
+        return files, failed
+
+    async def _fetch(self, url: str, size: int) -> bytes | None:
+        if host_of(url) not in CDN_HOSTS or size > UPLOAD_LIMIT:
+            return None
         try:
-            body = await resp.json(content_type=None)
-            delay = float(body.get("retry_after", 1))
+            async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                if resp.status != 200:
+                    return None
+                declared = header_float(resp.headers, "Content-Length")
+                if declared is not None and declared > UPLOAD_LIMIT:
+                    return None
+                data = await resp.read()
         except Exception:
-            delay = 1.0
-        await asyncio.sleep(min(delay, 20))
-
-    async def _files(self, attachments: list[dict[str, Any]]) -> list[tuple[str, bytes, str]]:
-        found: list[tuple[str, bytes, str]] = []
-        for item in attachments[:4]:
-            url = str(item.get("url") or "")
-            if host_of(url) not in CDN_HOSTS:
-                continue
-            size = int(item.get("size") or 0)
-            if size and size > 8_000_000:
-                continue
-            try:
-                async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    if resp.status != 200:
-                        continue
-                    data = await resp.content.read(8_000_001)
-            except Exception:
-                continue
-            if len(data) > 8_000_000 or not data:
-                continue
-            found.append((str(item.get("name") or "file")[:80], data, str(item.get("content_type") or "")))
-        return found
-
+            return None
+        if not data or len(data) > UPLOAD_LIMIT:
+            return None
+        return bytes(data)

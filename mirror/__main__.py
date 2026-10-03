@@ -19,7 +19,7 @@ def main() -> None:
     data = os.environ.get("DATA_DIR")
     if not data:
         data = str(Path(__file__).resolve().parent.parent / "data")
-    app = create_app(data)
+    app = create_app(data, host, port)
     web.run_app(app, host=host, port=port, print=None)
 
 

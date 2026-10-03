@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS relayed (
     webhook_url TEXT NOT NULL,
     webhook_message_id TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS hooks (
+    channel_id TEXT PRIMARY KEY,
+    webhook_url TEXT NOT NULL
+);
 """
 
 
@@ -60,6 +64,10 @@ class Store:
             self.conn.execute("ALTER TABLE selection ADD COLUMN parent TEXT NOT NULL DEFAULT ''")
         if "topic" not in picked_cols:
             self.conn.execute("ALTER TABLE selection ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
+        self.conn.execute(
+            "INSERT OR IGNORE INTO hooks (channel_id, webhook_url) "
+            "SELECT channel_id, webhook_url FROM selection WHERE webhook_url != ''"
+        )
 
     def close(self) -> None:
         self.conn.close()
@@ -119,13 +127,28 @@ class Store:
 
     def clear_destination(self) -> None:
         self.conn.execute("UPDATE selection SET webhook_url = ''")
+        self.conn.execute("DELETE FROM hooks")
         self.conn.execute("UPDATE options SET dest_guild_id = '' WHERE id = 1")
         self.conn.commit()
 
     def fill_webhooks(self, pairs: list[tuple[str, str]]) -> None:
         for source_id, url in pairs:
             self.conn.execute("UPDATE selection SET webhook_url = ? WHERE channel_id = ?", (url, source_id))
+            self._keep_hook(source_id, url)
         self.conn.commit()
+
+    def _keep_hook(self, channel_id: str, url: str) -> None:
+        if not channel_id or not url:
+            return
+        self.conn.execute(
+            "INSERT INTO hooks (channel_id, webhook_url) VALUES (?, ?) "
+            "ON CONFLICT(channel_id) DO UPDATE SET webhook_url = excluded.webhook_url",
+            (channel_id, url),
+        )
+
+    def hooks(self) -> dict[str, str]:
+        rows = self.conn.execute("SELECT channel_id, webhook_url FROM hooks").fetchall()
+        return {str(row["channel_id"]): str(row["webhook_url"]) for row in rows}
 
     def selection(self) -> list[dict]:
         rows = self.conn.execute(
@@ -136,24 +159,31 @@ class Store:
 
     def replace_selection(self, rows: list[dict]) -> None:
         previous = {row["channel_id"]: row["webhook_url"] for row in self.selection()}
-        self.conn.execute("DELETE FROM selection")
-        self.conn.executemany(
-            "INSERT INTO selection (channel_id, guild_id, guild_name, channel_name, webhook_url, enabled, parent, topic) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            [
+        kept = self.hooks()
+        packed = []
+        for row in rows:
+            channel_id = str(row["channel_id"])
+            hook = row.get("webhook_url") or previous.get(channel_id) or kept.get(channel_id) or ""
+            packed.append(
                 (
-                    str(row["channel_id"]),
+                    channel_id,
                     str(row["guild_id"]),
                     row.get("guild_name") or "",
                     row.get("channel_name") or "",
-                    row.get("webhook_url") or previous.get(str(row["channel_id"]), ""),
+                    hook,
                     1 if row.get("enabled", 1) else 0,
                     row.get("parent") or "",
                     str(row.get("topic") or "")[:1024],
                 )
-                for row in rows
-            ],
+            )
+        self.conn.execute("DELETE FROM selection")
+        self.conn.executemany(
+            "INSERT INTO selection (channel_id, guild_id, guild_name, channel_name, webhook_url, enabled, parent, topic) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            packed,
         )
+        for item in packed:
+            self._keep_hook(item[0], item[4])
         self.conn.commit()
 
     def remember_relay(self, source_id: str, channel_id: str, webhook_url: str, webhook_message_id: str) -> None:

@@ -7,8 +7,8 @@ from typing import Any
 
 import aiohttp
 
-from .access import readable_plan
-from .provision import destination_layout
+from .access import TEXT_TYPES, readable_plan
+from .provision import destination_layout, webhook_name
 from .discord_api import ApiError, DiscordHTTP, clean_webhook, load_properties, webhook_parts
 from .gateway import Gateway
 from .relay import Relay, safe_embeds, view_from_message
@@ -16,7 +16,7 @@ from .store import Store
 
 log = logging.getLogger("mirror.engine")
 
-TEXT_TYPES = {0, 5, 15}
+GONE = 'the mirror server is gone or cannot be used, pick "new server on next start"'
 
 
 class Engine:
@@ -42,12 +42,15 @@ class Engine:
         self.include_threads = False
         self._properties: dict[str, Any] | None = None
         self._backfill_task: asyncio.Task | None = None
+        self._restore_task: asyncio.Task | None = None
+        self._setup = asyncio.Lock()
 
     async def open(self) -> None:
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=40))
         self.relay = Relay(self.session)
 
     async def close(self) -> None:
+        await self._cancel_restore()
         await self.stop()
         if self.session is not None:
             await self.session.close()
@@ -78,11 +81,57 @@ class Engine:
         try:
             await self.use_token(token, keep=True)
             self.note("saved token accepted")
-        except Exception:
-            self.note("saved token was rejected")
-            self.store.forget_token()
+        except ApiError as exc:
+            if exc.status in (401, 403):
+                self.note("saved token was rejected")
+                self.store.forget_token()
+                return
+            self._retry_later(token, exc)
+        except Exception as exc:
+            self._retry_later(token, exc)
+
+    def _retry_later(self, token: str, exc: Exception) -> None:
+        reason = str(exc) or "network error"
+        self.note(f"saved token check failed ({reason}), retrying")
+        self._restore_task = asyncio.create_task(self._retry_token(token))
+
+    async def _retry_token(self, token: str) -> None:
+        delay = 5.0
+        try:
+            while True:
+                await self._wait(delay)
+                if self.http is not None or self.store.token() != token:
+                    return
+                try:
+                    await self.use_token(token, keep=True)
+                except ApiError as exc:
+                    if exc.status in (401, 403):
+                        self.note("saved token was rejected")
+                        self.store.forget_token()
+                        return
+                except Exception:
+                    pass
+                else:
+                    self.note("saved token accepted")
+                    return
+                delay = min(delay * 2, 120.0)
+        finally:
+            if self._restore_task is asyncio.current_task():
+                self._restore_task = None
+
+    async def _cancel_restore(self) -> None:
+        task = self._restore_task
+        if task is None or task is asyncio.current_task():
+            return
+        self._restore_task = None
+        task.cancel()
+        await asyncio.wait({task})
+
+    async def _wait(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
 
     async def use_token(self, token: str, keep: bool) -> dict[str, Any]:
+        await self._cancel_restore()
         token = token.strip()
         if len(token) < 40:
             raise ApiError(400, "token looks too short")
@@ -103,6 +152,7 @@ class Engine:
         return self.user
 
     async def forget(self) -> None:
+        await self._cancel_restore()
         await self.stop()
         self.http = None
         self.user = None
@@ -262,6 +312,8 @@ class Engine:
             for item in wired
         ]
         self.store.set_options(options["backfill"], options["include_threads"], "", True)
+        self.store.clear_destination()
+        self.store.set_dest_guild(dest_id)
         self.store.replace_selection(rows)
         self.note(f"webhooks on {len(rows)} channel(s)")
         if self.running:
@@ -281,11 +333,15 @@ class Engine:
         made: set[str] = set()
         for category in plan["categories"]:
             body = {"name": str(category.get("name") or "category")[:100], "type": 4}
-            created = await http.call("POST", f"/guilds/{dest_id}/channels", json=body)
+            try:
+                created = await http.call("POST", f"/guilds/{dest_id}/channels", json=body)
+            except ApiError as exc:
+                self.note(f"category {body['name']} was not created ({exc})")
+                created = None
             if isinstance(created, dict) and created.get("id"):
                 parents[str(category.get("id"))] = str(created["id"])
                 made.add(str(created["id"]))
-            await asyncio.sleep(0.3)
+            await self._wait(0.3)
         wired: list[dict[str, str]] = []
         for channel in plan["channels"]:
             source_name = str(channel.get("name") or "channel")
@@ -308,12 +364,12 @@ class Engine:
                 continue
             dest_channel = str(created["id"])
             made.add(dest_channel)
-            await asyncio.sleep(0.25)
+            await self._wait(0.25)
             try:
                 hook = await http.call(
                     "POST",
                     f"/channels/{dest_channel}/webhooks",
-                    json={"name": source_name[:80]},
+                    json={"name": webhook_name(source_name)},
                 )
             except ApiError as exc:
                 self.note(f"webhook for #{source_name} failed ({exc})")
@@ -328,7 +384,7 @@ class Engine:
                 continue
             wired.append({"source_id": str(channel.get("id")), "name": source_name[:80], "webhook_url": url})
             self.note(f"#{source_name}")
-            await asyncio.sleep(0.25)
+            await self._wait(0.25)
         if not wired:
             raise ApiError(400, "no webhook could be created")
         try:
@@ -340,7 +396,7 @@ class Engine:
             if channel_id and channel_id not in made:
                 try:
                     await http.call("DELETE", f"/channels/{channel_id}")
-                    await asyncio.sleep(0.2)
+                    await self._wait(0.2)
                 except ApiError:
                     self.note(f"left default #{channel.get('name') or channel_id}")
         return wired
@@ -384,8 +440,10 @@ class Engine:
         self.note("next start creates a new server")
 
     async def start(self) -> None:
-        if self.running:
-            return
+        async with self._setup:
+            await self._start()
+
+    async def _start(self) -> None:
         http = self._require_http()
         rows = [row for row in self.store.selection() if row["enabled"]]
         if not rows:
@@ -399,6 +457,9 @@ class Engine:
         if not options["mirror"]:
             self.store.set_options(options["backfill"], options["include_threads"], "", True, options["dest_name"])
             options = self.store.options()
+        if self.running:
+            await self.refresh()
+            return
         self._index(rows, options["include_threads"])
         if options["include_threads"]:
             await self._load_threads(http, rows)
@@ -410,6 +471,10 @@ class Engine:
         self.status = "connecting"
         self.note(f"connecting, {len(rows)} channel(s)")
         self.gateway.start()
+        stale = self._backfill_task
+        self._backfill_task = None
+        if stale is not None:
+            stale.cancel()
         if options["backfill"] > 0:
             self._backfill_task = asyncio.create_task(self._backfill(rows, options["backfill"]))
         self._emit({"kind": "status", "running": True, "status": self.status})
@@ -423,6 +488,7 @@ class Engine:
             raise ApiError(400, "select servers first")
         dest_id = options["dest_guild_id"]
         fresh = False
+        existing: list[dict[str, Any]] = []
         if not dest_id:
             created = await http.call("POST", "/guilds", json={"name": layout["name"]})
             if not isinstance(created, dict) or not created.get("id"):
@@ -432,8 +498,14 @@ class Engine:
             fresh = True
             self.note(f"server created: {layout['name']}")
         else:
+            try:
+                existing = await http.channels(dest_id)
+            except ApiError as exc:
+                if exc.status in (403, 404):
+                    raise ApiError(400, GONE) from exc
+                raise
             self.note("adding channels to the mirror server")
-        pairs = await self._wire_layout(http, dest_id, layout, fresh)
+        pairs = await self._wire_layout(http, dest_id, layout, fresh, existing)
         self.store.fill_webhooks(pairs)
         self.note(f"webhooks on {len(pairs)} channel(s)")
 
@@ -443,19 +515,37 @@ class Engine:
         dest_id: str,
         layout: dict[str, Any],
         fresh: bool,
+        existing: list[dict[str, Any]] | None = None,
     ) -> list[tuple[str, str]]:
         parents: dict[str, str] = {}
         made: set[str] = set()
+        known: dict[str, str] = {}
+        for item in existing or []:
+            if isinstance(item, dict) and item.get("type") == 4 and item.get("id"):
+                known.setdefault(str(item.get("name") or "").casefold(), str(item["id"]))
         for category in layout["categories"]:
-            created = await http.call(
-                "POST",
-                f"/guilds/{dest_id}/channels",
-                json={"name": category["name"], "type": 4},
-            )
+            name = str(category["name"])
+            found = known.get(name.casefold())
+            if found:
+                parents[str(category["key"])] = found
+                continue
+            try:
+                created = await http.call(
+                    "POST",
+                    f"/guilds/{dest_id}/channels",
+                    json={"name": name, "type": 4},
+                )
+            except ApiError as exc:
+                self.note(f"category {name} was not created ({exc})")
+                await self._wait(0.3)
+                continue
             if isinstance(created, dict) and created.get("id"):
                 parents[str(category["key"])] = str(created["id"])
                 made.add(str(created["id"]))
-            await asyncio.sleep(0.3)
+                known[name.casefold()] = str(created["id"])
+            else:
+                self.note(f"category {name} was not created")
+            await self._wait(0.3)
         pairs: list[tuple[str, str]] = []
         for channel in layout["channels"]:
             body: dict[str, Any] = {"name": channel["name"], "type": 0}
@@ -474,12 +564,12 @@ class Engine:
                 continue
             dest_channel = str(created["id"])
             made.add(dest_channel)
-            await asyncio.sleep(0.25)
+            await self._wait(0.25)
             try:
                 hook = await http.call(
                     "POST",
                     f"/channels/{dest_channel}/webhooks",
-                    json={"name": channel["name"][:80]},
+                    json={"name": webhook_name(channel["name"])},
                 )
             except ApiError as exc:
                 self.note(f"webhook for #{channel['name']} failed ({exc})")
@@ -494,7 +584,7 @@ class Engine:
                 continue
             pairs.append((channel["source_id"], url))
             self.note(f"#{channel['name']}")
-            await asyncio.sleep(0.25)
+            await self._wait(0.25)
         if fresh:
             try:
                 leftovers = await http.channels(dest_id)
@@ -505,7 +595,7 @@ class Engine:
                 if channel_id and channel_id not in made:
                     try:
                         await http.call("DELETE", f"/channels/{channel_id}")
-                        await asyncio.sleep(0.2)
+                        await self._wait(0.2)
                     except ApiError:
                         self.note(f"left default #{channel.get('name') or channel_id}")
         if not pairs:
@@ -525,10 +615,14 @@ class Engine:
         self.gateway.set_subscriptions(self._guild_map(rows), options["include_threads"])
         await self.gateway.resubscribe()
         self.note(f"selection updated, {len(rows)} channel(s)")
+        missing = [row for row in rows if not str(row.get("webhook_url") or "").strip()]
+        if missing:
+            self.note(f"{len(missing)} channel(s) need start/resume")
 
     async def stop(self) -> None:
         self.running = False
         self.backfilling = False
+        self.holding.clear()
         task = self._backfill_task
         self._backfill_task = None
         if task is not None:
@@ -585,16 +679,34 @@ class Engine:
                         return
                     await self._handle("MESSAGE_CREATE", message)
         finally:
-            pending: list[tuple[str, dict[str, Any]]]
+            if self._backfill_task is asyncio.current_task():
+                try:
+                    await self._drain()
+                finally:
+                    if self._backfill_task is asyncio.current_task():
+                        self._backfill_task = None
+
+    async def _drain(self) -> None:
+        while True:
             async with self.lock:
-                self.backfilling = False
-                pending = list(self.holding)
-                self.holding.clear()
-            for event, data in pending:
-                if self.running:
+                if not self.running:
+                    self.holding.clear()
+                    self.backfilling = False
+                    break
+                if not self.holding:
+                    self.backfilling = False
+                    break
+                batch = self.holding[:50]
+                del self.holding[:50]
+            for event, data in batch:
+                if not self.running:
+                    break
+                try:
                     await self._handle(event, data)
-            if self.running:
-                self.note("history done")
+                except Exception:
+                    log.exception("held %s failed", event)
+        if self.running:
+            self.note("history done")
 
     async def _handle(self, event: str, data: dict[str, Any]) -> None:
         if event == "THREAD_CREATE" and self.include_threads:
@@ -641,8 +753,7 @@ class Engine:
         message_id = str(message.get("id") or "")
         view = self.feed.get(message_id)
         if view is None:
-            if _worth_showing(message):
-                await self._create(message)
+            await self._restore_view(message, channel_id, message_id)
             return
         if "content" in message:
             view["content"] = str(message.get("content") or "")
@@ -652,7 +763,24 @@ class Engine:
             view["edited"] = message.get("edited_timestamp")
         self._emit({"kind": "message", "message": view})
         row = self.store.relay_row(message_id)
-        if row and self.store.options()["mirror"]:
+        if row and self.store.options()["mirror"] and self.relay is not None:
+            await self.relay.edit(row["webhook_url"], row["webhook_message_id"], view, self._prefix(row["webhook_url"]))
+
+    async def _restore_view(self, message: dict[str, Any], channel_id: str, message_id: str) -> None:
+        full = "content" in message and bool(message.get("author"))
+        if not message_id or not full:
+            return
+        row = self.store.relay_row(message_id)
+        if row is None:
+            if _worth_showing(message):
+                await self._create(message)
+            return
+        if self._own_webhook(message):
+            return
+        guild_name, channel_name = self.names.get(channel_id, ("", channel_id))
+        view = view_from_message(message, channel_name, guild_name)
+        self._push(view)
+        if self.store.options()["mirror"] and self.relay is not None:
             await self.relay.edit(row["webhook_url"], row["webhook_message_id"], view, self._prefix(row["webhook_url"]))
 
     async def _delete(self, message_id: str, channel_id: str) -> None:
