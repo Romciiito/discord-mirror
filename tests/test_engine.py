@@ -226,7 +226,8 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
 
             other._wait = fast
             await other.open()
-            await other.close()
+            with mock.patch.object(engine_mod, "WINDOWS", False):
+                await other.close()
             self.assertEqual(waits, [])
             with self.assertRaises(sqlite3.ProgrammingError):
                 other.store.conn.execute("SELECT 1")
