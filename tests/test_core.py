@@ -1,0 +1,112 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+import zlib
+from pathlib import Path
+
+from mirror.discord_api import ApiError, CAPABILITIES, build_properties, clean_webhook
+from mirror.gateway import Inflate
+from mirror.relay import author_name, clip, payload_for, view_from_message
+from mirror.store import Store
+
+
+class CoreTests(unittest.TestCase):
+    def test_capabilities_match_desktop_default(self) -> None:
+        value = 0
+        for bit in (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14):
+            value |= 1 << bit
+        self.assertEqual(CAPABILITIES, value)
+        self.assertEqual(CAPABILITIES, 22525)
+
+    def test_properties_look_like_mac_chrome(self) -> None:
+        props = build_properties(627798, 131)
+        self.assertEqual(props["os"], "Mac OS X")
+        self.assertIn("Macintosh", props["browser_user_agent"])
+        self.assertEqual(props["client_build_number"], 627798)
+        self.assertNotIn("token", props)
+
+    def test_webhook_host_is_discord_only(self) -> None:
+        good = "https://discord.com/api/webhooks/123/abc_DEF-1"
+        self.assertEqual(clean_webhook(good), good)
+        self.assertEqual(clean_webhook(""), "")
+        with self.assertRaises(ApiError):
+            clean_webhook("https://example.com/api/webhooks/123/abc")
+        with self.assertRaises(ApiError):
+            clean_webhook("https://discord.com.evil.com/api/webhooks/123/abc")
+
+    def test_payload_clips_and_drops_mentions(self) -> None:
+        view = {
+            "author": "clyde",
+            "channel_name": "general",
+            "guild_name": "Desk",
+            "content": "x" * 3000,
+            "embeds": [],
+            "attachments": [],
+            "stickers": [],
+            "reply": "",
+            "avatar": "",
+            "deleted": False,
+        }
+        body = payload_for(view, True)
+        self.assertLessEqual(len(body["content"]), 2000)
+        self.assertEqual(body["allowed_mentions"], {"parse": []})
+        self.assertTrue(body["content"].startswith("Desk / #general"))
+
+    def test_author_and_view(self) -> None:
+        self.assertEqual(author_name({"author": {"username": "everyone"}}), "everyone.")
+        self.assertEqual(clip("abcd", 3), "ab…")
+        message = {
+            "id": "9",
+            "channel_id": "8",
+            "content": "hello",
+            "author": {"id": "1", "username": "ada", "global_name": "Ada", "avatar": "abc"},
+            "attachments": [{"filename": "a.png", "url": "https://cdn.discordapp.com/a.png", "size": 10}],
+            "embeds": [{"type": "rich", "title": "t", "description": "d"}],
+        }
+        view = view_from_message(message, "general", "Desk")
+        self.assertEqual(view["author"], "Ada")
+        self.assertEqual(view["attachments"][0]["name"], "a.png")
+        self.assertEqual(view["embeds"][0]["title"], "t")
+
+    def test_inflate_sync_flush(self) -> None:
+        raw = json.dumps({"op": 10, "d": {"heartbeat_interval": 41250}}).encode()
+        compressor = zlib.compressobj()
+        blob = compressor.compress(raw) + compressor.flush(zlib.Z_SYNC_FLUSH)
+        mid = len(blob) // 2
+        inflater = Inflate()
+        self.assertIsNone(inflater.feed(blob[:mid]))
+        parsed = json.loads(inflater.feed(blob[mid:]))
+        self.assertEqual(parsed["op"], 10)
+
+    def test_store_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            store.set_token("x" * 50, True)
+            self.assertEqual(store.token(), "x" * 50)
+            store.set_options(25, True, "https://discord.com/api/webhooks/1/abc", True)
+            self.assertEqual(store.options()["backfill"], 25)
+            store.replace_selection(
+                [
+                    {
+                        "channel_id": "10",
+                        "guild_id": "20",
+                        "guild_name": "Desk",
+                        "channel_name": "general",
+                        "webhook_url": "",
+                        "enabled": 1,
+                    }
+                ]
+            )
+            self.assertEqual(store.selection()[0]["channel_name"], "general")
+            store.remember_relay("1", "10", "https://discord.com/api/webhooks/1/abc", "99")
+            self.assertEqual(store.relay_row("1")["webhook_message_id"], "99")
+            store.forget_token()
+            self.assertEqual(store.token(), "")
+            self.assertTrue((Path(tmp) / "state.db").stat().st_mode & 0o777 == 0o600)
+            store.close()
+
+
+if __name__ == "__main__":
+    unittest.main()
