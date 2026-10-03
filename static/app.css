@@ -40,6 +40,18 @@ header, footer {
 header { border-bottom: 1px solid #2a2922; padding-bottom: 0.55rem; }
 .name { color: var(--mark); }
 #status { margin-left: auto; }
+.row.locked { color: var(--dim); }
+.row.on.locked { color: var(--inverse-ink); }
+
+.welcome { margin-top: 16vh; }
+.welcome h2 {
+  margin: 0 0 1rem;
+  font-size: 1.35rem;
+  font-weight: 500;
+  color: var(--fg);
+  letter-spacing: 0;
+}
+.mark { color: var(--mark); }
 #who { color: var(--fg); }
 
 #screen {

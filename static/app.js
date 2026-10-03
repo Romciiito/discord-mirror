@@ -1,27 +1,6 @@
-"use strict";
+import { items, reduce } from "./flow.js";
 
 const BACKFILL = [0, 25, 50, 100, 250, 500];
-
-const state = {
-  user: null,
-  running: false,
-  status: "idle",
-  options: { backfill: 0, include_threads: false, global_webhook: "", mirror: false },
-  selection: [],
-  log: [],
-  messages: [],
-};
-
-const ui = {
-  screen: "home",
-  index: 0,
-  guilds: [],
-  guild: null,
-  typing: null,
-  busy: false,
-  error: "",
-  fields: { token: "", service: "", account: "", keep: true },
-};
 
 const term = document.getElementById("term");
 const screen = document.getElementById("screen");
@@ -29,10 +8,37 @@ const whoNode = document.getElementById("who");
 const statusNode = document.getElementById("status");
 const hintNode = document.getElementById("hint");
 
+let flow = reduce(null);
+let snap = {
+  user: null,
+  running: false,
+  status: "idle",
+  options: { backfill: 0, include_threads: false, dest_name: "mirror", mirror: false, global_webhook: "" },
+  selection: [],
+  log: [],
+};
+let picked = new Map();
+let guilds = [];
+let channelRows = [];
+let activeGuild = null;
+let localIndex = 0;
+let hookIndex = 0;
+let tokenIndex = 0;
+let typing = null;
+let errorText = "";
+let busy = false;
+let depth = "guilds";
+let messages = [];
+const fields = { token: "", service: "", account: "", keep: true };
+
+function ctx() {
+  return { tokenOk: !!(snap.user && snap.user.id) };
+}
+
 function text(tag, value, className) {
   const node = document.createElement(tag);
   if (className) node.className = className;
-  node.textContent = value || "";
+  node.textContent = value == null ? "" : String(value);
   return node;
 }
 
@@ -48,119 +54,138 @@ async function api(path, options) {
   return body;
 }
 
+function syncPicked() {
+  picked = new Map();
+  (snap.selection || []).forEach((row) => {
+    if (row.enabled) picked.set(row.channel_id, row);
+  });
+}
+
+function apply(next) {
+  snap = next;
+  syncPicked();
+  whoNode.textContent = next.user ? next.user.global_name || next.user.username || next.user.id : "signed out";
+  statusNode.textContent = next.running ? next.status || "live" : next.status || "idle";
+}
+
 function backfillLabel(value) {
   const amount = Number(value) || 0;
   return amount ? "last " + amount : "live only";
 }
 
-function apply(next) {
-  state.user = next.user;
-  state.running = !!next.running;
-  state.status = next.status || "idle";
-  state.options = next.options || state.options;
-  state.selection = next.selection || [];
-  state.log = next.log || state.log;
-  whoNode.textContent = next.user
-    ? next.user.global_name || next.user.username || next.user.id
-    : "signed out";
-  statusNode.textContent = state.running ? state.status : state.status || "idle";
-}
-
-function items() {
-  if (ui.screen === "home") {
-    return [
-      { id: "account", label: "account" },
-      { id: "servers", label: "servers" },
-      { id: "transcript", label: "transcript" },
-      { id: "backfill", label: "backfill", value: backfillLabel(state.options.backfill), adjust: true },
-      { id: "threads", label: "threads", value: state.options.include_threads ? "on" : "off", adjust: true },
-      { id: "start", label: "start" },
-      { id: "stop", label: "stop" },
-    ];
+function guildSelected(guildId) {
+  for (const row of picked.values()) {
+    if (row.guild_id === guildId) return true;
   }
-  if (ui.screen === "account") {
-    return [
-      { id: "token", label: "token", field: "token", secret: true },
-      { id: "service", label: "keychain service", field: "service" },
-      { id: "account-name", label: "keychain account", field: "account" },
-      { id: "keep", label: "keep on this machine", value: ui.fields.keep ? "yes" : "no", adjust: true },
-      { id: "use-token", label: "use token" },
-      { id: "use-keychain", label: "read keychain" },
-      { id: "forget", label: "forget" },
-    ];
-  }
-  if (ui.screen === "servers") {
-    if (!ui.guilds.length) return [{ id: "empty", label: "no servers" }];
-    return ui.guilds.map((guild) => ({ id: guild.id, label: guild.name, guild }));
-  }
-  if (ui.screen === "confirm" && ui.guild) {
-    return [
-      { id: "copy", label: "copy " + ui.guild.name },
-      { id: "back", label: "back" },
-    ];
-  }
-  if (ui.screen === "job") return [{ id: "back", label: "back" }];
-  return [];
+  return false;
 }
 
 function hint() {
-  if (ui.typing) return "enter keeps it, esc cancels the edit";
-  if (ui.screen === "transcript") return "up and down scroll, esc back";
-  if (ui.screen === "confirm") return "enter copies the whole server";
-  if (ui.screen === "servers") return "up and down move, enter selects the server";
-  if (ui.screen === "job") return "esc back";
-  return "up and down move, enter opens, left and right change a value";
+  if (typing) return "enter keeps it, esc cancels the edit";
+  if (flow.screen === "welcome") return "press any key";
+  if (flow.screen === "exit") return "press any key";
+  if (flow.screen === "running") return "esc returns to the menu";
+  if (flow.screen === "servers" && depth === "channels") return "enter toggles, a selects all, esc back";
+  if (flow.screen === "servers") return "enter toggles the server, right opens channels, esc back";
+  if (flow.screen === "token" || flow.screen === "webhooks") return "up and down move, enter opens, esc back";
+  return "up and down move, enter or a number opens, esc back";
+}
+
+function rowButton(label, on, locked, activate) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "row" + (on ? " on" : "") + (locked ? " locked" : "");
+  if (on) row.dataset.selected = "true";
+  row.textContent = label;
+  row.addEventListener("click", activate);
+  return row;
 }
 
 function render() {
-  const rows = items();
-  if (ui.index >= rows.length) ui.index = Math.max(0, rows.length - 1);
-  if (ui.index < 0) ui.index = 0;
   hintNode.textContent = hint();
   screen.replaceChildren();
-  if (ui.screen === "transcript") {
-    renderTranscript();
+  if (flow.screen === "welcome") {
+    const block = document.createElement("div");
+    block.className = "welcome";
+    const title = document.createElement("h2");
+    title.textContent = "Discord smart scraper - Mando";
+    block.append(title, text("p", "Press any key to continue", "log"));
+    screen.append(block);
     return;
   }
-  const title = text("div", titleFor(), "title");
-  screen.append(title);
-  if (ui.screen === "confirm" && ui.guild) {
-    screen.append(text("p", "Creates a new server with the same name.", "log"));
-    screen.append(text("p", "Only channels you can open and read are copied.", "log"));
-    screen.append(text("p", "Each one gets a webhook named the same as the channel.", "log"));
-    screen.append(text("p", "This replaces the current follow list.", "log"));
+  if (flow.screen === "exit") {
+    screen.append(text("h2", "Stopped", "title"));
+    screen.append(text("p", "Press any key to continue", "log"));
+    return;
   }
-  if (ui.screen === "job") {
-    state.log.slice().reverse().forEach((line) => screen.append(text("p", line, "log")));
+  if (flow.screen === "running") {
+    screen.append(text("div", snap.running ? "mirroring" : "working", "title"));
+    (snap.log || []).slice().reverse().forEach((line) => screen.append(text("p", line, "log")));
+    messages.slice(-12).forEach((message) => {
+      const line = [message.channel_name ? "#" + message.channel_name : "", message.author, message.content]
+        .filter(Boolean)
+        .join("  ");
+      screen.append(text("p", line, "msg"));
+    });
+    if (errorText) screen.append(text("p", errorText, "err"));
+    screen.scrollTop = screen.scrollHeight;
+    return;
   }
+  if (flow.screen === "menu" || flow.screen === "settings") {
+    screen.append(text("div", flow.screen === "menu" ? "menu" : "settings", "title"));
+    items(flow.screen, ctx()).forEach((item, index) => {
+      const locked = !!item.locked;
+      const label = index + 1 + "  " + item.label + (locked ? "  locked" : "");
+      screen.append(
+        rowButton(label, index === flow.index, locked, () => {
+          flow = { ...flow, index };
+          press("Enter");
+        }),
+      );
+    });
+    if (errorText) screen.append(text("p", errorText, "err"));
+    return;
+  }
+  if (flow.screen === "token") return renderToken();
+  if (flow.screen === "webhooks") return renderHooks();
+  if (flow.screen === "servers") return renderServers();
+  screen.append(text("p", "Press any key to continue", "log"));
+}
+
+function renderToken() {
+  screen.append(text("div", "Add token", "title"));
+  const rows = [
+    { id: "token", label: "token" },
+    { id: "keep", label: "keep on this machine  " + (fields.keep ? "yes" : "no") },
+    { id: "save", label: "save token" },
+    { id: "service", label: "keychain service" },
+    { id: "account", label: "keychain account" },
+    { id: "keychain", label: "read keychain" },
+    { id: "back", label: "back" },
+  ];
+  if (tokenIndex >= rows.length) tokenIndex = 0;
   rows.forEach((item, index) => {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = index === ui.index ? "row on" : "row";
-    row.dataset.index = String(index);
-    if (index === ui.index) row.dataset.selected = "true";
-    if (item.field && ui.typing === item.field) {
-      row.append(document.createTextNode(item.label));
+    const row = rowButton("", index === tokenIndex, false, () => {
+      tokenIndex = index;
+      tokenAction();
+    });
+    if (typing === item.id) {
+      row.textContent = "";
+      row.append(document.createTextNode(item.label + " "));
       const input = document.createElement("input");
-      input.type = item.secret ? "password" : "text";
-      input.value = ui.fields[item.field] || "";
+      input.type = item.id === "token" ? "password" : "text";
+      input.value = fields[item.id] || "";
       input.autocomplete = "off";
       input.spellcheck = false;
       input.addEventListener("input", () => {
-        ui.fields[item.field] = input.value;
+        fields[item.id] = input.value;
       });
       input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") {
+        event.stopPropagation();
+        if (event.key === "Enter" || event.key === "Escape") {
           event.preventDefault();
-          ui.typing = null;
+          typing = null;
           render();
-        } else if (event.key === "Escape") {
-          event.preventDefault();
-          event.stopPropagation();
-          ui.typing = null;
-          render();
-        } else {
-          event.stopPropagation();
         }
       });
       row.append(input);
@@ -168,277 +193,445 @@ function render() {
       input.focus();
       return;
     }
-    row.append(document.createTextNode(item.label));
-    if (item.field) {
-      const shown = ui.fields[item.field] ? (item.secret ? " set" : " " + ui.fields[item.field]) : " ";
-      row.append(text("span", shown, "val"));
-    } else if (item.value) {
-      row.append(text("span", "  " + item.value, "val"));
-    }
-    row.addEventListener("click", () => {
-      ui.index = index;
-      activate();
-    });
+    let extra = "";
+    if (item.id === "token" && fields.token) extra = "  set";
+    if (item.id === "service" && fields.service) extra = "  " + fields.service;
+    if (item.id === "account" && fields.account) extra = "  " + fields.account;
+    row.textContent = index + 1 + "  " + item.label + extra;
     screen.append(row);
   });
-  if (ui.error) screen.append(text("p", ui.error, "err"));
-  const selected = screen.querySelector(".row.on");
-  if (selected && ui.screen !== "job") selected.scrollIntoView({ block: "nearest" });
-  if (ui.screen === "job") screen.scrollTop = screen.scrollHeight;
+  if (errorText) screen.append(text("p", errorText, "err"));
 }
 
-function titleFor() {
-  if (ui.screen === "account") return "account";
-  if (ui.screen === "servers") return "servers";
-  if (ui.screen === "confirm") return ui.guild ? ui.guild.name : "copy";
-  if (ui.screen === "job") return "copy";
-  return "menu";
-}
-
-function renderTranscript() {
-  screen.append(text("div", "transcript", "title"));
-  if (!state.messages.length) {
-    screen.append(text("p", "nothing here yet", "empty"));
-    return;
-  }
-  state.messages.forEach((message) => {
-    const block = document.createElement("article");
-    block.className = message.deleted ? "msg deleted" : "msg";
-    const meta = document.createElement("span");
-    meta.className = "meta";
-    const when = message.timestamp ? message.timestamp.slice(11, 16) : "";
-    meta.textContent = [when, message.guild_name, message.channel_name ? "#" + message.channel_name : "", message.author]
-      .filter(Boolean)
-      .join("  ");
-    block.append(meta);
-    if (message.content) block.append(text("span", message.content, "body"));
-    if (message.deleted) block.append(text("span", "deleted", "body"));
-    screen.append(block);
+function renderHooks() {
+  screen.append(text("div", "Webhook settings", "title"));
+  screen.append(text("p", "On start, this account creates a new server.", "log"));
+  screen.append(text("p", "It adds one channel for each channel you selected,", "log"));
+  screen.append(text("p", "and a webhook named the same as that channel.", "log"));
+  const name = snap.options.dest_name || "mirror";
+  const rows = [
+    { id: "name", label: "server name  " + name },
+    { id: "backfill", label: "backfill  " + backfillLabel(snap.options.backfill) },
+    { id: "threads", label: "threads  " + (snap.options.include_threads ? "on" : "off") },
+    { id: "fresh", label: "new server on next start" },
+    { id: "back", label: "back" },
+  ];
+  if (hookIndex >= rows.length) hookIndex = 0;
+  rows.forEach((item, index) => {
+    const row = rowButton(index + 1 + "  " + item.label, index === hookIndex, false, () => {
+      hookIndex = index;
+      hookAction();
+    });
+    if (typing === "name" && item.id === "name") {
+      row.textContent = "";
+      row.append(document.createTextNode("server name "));
+      const input = document.createElement("input");
+      input.value = snap.options.dest_name || "mirror";
+      input.addEventListener("input", () => {
+        snap.options.dest_name = input.value;
+      });
+      input.addEventListener("keydown", async (event) => {
+        event.stopPropagation();
+        if (event.key === "Enter") {
+          event.preventDefault();
+          typing = null;
+          await saveOptions();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          typing = null;
+          render();
+        }
+      });
+      row.append(input);
+      screen.append(row);
+      input.focus();
+      return;
+    }
+    screen.append(row);
   });
+  if (errorText) screen.append(text("p", errorText, "err"));
 }
 
-function openScreen(name) {
-  ui.screen = name;
-  ui.index = 0;
-  ui.typing = null;
-  ui.error = "";
-  render();
+function renderServers() {
+  if (depth === "channels" && activeGuild) {
+    screen.append(text("div", activeGuild.name, "title"));
+    if (!channelRows.length) {
+      screen.append(text("p", "nothing in that server can be read", "log"));
+      return;
+    }
+    channelRows.forEach((channel, index) => {
+      const mark = picked.has(channel.id) ? "[x] " : "[ ] ";
+      const parent = channel.parent ? channel.parent + " / " : "";
+      screen.append(
+        rowButton(mark + parent + "#" + channel.name, index === localIndex, false, () => {
+          localIndex = index;
+          toggleChannel(channel);
+        }),
+      );
+    });
+    if (errorText) screen.append(text("p", errorText, "err"));
+    return;
+  }
+  screen.append(text("div", "Select servers", "title"));
+  if (!guilds.length) {
+    screen.append(text("p", "no servers", "log"));
+    return;
+  }
+  guilds.forEach((guild, index) => {
+    const mark = guildSelected(guild.id) ? "[x] " : "[ ] ";
+    screen.append(
+      rowButton(mark + guild.name, index === localIndex, false, () => {
+        localIndex = index;
+        toggleGuild(guild);
+      }),
+    );
+  });
+  if (errorText) screen.append(text("p", errorText, "err"));
 }
 
-async function activate() {
-  if (ui.busy || ui.typing) return;
-  const item = items()[ui.index];
-  if (!item) return;
-  ui.error = "";
-  if (item.field) {
-    ui.typing = item.field;
+function tokenRows() {
+  return ["token", "keep", "save", "service", "account", "keychain", "back"];
+}
+
+function hookRows() {
+  return ["name", "backfill", "threads", "fresh", "back"];
+}
+
+async function tokenAction() {
+  const id = tokenRows()[tokenIndex];
+  errorText = "";
+  if (id === "token" || id === "service" || id === "account") {
+    typing = id;
     render();
     return;
   }
-  if (item.id === "account") return openScreen("account");
-  if (item.id === "servers") return loadServers();
-  if (item.id === "transcript") return openScreen("transcript");
-  if (item.id === "back" || item.id === "empty") return openScreen(ui.screen === "confirm" ? "servers" : "home");
-  if (item.id === "keep") {
-    ui.fields.keep = !ui.fields.keep;
+  if (id === "keep") {
+    fields.keep = !fields.keep;
     render();
     return;
   }
-  if (item.id === "use-token") return signIn(ui.fields.token);
-  if (item.id === "use-keychain") return signInKeychain();
-  if (item.id === "forget") return forget();
-  if (item.id === "start") return run("/api/start");
-  if (item.id === "stop") return run("/api/stop");
-  if (item.guild) {
-    ui.guild = item.guild;
-    return openScreen("confirm");
+  if (id === "back") {
+    flow = reduce({ screen: "token", index: 0 }, { key: "Escape" }, ctx());
+    render();
+    return;
   }
-  if (item.id === "copy") return copyServer();
+  if (id === "save") return signIn({ token: fields.token, keep: fields.keep });
+  if (id === "keychain") {
+    return signIn({
+      keychain_service: fields.service,
+      keychain_account: fields.account,
+      keep: fields.keep,
+    });
+  }
 }
 
-async function adjust(direction) {
-  const item = items()[ui.index];
-  if (!item || !item.adjust || ui.busy) return;
-  if (item.id === "keep") {
-    ui.fields.keep = direction > 0;
+async function signIn(body) {
+  busy = true;
+  try {
+    apply(await api("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
+    fields.token = "";
+    errorText = "";
+    flow = reduce({ screen: "token", index: 0 }, { key: "Escape" }, ctx());
+  } catch (error) {
+    errorText = error.message;
+  } finally {
+    busy = false;
+    render();
+  }
+}
+
+async function hookAction() {
+  const id = hookRows()[hookIndex];
+  errorText = "";
+  if (id === "name") {
+    typing = "name";
     render();
     return;
   }
-  if (item.id === "threads") {
-    state.options.include_threads = direction > 0;
-    await saveOptions();
+  if (id === "fresh") {
+    busy = true;
+    try {
+      apply(await api("/api/destination/reset", { method: "POST" }));
+      errorText = "";
+    } catch (error) {
+      errorText = error.message;
+    } finally {
+      busy = false;
+      render();
+    }
     return;
   }
-  if (item.id === "backfill") {
-    const current = BACKFILL.indexOf(Number(state.options.backfill) || 0);
+  if (id === "back") {
+    flow = reduce({ screen: "webhooks", index: 0 }, { key: "Escape" }, ctx());
+    render();
+  }
+}
+
+async function shiftHook(direction) {
+  const id = hookRows()[hookIndex];
+  if (id === "backfill") {
+    const current = BACKFILL.indexOf(Number(snap.options.backfill) || 0);
     const next = Math.max(0, Math.min(BACKFILL.length - 1, (current < 0 ? 0 : current) + direction));
-    state.options.backfill = BACKFILL[next];
+    snap.options.backfill = BACKFILL[next];
+    await saveOptions();
+  } else if (id === "threads") {
+    snap.options.include_threads = direction > 0;
     await saveOptions();
   }
 }
 
 async function saveOptions() {
   try {
-    const body = await api("/api/setup", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        backfill: state.options.backfill,
-        include_threads: state.options.include_threads,
-        mirror: state.options.mirror,
-        global_webhook: state.options.global_webhook || "",
-        channels: state.selection,
+    apply(
+      await api("/api/setup", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          backfill: snap.options.backfill,
+          include_threads: snap.options.include_threads,
+          mirror: snap.options.mirror,
+          global_webhook: "",
+          dest_name: snap.options.dest_name || "mirror",
+          channels: [...picked.values()],
+        }),
       }),
-    });
-    apply(body);
-    ui.error = "";
+    );
+    errorText = "";
   } catch (error) {
-    ui.error = error.message;
+    errorText = error.message;
   }
   render();
 }
 
-async function loadServers() {
-  ui.busy = true;
-  ui.error = "";
+async function saveSelection() {
+  await saveOptions();
+}
+
+async function toggleGuild(guild) {
+  busy = true;
+  errorText = "";
+  try {
+    const data = await api("/api/guilds/" + guild.id + "/channels");
+    const list = data.channels || [];
+    if (!list.length) {
+      errorText = "nothing in that server can be read";
+      render();
+      return;
+    }
+    const chosen = list.some((channel) => picked.has(channel.id));
+    list.forEach((channel) => {
+      if (chosen) picked.delete(channel.id);
+      else remember(guild, channel);
+    });
+    await saveSelection();
+  } catch (error) {
+    errorText = error.message;
+    render();
+  } finally {
+    busy = false;
+  }
+}
+
+function remember(guild, channel) {
+  const previous = picked.get(channel.id);
+  picked.set(channel.id, {
+    channel_id: channel.id,
+    guild_id: guild.id,
+    guild_name: guild.name,
+    channel_name: channel.name,
+    parent: channel.parent || "",
+    topic: channel.topic || "",
+    webhook_url: previous && previous.webhook_url ? previous.webhook_url : "",
+    enabled: true,
+  });
+}
+
+async function toggleChannel(channel) {
+  if (!activeGuild) return;
+  if (picked.has(channel.id)) picked.delete(channel.id);
+  else remember(activeGuild, channel);
+  await saveSelection();
+}
+
+async function openChannels(guild) {
+  busy = true;
+  errorText = "";
+  try {
+    const data = await api("/api/guilds/" + guild.id + "/channels");
+    activeGuild = guild;
+    channelRows = data.channels || [];
+    depth = "channels";
+    localIndex = 0;
+  } catch (error) {
+    errorText = error.message;
+  } finally {
+    busy = false;
+    render();
+  }
+}
+
+async function selectAllChannels() {
+  if (!activeGuild) return;
+  channelRows.forEach((channel) => remember(activeGuild, channel));
+  await saveSelection();
+}
+
+async function press(key) {
+  if (busy) return;
+  if (flow.screen === "welcome") {
+    flow = reduce(flow, { key }, ctx());
+    errorText = "";
+    render();
+    return;
+  }
+  if (flow.screen === "exit") {
+    flow = { screen: "menu", index: 0, action: null, locked: false };
+    errorText = "";
+    render();
+    return;
+  }
+  if (flow.screen === "running") {
+    if (key === "Escape") {
+      flow = { screen: "menu", index: 0, action: null, locked: false };
+      render();
+    } else if (key === "ArrowDown") screen.scrollBy(0, 48);
+    else if (key === "ArrowUp") screen.scrollBy(0, -48);
+    return;
+  }
+  if (flow.screen === "menu" || flow.screen === "settings") {
+    const next = reduce(flow, { key }, ctx());
+    if (next.locked) {
+      flow = next;
+      errorText = "add a working token first";
+      render();
+      return;
+    }
+    errorText = "";
+    flow = next;
+    if (next.action === "start") return begin();
+    if (next.action === "exit") return halt();
+    if (next.action === "servers") return loadGuilds();
+    render();
+    return;
+  }
+  if (flow.screen === "token") return tokenKey(key);
+  if (flow.screen === "webhooks") return hookKey(key);
+  if (flow.screen === "servers") return serverKey(key);
+}
+
+function tokenKey(key) {
+  if (typing) return;
+  const rows = tokenRows();
+  if (key === "ArrowDown") tokenIndex = (tokenIndex + 1) % rows.length;
+  else if (key === "ArrowUp") tokenIndex = (tokenIndex - 1 + rows.length) % rows.length;
+  else if (key === "Enter") return tokenAction();
+  else if (key === "Escape") {
+    flow = reduce(flow, { key: "Escape" }, ctx());
+    typing = null;
+  } else if (key >= "1" && key <= String(rows.length)) {
+    tokenIndex = Number(key) - 1;
+    return tokenAction();
+  }
+  render();
+}
+
+async function hookKey(key) {
+  if (typing) return;
+  const rows = hookRows();
+  if (key === "ArrowDown") hookIndex = (hookIndex + 1) % rows.length;
+  else if (key === "ArrowUp") hookIndex = (hookIndex - 1 + rows.length) % rows.length;
+  else if (key === "ArrowRight") return shiftHook(1);
+  else if (key === "ArrowLeft") return shiftHook(-1);
+  else if (key === "Enter") return hookAction();
+  else if (key === "Escape") flow = reduce(flow, { key: "Escape" }, ctx());
+  else if (key >= "1" && key <= String(rows.length)) {
+    hookIndex = Number(key) - 1;
+    return hookAction();
+  }
+  render();
+}
+
+async function serverKey(key) {
+  if (depth === "channels") {
+    if (key === "Escape") {
+      depth = "guilds";
+      localIndex = Math.max(0, guilds.findIndex((guild) => activeGuild && guild.id === activeGuild.id));
+      render();
+      return;
+    }
+    if (!channelRows.length) return;
+    if (key === "ArrowDown") localIndex = Math.min(channelRows.length - 1, localIndex + 1);
+    else if (key === "ArrowUp") localIndex = Math.max(0, localIndex - 1);
+    else if (key === "Enter") return toggleChannel(channelRows[localIndex]);
+    else if (key === "a" || key === "A") return selectAllChannels();
+    render();
+    return;
+  }
+  if (key === "Escape") {
+    flow = reduce(flow, { key: "Escape" }, ctx());
+    render();
+    return;
+  }
+  if (!guilds.length) return;
+  if (key === "ArrowDown") localIndex = (localIndex + 1) % guilds.length;
+  else if (key === "ArrowUp") localIndex = (localIndex - 1 + guilds.length) % guilds.length;
+  else if (key === "Enter") return toggleGuild(guilds[localIndex]);
+  else if (key === "ArrowRight") return openChannels(guilds[localIndex]);
+  render();
+}
+
+async function loadGuilds() {
+  busy = true;
+  errorText = "";
+  depth = "guilds";
+  localIndex = 0;
   render();
   try {
     const body = await api("/api/guilds");
-    ui.guilds = body.guilds || [];
-    openScreen("servers");
+    guilds = body.guilds || [];
   } catch (error) {
-    ui.error = error.message;
-    render();
+    errorText = error.message;
+    flow = { screen: "settings", index: 1, action: null, locked: false };
   } finally {
-    ui.busy = false;
-  }
-}
-
-async function signIn(token) {
-  ui.busy = true;
-  try {
-    const body = await api("/api/session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, keep: ui.fields.keep }),
-    });
-    apply(body);
-    ui.fields.token = "";
-    openScreen("home");
-  } catch (error) {
-    ui.error = error.message;
-    render();
-  } finally {
-    ui.busy = false;
-  }
-}
-
-async function signInKeychain() {
-  ui.busy = true;
-  try {
-    const body = await api("/api/session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        keychain_service: ui.fields.service,
-        keychain_account: ui.fields.account,
-        keep: ui.fields.keep,
-      }),
-    });
-    apply(body);
-    openScreen("home");
-  } catch (error) {
-    ui.error = error.message;
-    render();
-  } finally {
-    ui.busy = false;
-  }
-}
-
-async function forget() {
-  try {
-    apply(await api("/api/session", { method: "DELETE" }));
-    openScreen("home");
-  } catch (error) {
-    ui.error = error.message;
+    busy = false;
     render();
   }
 }
 
-async function run(path) {
-  ui.busy = true;
-  try {
-    apply(await api(path, { method: "POST" }));
-    ui.error = "";
-  } catch (error) {
-    ui.error = error.message;
-  } finally {
-    ui.busy = false;
-    render();
-  }
-}
-
-async function copyServer() {
-  if (!ui.guild || ui.busy) return;
-  ui.busy = true;
-  ui.screen = "job";
-  ui.index = 0;
-  ui.error = "";
+async function begin() {
+  busy = true;
+  errorText = "";
+  flow = { screen: "running", index: 0, action: null, locked: false };
   render();
   try {
-    const body = await api("/api/guilds/" + ui.guild.id + "/copy", { method: "POST" });
-    apply(body);
+    apply(await api("/api/start", { method: "POST" }));
   } catch (error) {
-    ui.error = error.message;
+    errorText = error.message;
+    flow = { screen: "menu", index: 0, action: null, locked: false };
   } finally {
-    ui.busy = false;
+    busy = false;
     render();
   }
 }
 
-function onKey(event) {
-  if (event.target && event.target.tagName === "INPUT") return;
-  if (ui.screen === "transcript") {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      screen.scrollBy(0, 48);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      screen.scrollBy(0, -48);
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      openScreen("home");
-    }
-    return;
-  }
-  if (event.key === "ArrowDown") {
-    event.preventDefault();
-    ui.index = Math.min(items().length - 1, ui.index + 1);
+async function halt() {
+  busy = true;
+  try {
+    apply(await api("/api/stop", { method: "POST" }));
+  } catch (error) {
+    errorText = error.message;
+  } finally {
+    busy = false;
+    flow = { screen: "exit", index: 0, action: null, locked: false };
     render();
-  } else if (event.key === "ArrowUp") {
-    event.preventDefault();
-    ui.index = Math.max(0, ui.index - 1);
-    render();
-  } else if (event.key === "ArrowRight") {
-    event.preventDefault();
-    adjust(1);
-  } else if (event.key === "ArrowLeft") {
-    event.preventDefault();
-    adjust(-1);
-  } else if (event.key === "Enter") {
-    event.preventDefault();
-    activate();
-  } else if (event.key === "Escape") {
-    event.preventDefault();
-    if (ui.screen !== "home") openScreen(ui.screen === "confirm" ? "servers" : "home");
   }
 }
 
 function rememberMessage(message) {
-  const index = state.messages.findIndex((item) => item.id === message.id);
-  if (index >= 0) state.messages[index] = message;
-  else state.messages.push(message);
-  if (state.messages.length > 500) state.messages.splice(0, state.messages.length - 500);
+  const index = messages.findIndex((item) => item.id === message.id);
+  if (index >= 0) messages[index] = message;
+  else messages.push(message);
+  if (messages.length > 200) messages.splice(0, messages.length - 200);
 }
 
 function connect() {
@@ -451,39 +644,38 @@ function connect() {
       return;
     }
     if (item.kind === "log" && item.text) {
-      state.log.unshift(item.text);
-      if (ui.screen === "job") render();
+      snap.log = [item.text].concat(snap.log || []).slice(0, 60);
+      if (flow.screen === "running") render();
     } else if (item.kind === "status") {
-      state.running = !!item.running;
-      state.status = item.status || state.status;
-      statusNode.textContent = state.status;
+      snap.running = !!item.running;
+      snap.status = item.status || snap.status;
+      statusNode.textContent = snap.status;
     } else if (item.kind === "message" && item.message) {
       rememberMessage(item.message);
-      if (ui.screen === "transcript") {
-        const atEnd = screen.scrollHeight - screen.scrollTop - screen.clientHeight < 80;
-        render();
-        if (atEnd) screen.scrollTop = screen.scrollHeight;
-      }
+      if (flow.screen === "running") render();
     }
   };
 }
 
-document.addEventListener("keydown", onKey);
-term.addEventListener("click", () => {
-  if (!ui.typing) term.focus();
+document.addEventListener("keydown", (event) => {
+  if (event.target && event.target.tagName === "INPUT") return;
+  if (["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Enter", "Escape", " "].includes(event.key)) {
+    event.preventDefault();
+  }
+  press(event.key);
 });
 
-boot();
+term.addEventListener("click", () => {
+  if (!typing) term.focus();
+});
 
-async function boot() {
-  try {
-    const [snapshot, feed] = await Promise.all([api("/api/state"), api("/api/feed")]);
-    apply(snapshot);
-    state.messages = feed.messages || [];
-  } catch (error) {
-    ui.error = error.message;
-  }
-  connect();
-  render();
-  term.focus();
+try {
+  const [snapshot, feed] = await Promise.all([api("/api/state"), api("/api/feed")]);
+  apply(snapshot);
+  messages = feed.messages || [];
+} catch (error) {
+  errorText = error.message;
 }
+connect();
+render();
+term.focus();

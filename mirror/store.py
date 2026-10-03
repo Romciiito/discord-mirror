@@ -45,8 +45,21 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self.conn.execute("INSERT OR IGNORE INTO options (id) VALUES (1)")
+        self._migrate()
         self.conn.commit()
         os.chmod(self.path, 0o600)
+
+    def _migrate(self) -> None:
+        option_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(options)")}
+        if "dest_name" not in option_cols:
+            self.conn.execute("ALTER TABLE options ADD COLUMN dest_name TEXT NOT NULL DEFAULT 'mirror'")
+        if "dest_guild_id" not in option_cols:
+            self.conn.execute("ALTER TABLE options ADD COLUMN dest_guild_id TEXT NOT NULL DEFAULT ''")
+        picked_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(selection)")}
+        if "parent" not in picked_cols:
+            self.conn.execute("ALTER TABLE selection ADD COLUMN parent TEXT NOT NULL DEFAULT ''")
+        if "topic" not in picked_cols:
+            self.conn.execute("ALTER TABLE selection ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
 
     def close(self) -> None:
         self.conn.close()
@@ -79,35 +92,64 @@ class Store:
             "include_threads": bool(row["include_threads"]),
             "global_webhook": row["global_webhook"] or "",
             "mirror": bool(row["mirror"]),
+            "dest_name": row["dest_name"] or "mirror",
+            "dest_guild_id": row["dest_guild_id"] or "",
         }
 
-    def set_options(self, backfill: int, include_threads: bool, global_webhook: str, mirror: bool) -> None:
+    def set_options(
+        self,
+        backfill: int,
+        include_threads: bool,
+        global_webhook: str,
+        mirror: bool,
+        dest_name: str | None = None,
+    ) -> None:
+        if dest_name is None:
+            dest_name = self.options()["dest_name"]
+        dest_name = " ".join(str(dest_name or "").split())[:100] or "mirror"
         self.conn.execute(
-            "UPDATE options SET backfill = ?, include_threads = ?, global_webhook = ?, mirror = ? WHERE id = 1",
-            (int(backfill), int(include_threads), global_webhook, int(mirror)),
+            "UPDATE options SET backfill = ?, include_threads = ?, global_webhook = ?, mirror = ?, dest_name = ? WHERE id = 1",
+            (int(backfill), int(include_threads), global_webhook, int(mirror), dest_name),
         )
+        self.conn.commit()
+
+    def set_dest_guild(self, guild_id: str) -> None:
+        self.conn.execute("UPDATE options SET dest_guild_id = ? WHERE id = 1", (guild_id,))
+        self.conn.commit()
+
+    def clear_destination(self) -> None:
+        self.conn.execute("UPDATE selection SET webhook_url = ''")
+        self.conn.execute("UPDATE options SET dest_guild_id = '' WHERE id = 1")
+        self.conn.commit()
+
+    def fill_webhooks(self, pairs: list[tuple[str, str]]) -> None:
+        for source_id, url in pairs:
+            self.conn.execute("UPDATE selection SET webhook_url = ? WHERE channel_id = ?", (url, source_id))
         self.conn.commit()
 
     def selection(self) -> list[dict]:
         rows = self.conn.execute(
-            "SELECT channel_id, guild_id, guild_name, channel_name, webhook_url, enabled "
+            "SELECT channel_id, guild_id, guild_name, channel_name, webhook_url, enabled, parent, topic "
             "FROM selection ORDER BY guild_name, channel_name"
         ).fetchall()
         return [dict(row) for row in rows]
 
     def replace_selection(self, rows: list[dict]) -> None:
+        previous = {row["channel_id"]: row["webhook_url"] for row in self.selection()}
         self.conn.execute("DELETE FROM selection")
         self.conn.executemany(
-            "INSERT INTO selection (channel_id, guild_id, guild_name, channel_name, webhook_url, enabled) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO selection (channel_id, guild_id, guild_name, channel_name, webhook_url, enabled, parent, topic) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     str(row["channel_id"]),
                     str(row["guild_id"]),
                     row.get("guild_name") or "",
                     row.get("channel_name") or "",
-                    row.get("webhook_url") or "",
+                    row.get("webhook_url") or previous.get(str(row["channel_id"]), ""),
                     1 if row.get("enabled", 1) else 0,
+                    row.get("parent") or "",
+                    str(row.get("topic") or "")[:1024],
                 )
                 for row in rows
             ],

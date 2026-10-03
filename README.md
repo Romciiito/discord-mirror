@@ -1,10 +1,25 @@
-# Mirror
+# Mando
 
-A local terminal for Discord channels the account can already read.
+Discord smart scraper.
 
-Pick a server and it makes a new server with the same name. Only text channels you can open and read are copied. Each new channel gets a webhook named the same as that channel, and new messages are posted through it. The account itself never sends them.
+Open the page. Press any key. The menu is:
 
-Python 3.10 or newer. macOS or Linux.
+1. Start/Resume mirror
+2. Settings
+3. Exit
+
+Settings:
+
+1. Add token
+2. Select servers, once the token works
+3. Webhook settings
+4. Back to menu
+
+Up and down move. Enter or the number opens the line. Esc goes back.
+
+Select servers only lists channels the account can open and read. Enter ticks a whole server. Right arrow opens its channels.
+
+Webhook settings names the new server. On start, the same account creates that server, one channel for each channel you selected, and a webhook named the same as the channel. The next start reuses that server. "New server on next start" throws that away.
 
 ## Run
 
@@ -17,43 +32,18 @@ sh start.sh
 
 Then open [http://127.0.0.1:8765](http://127.0.0.1:8765).
 
-Up and down move. Enter opens. Esc goes back. Left and right change a value.
+Python 3.10 or newer. macOS or Linux.
 
 ## Account
 
-Paste a user token, or on macOS fill in a Keychain service and account. That is:
+Paste a user token, or on macOS use a Keychain service and account:
 
 ```sh
 security find-generic-password -s SERVICE -a ACCOUNT -w
 ```
 
-"Keep on this machine" stores the token in `data/state.db` (mode 600). Leave it off and the token stays in memory until you quit.
-
-The token is sent only to `discord.com`.
-
-## Copying a server
-
-On **servers**, choose one. **Copy** creates a new server you own:
-
-- same server name
-- same channel names, under the same categories
-- a webhook on each new channel, named the same as the channel
-- channels you cannot see, or cannot read history in, are left out
-- voice and other non-text channels are left out
-- announcement channels are created as normal text channels
-
-The follow list is replaced with those channels, and the session starts. Backfill and threads are set on the main menu before you copy.
-
-Mentions are not pinged in the copy. Reactions stay on the local transcript.
+"Keep on this machine" stores the token in `data/state.db` (mode 600). The token is sent only to `discord.com`.
 
 ## Careful
 
-This holds a second session open on the account, and creating a server uses that account. Discord can limit or close an account for a second session. It can also ask for a captcha before it will create a server. Run it for an account you mean to use, on a machine you control. The page binds to `127.0.0.1` unless you set `HOST`.
-
-## In the tree
-
-| Path | What it is |
-|---|---|
-| `mirror/` | Session, gateway, server copy, webhook |
-| `static/` | The terminal page |
-| `data/` | Local database. Not in git. |
+This holds a second session open on the account, and creating a server uses that account. Discord can limit or close an account for a second session. It can also ask for a captcha before it will create a server. The page binds to `127.0.0.1` unless you set `HOST`.

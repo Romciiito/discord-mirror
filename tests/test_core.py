@@ -86,8 +86,9 @@ class CoreTests(unittest.TestCase):
             store = Store(tmp)
             store.set_token("x" * 50, True)
             self.assertEqual(store.token(), "x" * 50)
-            store.set_options(25, True, "https://discord.com/api/webhooks/1/abc", True)
+            store.set_options(25, True, "https://discord.com/api/webhooks/1/abc", True, "Desk copy")
             self.assertEqual(store.options()["backfill"], 25)
+            self.assertEqual(store.options()["dest_name"], "Desk copy")
             store.replace_selection(
                 [
                     {
@@ -97,10 +98,17 @@ class CoreTests(unittest.TestCase):
                         "channel_name": "general",
                         "webhook_url": "",
                         "enabled": 1,
+                        "parent": "talk",
                     }
                 ]
             )
             self.assertEqual(store.selection()[0]["channel_name"], "general")
+            self.assertEqual(store.selection()[0]["parent"], "talk")
+            store.fill_webhooks([("10", "https://discord.com/api/webhooks/1/abc")])
+            self.assertEqual(store.selection()[0]["webhook_url"], "https://discord.com/api/webhooks/1/abc")
+            store.clear_destination()
+            self.assertEqual(store.selection()[0]["webhook_url"], "")
+            self.assertEqual(store.options()["dest_guild_id"], "")
             store.remember_relay("1", "10", "https://discord.com/api/webhooks/1/abc", "99")
             self.assertEqual(store.relay_row("1")["webhook_message_id"], "99")
             store.forget_token()
