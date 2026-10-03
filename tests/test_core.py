@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 import zlib
@@ -113,7 +114,8 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(store.relay_row("1")["webhook_message_id"], "99")
             store.forget_token()
             self.assertEqual(store.token(), "")
-            self.assertTrue((Path(tmp) / "state.db").stat().st_mode & 0o777 == 0o600)
+            if sys.platform != "win32":
+                self.assertEqual((Path(tmp) / "state.db").stat().st_mode & 0o777, 0o600)
             store.close()
 
     def test_only_readable_text_channels_are_copied(self) -> None:

@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import base64
+import ctypes
+import logging
 import os
 import sqlite3
+import sys
 from pathlib import Path
+from typing import Any
 
+log = logging.getLogger("mirror.store")
+
+WINDOWS = sys.platform == "win32"
+SEALED = "dpapi:"
+UI_FORBIDDEN = 0x01
+DWORD = ctypes.c_uint32
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS account (
@@ -39,11 +50,79 @@ CREATE TABLE IF NOT EXISTS hooks (
 """
 
 
+class DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+
+_libs: tuple[Any, Any] | None = None
+
+
+def _dpapi() -> tuple[Any, Any]:
+    global _libs
+    if _libs is None:
+        blob = ctypes.POINTER(DATA_BLOB)
+        crypt = ctypes.WinDLL("crypt32", use_last_error=True)
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        crypt.CryptProtectData.argtypes = [
+            blob, ctypes.c_wchar_p, blob, ctypes.c_void_p, ctypes.c_void_p, DWORD, blob
+        ]
+        crypt.CryptProtectData.restype = ctypes.c_int
+        crypt.CryptUnprotectData.argtypes = [
+            blob, ctypes.POINTER(ctypes.c_wchar_p), blob, ctypes.c_void_p, ctypes.c_void_p, DWORD, blob
+        ]
+        crypt.CryptUnprotectData.restype = ctypes.c_int
+        kernel.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel.LocalFree.restype = ctypes.c_void_p
+        _libs = (crypt, kernel)
+    return _libs
+
+
+def _call(name: str, data: bytes) -> bytes | None:
+    crypt, kernel = _dpapi()
+    raw = ctypes.create_string_buffer(data, len(data))
+    inp = DATA_BLOB(len(data), ctypes.cast(raw, ctypes.POINTER(ctypes.c_char)))
+    out = DATA_BLOB()
+    if not getattr(crypt, name)(ctypes.pointer(inp), None, None, None, None, UI_FORBIDDEN, ctypes.pointer(out)):
+        return None
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        if out.pbData:
+            kernel.LocalFree(ctypes.cast(out.pbData, ctypes.c_void_p))
+
+
+def _seal(token: str) -> str:
+    if not WINDOWS:
+        return token
+    try:
+        blob = _call("CryptProtectData", token.encode("utf-8"))
+    except OSError:
+        blob = None
+    if blob is None:
+        log.warning("token stored without protection")
+        return token
+    return SEALED + base64.b64encode(blob).decode("ascii")
+
+
+def _open(value: str) -> str:
+    if not value.startswith(SEALED):
+        return value
+    if not WINDOWS:
+        return ""
+    try:
+        blob = base64.b64decode(value[len(SEALED):], validate=True)
+        plain = _call("CryptUnprotectData", blob) if blob else None
+        return plain.decode("utf-8") if plain is not None else ""
+    except (ValueError, OSError):
+        return ""
+
+
 class Store:
     def __init__(self, directory: str) -> None:
         path = Path(directory)
         path.mkdir(parents=True, exist_ok=True)
-        os.chmod(path, 0o700)
+        if not WINDOWS:
+            os.chmod(path, 0o700)
         self.path = path / "state.db"
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
@@ -51,7 +130,8 @@ class Store:
         self.conn.execute("INSERT OR IGNORE INTO options (id) VALUES (1)")
         self._migrate()
         self.conn.commit()
-        os.chmod(self.path, 0o600)
+        if not WINDOWS:
+            os.chmod(self.path, 0o600)
 
     def _migrate(self) -> None:
         option_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(options)")}
@@ -76,14 +156,14 @@ class Store:
         row = self.conn.execute("SELECT token, keep FROM account WHERE id = 1").fetchone()
         if row is None or not row["keep"] or not row["token"]:
             return ""
-        return str(row["token"])
+        return _open(str(row["token"]))
 
     def set_token(self, token: str, keep: bool) -> None:
         if keep and token:
             self.conn.execute(
                 "INSERT INTO account (id, token, keep) VALUES (1, ?, 1) "
                 "ON CONFLICT(id) DO UPDATE SET token = excluded.token, keep = 1",
-                (token,),
+                (_seal(token),),
             )
         else:
             self.conn.execute("DELETE FROM account WHERE id = 1")
