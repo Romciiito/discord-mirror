@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from aiohttp import web
 
@@ -14,6 +15,37 @@ from .store import Store
 
 log = logging.getLogger("mirror.web")
 STATIC = Path(__file__).resolve().parent.parent / "static"
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+PING = 15.0
+
+
+def hostname(value: str) -> str:
+    value = value.strip().lower()
+    if value.startswith("["):
+        end = value.find("]")
+        return value[1:end] if end > 0 else value[1:]
+    if value.count(":") == 1:
+        return value.split(":", 1)[0]
+    return value
+
+
+@web.middleware
+async def origin_guard(request: web.Request, handler):
+    host, _port = request.app["bind"]
+    if hostname(host) in LOOPBACK and hostname(request.host) not in LOOPBACK:
+        return web.json_response({"error": "bad host"}, status=403)
+    if request.path.startswith("/api/"):
+        origin = request.headers.get("Origin")
+        if origin is not None and (origin == "null" or _netloc(origin) != request.host.casefold()):
+            return web.json_response({"error": "bad origin"}, status=403)
+    return await handler(request)
+
+
+def _netloc(origin: str) -> str:
+    try:
+        return urlsplit(origin).netloc.casefold()
+    except ValueError:
+        return ""
 
 
 @web.middleware
@@ -26,6 +58,8 @@ async def guard(request: web.Request, handler):
     except RuntimeError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     except asyncio.CancelledError:
+        raise
+    except web.HTTPException:
         raise
     except Exception:
         log.exception("request failed")
@@ -122,18 +156,24 @@ async def events(request: web.Request) -> web.StreamResponse:
         await response.write(b": ok\n\n")
         while True:
             try:
-                item = await asyncio.wait_for(queue.get(), timeout=15)
+                item = await asyncio.wait_for(queue.get(), timeout=PING)
             except asyncio.TimeoutError:
+                if queue not in engine.listeners:
+                    break
                 await response.write(b": ping\n\n")
                 continue
             payload = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
             await response.write(f"data: {payload}\n\n".encode())
+            if queue not in engine.listeners:
+                break
     finally:
         engine.listeners.discard(queue)
     return response
 
 
 async def _json(request: web.Request) -> dict:
+    if request.content_type != "application/json":
+        raise ApiError(415, "expected json")
     try:
         body = await request.json()
     except Exception as exc:
@@ -152,8 +192,9 @@ async def _stop(app: web.Application) -> None:
     await app["engine"].close()
 
 
-def create_app(data_dir: str) -> web.Application:
-    app = web.Application(middlewares=[guard], client_max_size=1024 * 512)
+def create_app(data_dir: str, host: str = "127.0.0.1", port: int = 8765) -> web.Application:
+    app = web.Application(middlewares=[origin_guard, guard], client_max_size=1024 * 512)
+    app["bind"] = (host, port)
     app["engine"] = Engine(Store(data_dir))
     app.on_startup.append(_start)
     app.on_cleanup.append(_stop)

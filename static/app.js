@@ -25,10 +25,19 @@ let localIndex = 0;
 let hookIndex = 0;
 let tokenIndex = 0;
 let typing = null;
+let draft = "";
+let saveSeq = 0;
+let saveDone = 0;
+let pending = 0;
+let saveChain = Promise.resolve();
 let errorText = "";
 let busy = false;
 let depth = "guilds";
 let messages = [];
+let loaded = false;
+let late = null;
+let lateUsers = 0;
+let opens = 0;
 const fields = { token: "", service: "", account: "", keep: true };
 
 function ctx() {
@@ -87,7 +96,8 @@ function hint() {
   if (flow.screen === "running") return "esc returns to the menu";
   if (flow.screen === "servers" && depth === "channels") return "enter toggles, a selects all, esc back";
   if (flow.screen === "servers") return "enter toggles the server, right opens channels, esc back";
-  if (flow.screen === "token" || flow.screen === "webhooks") return "up and down move, enter opens, esc back";
+  if (flow.screen === "webhooks") return "up and down move, enter or a number opens, left and right change backfill and threads, esc back";
+  if (flow.screen === "token") return "up and down move, enter opens, esc back";
   return "up and down move, enter or a number opens, esc back";
 }
 
@@ -181,18 +191,21 @@ function renderToken() {
       row.append(document.createTextNode(item.label + " "));
       const input = document.createElement("input");
       input.type = item.id === "token" ? "password" : "text";
-      input.value = fields[item.id] || "";
+      input.value = draft;
       input.autocomplete = "off";
       input.spellcheck = false;
       input.addEventListener("input", () => {
-        fields[item.id] = input.value;
+        draft = input.value;
       });
+      input.addEventListener("click", (event) => event.stopPropagation());
       input.addEventListener("keydown", (event) => {
         event.stopPropagation();
-        if (event.key === "Enter" || event.key === "Escape") {
+        if (event.key === "Enter") {
           event.preventDefault();
-          typing = null;
-          render();
+          commitToken();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          cancelEdit();
         }
       });
       row.append(input);
@@ -233,20 +246,21 @@ function renderHooks() {
       row.textContent = "";
       row.append(document.createTextNode("server name "));
       const input = document.createElement("input");
-      input.value = snap.options.dest_name || "mirror";
+      input.value = draft;
+      input.autocomplete = "off";
+      input.spellcheck = false;
       input.addEventListener("input", () => {
-        snap.options.dest_name = input.value;
+        draft = input.value;
       });
-      input.addEventListener("keydown", async (event) => {
+      input.addEventListener("click", (event) => event.stopPropagation());
+      input.addEventListener("keydown", (event) => {
         event.stopPropagation();
         if (event.key === "Enter") {
           event.preventDefault();
-          typing = null;
-          await saveOptions();
+          commitName();
         } else if (event.key === "Escape") {
           event.preventDefault();
-          typing = null;
-          render();
+          cancelEdit();
         }
       });
       row.append(input);
@@ -307,8 +321,11 @@ function hookRows() {
 async function tokenAction() {
   const id = tokenRows()[tokenIndex];
   errorText = "";
+  if ((typing === "token" || typing === "service" || typing === "account") && id !== typing) commitToken();
   if (id === "token" || id === "service" || id === "account") {
+    if (typing === id) return;
     typing = id;
+    draft = fields[id] || "";
     render();
     return;
   }
@@ -332,6 +349,27 @@ async function tokenAction() {
   }
 }
 
+function commitToken() {
+  if (typing === "token" || typing === "service" || typing === "account") fields[typing] = draft;
+  typing = null;
+  draft = "";
+  render();
+}
+
+function commitName() {
+  if (typing !== "name") return;
+  snap.options.dest_name = draft.trim() || "mirror";
+  typing = null;
+  draft = "";
+  return saveOptions();
+}
+
+function cancelEdit() {
+  typing = null;
+  draft = "";
+  render();
+}
+
 async function signIn(body) {
   busy = true;
   try {
@@ -350,10 +388,18 @@ async function signIn(body) {
 async function hookAction() {
   const id = hookRows()[hookIndex];
   errorText = "";
+  if (typing === "name" && id !== "name") await commitName();
   if (id === "name") {
+    if (typing === "name") return;
     typing = "name";
+    draft = snap.options.dest_name || "mirror";
     render();
     return;
+  }
+  if (id === "backfill") return stepBackfill(1, true);
+  if (id === "threads") {
+    snap.options.include_threads = !snap.options.include_threads;
+    return saveOptions();
   }
   if (id === "fresh") {
     busy = true;
@@ -374,23 +420,37 @@ async function hookAction() {
   }
 }
 
+function stepBackfill(direction, wrap) {
+  const found = BACKFILL.indexOf(Number(snap.options.backfill) || 0);
+  const current = found < 0 ? 0 : found;
+  const next = wrap
+    ? (current + direction + BACKFILL.length) % BACKFILL.length
+    : Math.max(0, Math.min(BACKFILL.length - 1, current + direction));
+  snap.options.backfill = BACKFILL[next];
+  return saveOptions();
+}
+
 async function shiftHook(direction) {
   const id = hookRows()[hookIndex];
   if (id === "backfill") {
-    const current = BACKFILL.indexOf(Number(snap.options.backfill) || 0);
-    const next = Math.max(0, Math.min(BACKFILL.length - 1, (current < 0 ? 0 : current) + direction));
-    snap.options.backfill = BACKFILL[next];
-    await saveOptions();
+    await stepBackfill(direction, false);
   } else if (id === "threads") {
     snap.options.include_threads = direction > 0;
     await saveOptions();
   }
 }
 
-async function saveOptions() {
-  try {
-    apply(
-      await api("/api/setup", {
+function saveOptions() {
+  if (!loaded) {
+    errorText = "not connected yet";
+    render();
+    return saveChain;
+  }
+  const seq = ++saveSeq;
+  pending += 1;
+  const run = async () => {
+    try {
+      const next = await api("/api/setup", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -401,17 +461,25 @@ async function saveOptions() {
           dest_name: snap.options.dest_name || "mirror",
           channels: [...picked.values()],
         }),
-      }),
-    );
-    errorText = "";
-  } catch (error) {
-    errorText = error.message;
-  }
-  render();
+      });
+      if (seq !== saveSeq) return;
+      apply(next);
+      errorText = "";
+    } catch (error) {
+      if (seq !== saveSeq) return;
+      errorText = error.message;
+    } finally {
+      pending -= 1;
+      saveDone += 1;
+    }
+    render();
+  };
+  saveChain = saveChain.then(run, run);
+  return saveChain;
 }
 
-async function saveSelection() {
-  await saveOptions();
+function saveSelection() {
+  return saveOptions();
 }
 
 async function toggleGuild(guild) {
@@ -528,10 +596,8 @@ async function press(key) {
 
 function tokenKey(key) {
   if (typing === "token" || typing === "service" || typing === "account") {
-    if (key === "Escape" || key === "Enter") {
-      typing = null;
-      render();
-    }
+    if (key === "Enter") commitToken();
+    else if (key === "Escape") cancelEdit();
     return;
   }
   const rows = tokenRows();
@@ -550,11 +616,8 @@ function tokenKey(key) {
 
 async function hookKey(key) {
   if (typing === "name") {
-    if (key === "Escape" || key === "Enter") {
-      typing = null;
-      if (key === "Enter") return saveOptions();
-      render();
-    }
+    if (key === "Enter") return commitName();
+    if (key === "Escape") cancelEdit();
     return;
   }
   const rows = hookRows();
@@ -648,6 +711,11 @@ async function halt() {
 }
 
 function rememberMessage(message) {
+  place(message);
+  if (late) late.push(message);
+}
+
+function place(message) {
   const index = messages.findIndex((item) => item.id === message.id);
   if (index >= 0) messages[index] = message;
   else messages.push(message);
@@ -656,6 +724,35 @@ function rememberMessage(message) {
 
 function connect() {
   const source = new EventSource("/api/events");
+  source.onopen = async () => {
+    opens += 1;
+    if (opens === 1 && loaded) return;
+    const seq = saveSeq;
+    const done = saveDone;
+    lateUsers += 1;
+    if (!late) late = [];
+    try {
+      const [snapshot, feed] = await Promise.all([api("/api/state"), api("/api/feed")]);
+      if (!pending && seq === saveSeq && done === saveDone) {
+        if (!loaded) errorText = "";
+        apply(snapshot);
+        loaded = true;
+      }
+      const held = late.slice();
+      messages = feed.messages || [];
+      held.forEach(place);
+      if (!typing) render();
+    } catch {
+    } finally {
+      lateUsers -= 1;
+      if (!lateUsers) late = null;
+    }
+  };
+  source.onerror = () => {
+    if (source.readyState !== source.CLOSED) return;
+    source.close();
+    setTimeout(connect, 2000);
+  };
   source.onmessage = (event) => {
     let item;
     try {
@@ -679,7 +776,8 @@ function connect() {
 
 document.addEventListener("keydown", (event) => {
   if (event.target && event.target.tagName === "INPUT") return;
-  if (["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Enter", "Escape", " "].includes(event.key)) {
+  const plain = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
+  if (plain || ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Enter", "Escape"].includes(event.key)) {
     event.preventDefault();
   }
   press(event.key);
@@ -693,6 +791,7 @@ try {
   const [snapshot, feed] = await Promise.all([api("/api/state"), api("/api/feed")]);
   apply(snapshot);
   messages = feed.messages || [];
+  loaded = true;
 } catch (error) {
   errorText = error.message;
 }

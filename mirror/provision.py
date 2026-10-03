@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-_SLUG = re.compile(r"[^a-z0-9]+")
+_SLUG = re.compile(r"[\W_]+")
+_BLOCKED = ("discord", "clyde")
+_RESERVED = {"everyone", "here"}
 
 
 def destination_layout(selected: list[dict], dest_name: str) -> dict[str, Any]:
@@ -63,3 +65,28 @@ def _slug(value: str) -> str:
     if not slug:
         slug = "channel"
     return slug[:100]
+
+
+def webhook_name(value: str) -> str:
+    name = " ".join(str(value or "").split())
+    while True:
+        folded, index = _fold(name)
+        spots = [folded.find(word) for word in _BLOCKED if word in folded]
+        if not spots:
+            break
+        cut = index[min(spots) + 2] + 1
+        name = name[:cut] + "." + name[cut:]
+    if name.casefold() in _RESERVED:
+        name += "."
+    name = name[:80].strip()
+    return name or "mirror"
+
+
+def _fold(name: str) -> tuple[str, list[int]]:
+    parts: list[str] = []
+    index: list[int] = []
+    for at, char in enumerate(name):
+        piece = char.casefold()
+        parts.append(piece)
+        index.extend([at] * len(piece))
+    return "".join(parts), index
