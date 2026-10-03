@@ -7,16 +7,16 @@ set "PY="
 set "OLD="
 
 py -3 -c "import sys" >nul 2>&1
-if errorlevel 1 goto try_python
+if %errorlevel% neq 0 goto try_python
 py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
-if not errorlevel 1 goto use_py
+if %errorlevel% equ 0 goto use_py
 for /f "delims=" %%v in ('py -3 -c "import platform; print(platform.python_version())"') do set "OLD=%%v"
 
 :try_python
 python -c "import sys" >nul 2>&1
-if errorlevel 1 goto no_python
+if %errorlevel% neq 0 goto no_python
 python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
-if not errorlevel 1 goto use_python
+if %errorlevel% equ 0 goto use_python
 for /f "delims=" %%v in ('python -c "import platform; print(platform.python_version())"') do set "OLD=%%v"
 goto no_python
 
@@ -31,20 +31,20 @@ goto venv
 :venv
 if not exist "%VPY%" goto make_venv
 "%VPY%" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
-if errorlevel 1 goto make_venv
+if %errorlevel% neq 0 goto make_venv
 goto reqs
 
 :make_venv
 if exist ".venv" rmdir /s /q ".venv"
 %PY% -m venv .venv
-if errorlevel 1 goto no_venv
+if %errorlevel% neq 0 goto no_venv
 if not exist "%VPY%" goto no_venv
 
 :reqs
 "%VPY%" -c "import filecmp, sys; sys.exit(0 if filecmp.cmp('requirements.txt', '.venv/requirements.txt', shallow=False) else 1)" >nul 2>&1
-if not errorlevel 1 goto url
+if %errorlevel% equ 0 goto url
 "%VPY%" -m pip install -r requirements.txt
-if errorlevel 1 goto no_pip
+if %errorlevel% neq 0 goto no_pip
 copy /y "requirements.txt" ".venv\requirements.txt" >nul
 
 :url

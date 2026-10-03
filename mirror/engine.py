@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from collections import defaultdict, deque
 from typing import Any
 
@@ -15,6 +16,7 @@ from .relay import Relay, safe_embeds, view_from_message
 from .store import Store
 
 log = logging.getLogger("mirror.engine")
+WINDOWS = sys.platform == "win32"
 
 GONE = 'the mirror server is gone or cannot be used, pick "new server on next start"'
 
@@ -55,6 +57,9 @@ class Engine:
         if self.session is not None:
             await self.session.close()
             self.session = None
+            if WINDOWS:
+                await self._wait(0.25)
+        self.store.close()
 
     def note(self, text: str) -> None:
         self.lines.appendleft(text)

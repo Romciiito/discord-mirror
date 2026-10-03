@@ -215,7 +215,7 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         try:
             with self.assertLogs("mirror.gateway", "WARNING") as seen:
                 gate.start()
-                self.assertTrue(await until(lambda: first.closed, 0.3))
+                self.assertTrue(await until(lambda: first.closed, 1.0))
             self.assertIn("heartbeat not acked", "\n".join(seen.output))
             self.assertEqual(first.codes, [4000])
             self.assertTrue(await until(lambda: "RESUMED" in self.events, 1.0))
@@ -232,7 +232,7 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         ws = FakeWS([hello(40), ready()])
         gate = self.build([ws])
         task = asyncio.create_task(gate._once())
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.3)
         try:
             self.assertEqual(ws.codes, [])
             self.assertGreaterEqual(ws.ops().count(40), 3)

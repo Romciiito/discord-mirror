@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import aiohttp
@@ -146,6 +148,30 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(chunk.startswith(b"data: "))
         self.assertEqual(json.loads(chunk[6:].decode()), {"kind": "log", "text": "hello"})
         resp.close()
+
+    async def test_cleanup_closes_store(self) -> None:
+        client = await self.client()
+        engine = client.server.app["engine"]
+        resp = await client.get("/api/state")
+        self.assertEqual(resp.status, 200)
+        await client.close()
+        self.assertIsNone(engine.session)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            engine.store.conn.execute("SELECT 1")
+
+    async def test_data_dir_with_spaces(self) -> None:
+        data = os.path.join(self.tmp.name, "my data")
+        app = create_app(data, "127.0.0.1", 8765)
+        client = TestClient(TestServer(app, host="127.0.0.1"))
+        await client.start_server()
+        self.clients.append(client)
+        resp = await client.get("/api/state")
+        self.assertEqual(resp.status, 200)
+        body = await resp.json()
+        self.assertEqual(set(body), {"user", "running", "status", "has_token", "options", "selection", "log"})
+        self.assertFalse(body["has_token"])
+        self.assertEqual(app["engine"].store.path, Path(data) / "state.db")
+        self.assertTrue(os.path.isfile(os.path.join(data, "state.db")))
 
 
 class MainTests(unittest.TestCase):

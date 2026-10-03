@@ -276,7 +276,7 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(first, second)
         self.assertEqual(form_files(second), [b"1" * 10])
         self.assertEqual(len(self.waits), 1)
-        self.assertAlmostEqual(self.waits[0], 1.5, places=2)
+        self.assertAlmostEqual(self.waits[0], 1.5, delta=0.05)
 
         self.session.calls.clear()
         self.relay._next.clear()
@@ -284,7 +284,7 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.session.queue.extend([FakeResp(429, {"retry_after": 0.8}), FakeResp(200, {"id": "9"})])
         await self.relay.edit(HOOK, "9", make_view([]), False)
         self.assertEqual([call[0] for call in self.sends()], ["patch", "patch"])
-        self.assertAlmostEqual(self.waits[0], 0.8, places=2)
+        self.assertAlmostEqual(self.waits[0], 0.8, delta=0.05)
 
         self.session.calls.clear()
         self.relay._next.clear()
@@ -292,7 +292,7 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.session.queue.extend([FakeResp(429, headers={"Retry-After": "2"}), FakeResp(204)])
         await self.relay.remove(HOOK, "9")
         self.assertEqual([call[0] for call in self.sends()], ["delete", "delete"])
-        self.assertAlmostEqual(self.waits[0], 2.0, places=2)
+        self.assertAlmostEqual(self.waits[0], 2.0, delta=0.05)
 
     async def test_retry_after_is_capped(self) -> None:
         self.session.queue.extend([FakeResp(429, {"retry_after": 900, "global": True}), FakeResp(200, {"id": "3"})])

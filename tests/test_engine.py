@@ -204,6 +204,33 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(again.selection()[0]["webhook_url"], HOOK)
             again.close()
 
+    async def test_close_closes_store(self) -> None:
+        await self.engine.open()
+        await self.engine.close()
+        self.assertIsNone(self.engine.session)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            self.store.conn.execute("SELECT 1")
+        await self.engine.close()
+
+    async def test_close_settles_only_on_windows(self) -> None:
+        await self.engine.open()
+        with mock.patch.object(engine_mod, "WINDOWS", True):
+            await self.engine.close()
+        self.assertEqual(self.delays, [0.25])
+        with tempfile.TemporaryDirectory() as tmp:
+            other = Engine(Store(tmp))
+            waits: list[float] = []
+
+            async def fast(seconds: float) -> None:
+                waits.append(seconds)
+
+            other._wait = fast
+            await other.open()
+            await other.close()
+            self.assertEqual(waits, [])
+            with self.assertRaises(sqlite3.ProgrammingError):
+                other.store.conn.execute("SELECT 1")
+
     async def test_restore_keeps_token_on_network_error(self) -> None:
         token = "x" * 50
         self.store.set_token(token, True)
