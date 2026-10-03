@@ -6,7 +6,8 @@ import unittest
 import zlib
 from pathlib import Path
 
-from mirror.discord_api import ApiError, CAPABILITIES, build_properties, clean_webhook
+from mirror.access import READ_MESSAGE_HISTORY, VIEW_CHANNEL, readable_plan
+from mirror.discord_api import ApiError, CAPABILITIES, _fail_detail, build_properties, clean_webhook
 from mirror.gateway import Inflate
 from mirror.relay import author_name, clip, payload_for, view_from_message
 from mirror.store import Store
@@ -106,6 +107,43 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(store.token(), "")
             self.assertTrue((Path(tmp) / "state.db").stat().st_mode & 0o777 == 0o600)
             store.close()
+
+    def test_only_readable_text_channels_are_copied(self) -> None:
+        everyone = VIEW_CHANNEL | READ_MESSAGE_HISTORY
+        channels = [
+            {"id": "1", "type": 4, "name": "Talk", "position": 0},
+            {"id": "2", "type": 0, "name": "general", "position": 0, "parent_id": "1"},
+            {
+                "id": "3",
+                "type": 0,
+                "name": "staff",
+                "position": 1,
+                "parent_id": "1",
+                "permission_overwrites": [{"id": "9", "allow": "0", "deny": str(VIEW_CHANNEL)}],
+            },
+            {
+                "id": "4",
+                "type": 5,
+                "name": "news",
+                "position": 2,
+                "parent_id": "1",
+                "permission_overwrites": [{"id": "9", "allow": "0", "deny": str(READ_MESSAGE_HISTORY)}],
+            },
+            {"id": "5", "type": 2, "name": "Voice", "position": 3},
+            {"id": "6", "type": 0, "name": "lobby", "position": 4},
+        ]
+        plan = readable_plan(channels, base=everyone, owner=False, user_id="7", guild_id="9", role_ids=[])
+        self.assertEqual([item["name"] for item in plan["channels"]], ["general", "lobby"])
+        self.assertEqual([item["name"] for item in plan["categories"]], ["Talk"])
+        self.assertEqual(plan["skipped"], [{"name": "staff", "reason": "hidden"}, {"name": "news", "reason": "no history"}])
+        self.assertEqual(plan["other"], 1)
+        owned = readable_plan(channels, base=0, owner=True, user_id="7", guild_id="9", role_ids=[])
+        self.assertEqual([item["name"] for item in owned["channels"]], ["general", "staff", "news", "lobby"])
+
+    def test_captcha_error_is_plain(self) -> None:
+        detail = _fail_detail("POST", "/guilds", '{"captcha_sitekey":"x","message":"captcha"}')
+        self.assertIn("captcha", detail.casefold())
+        self.assertNotIn("sitekey", detail)
 
 
 if __name__ == "__main__":

@@ -3,86 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Mirror</title>
+  <title>mirror</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-  <header>
-    <div class="brand">
-      <span class="sig" aria-hidden="true"></span>
-      <div>
-        <h1>Mirror</h1>
-        <p id="who">No account loaded</p>
-      </div>
-    </div>
-    <div class="actions">
-      <span id="status" class="pill">idle</span>
-      <button id="stop" type="button" class="quiet">Stop</button>
-      <button id="start" type="button">Start</button>
-    </div>
-  </header>
-  <main>
-    <section class="col">
-      <h2>Account</h2>
-      <label>Token
-        <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="paste token">
-      </label>
-      <div class="split">
-        <label>Keychain service
-          <input id="kc-service" autocomplete="off" spellcheck="false" placeholder="service name">
-        </label>
-        <label>Account
-          <input id="kc-account" autocomplete="off" spellcheck="false" placeholder="account">
-        </label>
-      </div>
-      <label class="check"><input id="keep" type="checkbox" checked> Keep on this machine</label>
-      <div class="actions tight">
-        <button id="use-token" type="button">Use token</button>
-        <button id="use-keychain" type="button" class="quiet">Read keychain</button>
-        <button id="forget" type="button" class="quiet">Forget</button>
-      </div>
-
-      <h2>Copy</h2>
-      <label class="check"><input id="mirror" type="checkbox"> Also post into Discord</label>
-      <label>Webhook URL
-        <input id="webhook" autocomplete="off" spellcheck="false" placeholder="https://discord.com/api/webhooks/…">
-      </label>
-      <div class="split end">
-        <label>Backfill
-          <select id="backfill">
-            <option value="0">Live only</option>
-            <option value="25">Last 25</option>
-            <option value="50">Last 50</option>
-            <option value="100" selected>Last 100</option>
-            <option value="250">Last 250</option>
-            <option value="500">Last 500</option>
-          </select>
-        </label>
-        <label class="check pad"><input id="threads" type="checkbox"> Include threads</label>
-      </div>
-      <p class="hint">The account only reads. Anything copied into Discord goes out through the webhook. One URL can cover every checked channel, or a channel can carry its own.</p>
-
-      <h2>Session</h2>
-      <ol id="log"></ol>
-    </section>
-
-    <section class="col">
-      <div class="col-head">
-        <h2>Channels</h2>
-        <button id="save" type="button" class="quiet">Save</button>
-      </div>
-      <div id="guilds" class="guilds"></div>
-      <div id="channels" class="channels"></div>
-    </section>
-
-    <section class="col transcript">
-      <div class="col-head">
-        <h2>Transcript</h2>
-        <input id="filter" placeholder="Find in view" autocomplete="off">
-      </div>
-      <div id="feed" class="feed"><p class="hint">Nothing here yet. Pick channels and start.</p></div>
-    </section>
-  </main>
+  <div id="term" tabindex="0">
+    <header>
+      <span class="name">mirror</span>
+      <span id="who">signed out</span>
+      <span id="status">idle</span>
+    </header>
+    <div id="screen"></div>
+    <footer id="hint"></footer>
+  </div>
   <script src="/static/app.js"></script>
 </body>
 </html>

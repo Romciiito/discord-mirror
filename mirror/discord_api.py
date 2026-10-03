@@ -129,7 +129,7 @@ class DiscordHTTP:
                     continue
                 text = await resp.text()
                 if resp.status >= 400:
-                    raise ApiError(resp.status, f"{method} {path} failed ({resp.status})")
+                    raise ApiError(resp.status, _fail_detail(method, path, text))
                 if not text:
                     return None
                 try:
@@ -201,6 +201,22 @@ class DiscordHTTP:
         if not isinstance(data, dict) or not data.get("url"):
             raise ApiError(500, "gateway url missing")
         return str(data["url"])
+
+
+def _fail_detail(method: str, path: str, text: str) -> str:
+    fallback = f"{method} {path} failed"
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return fallback
+    if not isinstance(payload, dict):
+        return fallback
+    if payload.get("captcha_sitekey") or payload.get("captcha_key"):
+        return "Discord asked for a captcha before it would create the server"
+    message = payload.get("message")
+    if message:
+        return str(message)[:160]
+    return fallback
 
 
 async def load_properties(session: aiohttp.ClientSession) -> dict[str, Any]:
