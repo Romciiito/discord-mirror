@@ -27,12 +27,17 @@ let tokenIndex = 0;
 let typing = null;
 let draft = "";
 let saveSeq = 0;
+let saveDone = 0;
 let pending = 0;
 let saveChain = Promise.resolve();
 let errorText = "";
 let busy = false;
 let depth = "guilds";
 let messages = [];
+let loaded = false;
+let late = null;
+let lateUsers = 0;
+let opens = 0;
 const fields = { token: "", service: "", account: "", keep: true };
 
 function ctx() {
@@ -316,7 +321,9 @@ function hookRows() {
 async function tokenAction() {
   const id = tokenRows()[tokenIndex];
   errorText = "";
+  if ((typing === "token" || typing === "service" || typing === "account") && id !== typing) commitToken();
   if (id === "token" || id === "service" || id === "account") {
+    if (typing === id) return;
     typing = id;
     draft = fields[id] || "";
     render();
@@ -381,7 +388,9 @@ async function signIn(body) {
 async function hookAction() {
   const id = hookRows()[hookIndex];
   errorText = "";
+  if (typing === "name" && id !== "name") await commitName();
   if (id === "name") {
+    if (typing === "name") return;
     typing = "name";
     draft = snap.options.dest_name || "mirror";
     render();
@@ -432,6 +441,11 @@ async function shiftHook(direction) {
 }
 
 function saveOptions() {
+  if (!loaded) {
+    errorText = "not connected yet";
+    render();
+    return saveChain;
+  }
   const seq = ++saveSeq;
   pending += 1;
   const run = async () => {
@@ -456,6 +470,7 @@ function saveOptions() {
       errorText = error.message;
     } finally {
       pending -= 1;
+      saveDone += 1;
     }
     render();
   };
@@ -696,6 +711,11 @@ async function halt() {
 }
 
 function rememberMessage(message) {
+  place(message);
+  if (late) late.push(message);
+}
+
+function place(message) {
   const index = messages.findIndex((item) => item.id === message.id);
   if (index >= 0) messages[index] = message;
   else messages.push(message);
@@ -704,17 +724,34 @@ function rememberMessage(message) {
 
 function connect() {
   const source = new EventSource("/api/events");
-  let opens = 0;
   source.onopen = async () => {
     opens += 1;
-    if (opens === 1) return;
+    if (opens === 1 && loaded) return;
     const seq = saveSeq;
+    const done = saveDone;
+    lateUsers += 1;
+    if (!late) late = [];
     try {
       const [snapshot, feed] = await Promise.all([api("/api/state"), api("/api/feed")]);
-      if (!pending && seq === saveSeq) apply(snapshot);
+      if (!pending && seq === saveSeq && done === saveDone) {
+        if (!loaded) errorText = "";
+        apply(snapshot);
+        loaded = true;
+      }
+      const held = late.slice();
       messages = feed.messages || [];
+      held.forEach(place);
       if (!typing) render();
-    } catch {}
+    } catch {
+    } finally {
+      lateUsers -= 1;
+      if (!lateUsers) late = null;
+    }
+  };
+  source.onerror = () => {
+    if (source.readyState !== source.CLOSED) return;
+    source.close();
+    setTimeout(connect, 2000);
   };
   source.onmessage = (event) => {
     let item;
@@ -754,6 +791,7 @@ try {
   const [snapshot, feed] = await Promise.all([api("/api/state"), api("/api/feed")]);
   apply(snapshot);
   messages = feed.messages || [];
+  loaded = true;
 } catch (error) {
   errorText = error.message;
 }

@@ -448,6 +448,7 @@ class Engine:
         rows = [row for row in self.store.selection() if row["enabled"]]
         if not rows:
             raise ApiError(400, "select servers first")
+        was_running = self.running
         if any(not str(row.get("webhook_url") or "").strip() for row in rows):
             await self._provision(rows)
             rows = [row for row in self.store.selection() if row["enabled"] and str(row.get("webhook_url") or "").strip()]
@@ -457,8 +458,9 @@ class Engine:
         if not options["mirror"]:
             self.store.set_options(options["backfill"], options["include_threads"], "", True, options["dest_name"])
             options = self.store.options()
-        if self.running:
-            await self.refresh()
+        if was_running:
+            if self.running:
+                await self.refresh()
             return
         self._index(rows, options["include_threads"])
         if options["include_threads"]:

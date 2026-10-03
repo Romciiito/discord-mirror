@@ -87,7 +87,6 @@ class ProvisionTests(unittest.TestCase):
         )
         self.assertEqual(plan["channels"][0]["name"], "channel")
 
-
     def test_unicode_names_keep_letters(self) -> None:
         names = ["日本語 チャット", "Привет Мир", "Café_Lounge", "!!!", "ü" * 150]
         plan = destination_layout(
@@ -135,6 +134,7 @@ class ProvisionTests(unittest.TestCase):
             self.assertTrue(1 <= len(name) <= 80)
             self.assertNotIn(name.casefold(), {"everyone", "here"})
             self.assertEqual(webhook_name(name), name)
+
 
 if __name__ == "__main__":
     unittest.main()

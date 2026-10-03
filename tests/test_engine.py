@@ -487,6 +487,31 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("need start/resume", " ".join(self.notes()))
             await self.engine.stop()
 
+    async def test_stop_during_running_start_is_respected(self) -> None:
+        self.engine.http = FakeHTTP()
+        self.store.set_dest_guild("500")
+        self.store.replace_selection([row("10", HOOK)])
+        with mock.patch.object(engine_mod, "Gateway", FakeGateway):
+            await self.engine.start()
+            self.assertTrue(self.engine.running)
+            self.store.replace_selection([row("10"), row("11", name="lobby")])
+            gate = asyncio.Event()
+            entered = asyncio.Event()
+
+            async def held(seconds: float) -> None:
+                entered.set()
+                await gate.wait()
+
+            self.engine._wait = held
+            task = asyncio.create_task(self.engine.start())
+            await asyncio.wait_for(entered.wait(), 1)
+            await self.engine.stop()
+            self.assertFalse(self.engine.running)
+            gate.set()
+            await asyncio.wait_for(task, 1)
+            self.assertFalse(self.engine.running)
+            self.assertEqual(len(FakeGateway.made), 1)
+
     async def test_refresh_notes_missing_webhooks(self) -> None:
         self.engine.http = FakeHTTP()
         self.store.replace_selection([row("10", HOOK)])
