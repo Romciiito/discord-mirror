@@ -53,6 +53,25 @@ pip install -r requirements.txt
 python -m mirror
 ```
 
+## Tests
+
+Unit tests:
+
+```sh
+python -m unittest tests.test_core tests.test_store tests.test_keychain tests.test_provision tests.test_relay tests.test_gateway tests.test_engine tests.test_web
+node --test tests/test_flow.mjs
+```
+
+End-to-end tests start the server on a free port with a temporary data directory and drive the page in headless Chromium. They need Node 22:
+
+```sh
+npm install
+npx playwright install chromium
+npm run e2e
+```
+
+On Linux, `npx playwright install --with-deps chromium` also installs the system libraries Chromium needs.
+
 ## Account
 
 Paste a user token, or use a keychain service and account.
