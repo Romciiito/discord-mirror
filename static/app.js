@@ -102,6 +102,13 @@ function rowButton(label, on, locked, activate) {
 }
 
 function render() {
+  if (flow.screen === "webhooks") {
+    if (typing && typing !== "name") typing = null;
+  } else if (flow.screen === "token") {
+    if (typing && typing !== "token" && typing !== "service" && typing !== "account") typing = null;
+  } else {
+    typing = null;
+  }
   hintNode.textContent = hint();
   screen.replaceChildren();
   if (flow.screen === "welcome") {
@@ -520,7 +527,13 @@ async function press(key) {
 }
 
 function tokenKey(key) {
-  if (typing) return;
+  if (typing === "token" || typing === "service" || typing === "account") {
+    if (key === "Escape" || key === "Enter") {
+      typing = null;
+      render();
+    }
+    return;
+  }
   const rows = tokenRows();
   if (key === "ArrowDown") tokenIndex = (tokenIndex + 1) % rows.length;
   else if (key === "ArrowUp") tokenIndex = (tokenIndex - 1 + rows.length) % rows.length;
@@ -536,7 +549,14 @@ function tokenKey(key) {
 }
 
 async function hookKey(key) {
-  if (typing) return;
+  if (typing === "name") {
+    if (key === "Escape" || key === "Enter") {
+      typing = null;
+      if (key === "Enter") return saveOptions();
+      render();
+    }
+    return;
+  }
   const rows = hookRows();
   if (key === "ArrowDown") hookIndex = (hookIndex + 1) % rows.length;
   else if (key === "ArrowUp") hookIndex = (hookIndex - 1 + rows.length) % rows.length;
