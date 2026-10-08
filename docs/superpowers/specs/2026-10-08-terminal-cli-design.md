@@ -114,7 +114,21 @@ headers as `DiscordHTTP`) answered **403 `{"code": 10008, "message": "Unknown
 Message"}`**. `copy_guild` (`mirror/engine.py:324`) would fail the same way.
 Still documented and used by `_wire_copy`: Create Guild Channel
 (`guild.mdx:893`) and Create Webhook (`webhook.mdx`). Decisions 9b and 9c are
-therefore reopened; see the round below.
+therefore reopened and replaced (owner, 2026-10-09):
+
+- **9b'.** A copy is a server the owner creates and names in Discord. Enter on a
+  ticked source server lists the servers the owner **owns** (`owner` flag from
+  `/users/@me/guilds`); the owner picks the target and Mando creates the readable
+  categories, channels and webhooks of the source inside it (Create Guild Channel,
+  Create Webhook). 9c (name prompt in the CLI) is dropped.
+- **9i.** In the owner's server Mando only adds, never deletes: the leftover
+  cleanup in `_wire_copy` (`mirror/engine.py:418-426`) goes. A channel with the
+  same name as the source channel is reused and only gets a webhook.
+- **9j.** Several source servers may share one target server. When a target is
+  shared, each source gets its own category named after the source.
+- **Before implementation:** a second probe on one empty server the owner owns
+  measures that his token may create a category, a channel and a webhook there
+  (and delete what the probe created).
 
 ## Decision 10: "identical format" (decided 2026-10-09)
 
