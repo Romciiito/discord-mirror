@@ -43,7 +43,7 @@ facts carry the file and line they were measured at (base `main` @ `0416376`).
 7. **Everything user-facing and in the repo is English.**
 8. **The token fix ships first, separately.** It is done: the plan is in
    `docs/superpowers/plans/2026-10-08-token-input.md` and the commits run from
-   `164b830` to `b28cbc1`.
+   `24a28b2` to `aa6f8b3`.
    - **8b:** validity is checked right after Enter in the token field. The CLI
      shows `✓ token works – signed in as <name>` / `✗ token rejected by Discord` /
      `✗ could not reach Discord (<reason>)`.
@@ -129,23 +129,24 @@ Our risks (the proposal is separate issues; the owner has not decided yet):
 - **R5.** A live message is dropped after 5 failed attempts. The 6000-character
   embed total is not enforced. The `relayed` table is never pruned.
 
-## Small open points from the token fix
+## Small points from the token fix (closed)
 
-- **Hint text.** While the token is being edited, the hint still says "enter
-  keeps it, esc cancels the edit". The proposal is "enter or esc keeps it".
-- **Commit authors.** `3bf1a4b`, `bdaae78` and `ede6275` carry the wrong author.
-  The owner approved rewriting them to
+- **Hint text.** The owner chose "enter or esc keeps it". It is shown only while
+  the token field is open; the keychain fields keep "enter keeps it, esc cancels
+  the edit" because Esc still cancels there. Fixed test-first in `ccadd83`.
+- **Commit authors.** Rewritten to
   `Romciiito <80603298+Romciiito@users.noreply.github.com>` with a force-push.
+  The branch is now `feat/terminal-cli`.
 
 ## Gate review of the token fix — NEEDS_FIXES
 
-Reviewed `ede6275..b28cbc1`. Unit 124/124, flow 12/12, e2e 31/31.
+Reviewed `c9b48a6..aa6f8b3` (cloud hashes before the author rewrite: `ede6275..b28cbc1`). Unit 124/124, flow 12/12, e2e 31/31.
 
 - **important:** `static/app.js:93`. While the token field is open, `hint()` still
   says "esc cancels the edit", but `escapeToken` (`app.js:379-382`) commits the
   draft. Clearing the field and pressing Esc wipes a saved token. This was
   reproduced with a Playwright probe. The fix is a token branch in `hint()`;
-  the wording is the owner's call.
+  the wording is the owner's call. Fixed in `ccadd83`; not re-gated yet.
 - **nit:** `Engine.check_token` has no `session is None` guard, unlike
   `use_token`. No caller exists yet.
 - **nit:** `check_token` re-raises 4xx errors other than 401/403, including a 429
