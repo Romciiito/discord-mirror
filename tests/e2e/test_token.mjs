@@ -4,6 +4,7 @@ import { chosen, click, harness, row, said, token, until } from "./server.mjs";
 
 const h = harness();
 const EDIT = "enter keeps it, esc cancels the edit";
+const TOKEN_EDIT = "enter or esc keeps it";
 const IDLE = "up and down move, enter opens, esc back";
 const TEN = "abcdefghij";
 const PASTED = "fake-token_for.tests_only-0123456789.abcdefghij_klmnop";
@@ -97,6 +98,7 @@ test("escape and enter keep the token", { timeout: 20000 }, async (t) => {
   await row(page, 0, "1  token");
   await page.keyboard.press("1");
   await editing(page, "token ");
+  await said(page, "hint", TOKEN_EDIT);
   assert.equal(await page.getAttribute("#screen .row input", "type"), "password");
   await paste(page, PASTED);
   await page.keyboard.press("Escape");

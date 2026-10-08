@@ -90,6 +90,7 @@ function guildSelected(guildId) {
 }
 
 function hint() {
+  if (typing === "token") return "enter or esc keeps it";
   if (typing) return "enter keeps it, esc cancels the edit";
   if (flow.screen === "welcome") return "press any key";
   if (flow.screen === "exit") return "press any key";

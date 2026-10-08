@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { chosen, click, err, harness, menu, row, said, settings, title, token, until } from "./server.mjs";
 
 const h = harness();
-const EDIT = "enter keeps it, esc cancels the edit";
+const TOKEN_EDIT = "enter or esc keeps it";
 
 test("select servers is locked without a token", { timeout: 20000 }, async (t) => {
   const page = await h.page(t);
@@ -36,7 +36,7 @@ test("a short token shows the server error", { timeout: 20000 }, async (t) => {
   await page.keyboard.press("1");
   await until(page, () => !!document.querySelector("#screen .row input"));
   assert.equal(await page.getAttribute("#screen .row input", "type"), "password");
-  await said(page, "hint", EDIT);
+  await said(page, "hint", TOKEN_EDIT);
   await page.keyboard.type("abc");
   await page.keyboard.press("Enter");
   await row(page, 0, "1  token  set");
