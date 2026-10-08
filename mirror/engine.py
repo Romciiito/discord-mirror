@@ -156,6 +156,29 @@ class Engine:
         self.status = "ready"
         return self.user
 
+    async def check_token(self, raw: str) -> dict[str, Any]:
+        token = clean_token(raw)
+        if len(token) < 40:
+            raise ApiError(400, "token looks too short")
+        if self._properties is None:
+            self._properties = await load_properties(self.session)
+        try:
+            me = await DiscordHTTP(self.session, token, self._properties).me()
+        except ApiError as exc:
+            if exc.status in (401, 403):
+                return {"result": "rejected"}
+            if exc.status >= 500:
+                return {"result": "unreachable", "reason": str(exc)}
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            return {"result": "unreachable", "reason": str(exc) or "network error"}
+        user = {
+            "id": str(me.get("id") or ""),
+            "username": me.get("username") or "",
+            "global_name": me.get("global_name") or "",
+        }
+        return {"result": "works", "user": user}
+
     async def forget(self) -> None:
         await self._cancel_restore()
         await self.stop()

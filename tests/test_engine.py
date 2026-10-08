@@ -106,8 +106,8 @@ class FakeHTTP:
 
 
 class FakeResp:
-    def __init__(self, body: str) -> None:
-        self.status = 200
+    def __init__(self, body: str, status: int = 200) -> None:
+        self.status = status
         self.body = body
 
     async def text(self) -> str:
@@ -124,15 +124,18 @@ class FakeResp:
 
 
 class FakeDiscord:
-    def __init__(self) -> None:
+    def __init__(self, answer: FakeResp | BaseException | None = None) -> None:
         self.sent: list[tuple[str, str]] = []
+        self.answer = answer or FakeResp('{"id": "7", "username": "ada"}')
 
     def get(self, url: str, **kw: Any) -> FakeResp:
         return FakeResp('{"versions": [{"version": "131.0.0.0"}]}')
 
     def request(self, method: str, url: str, **kw: Any) -> FakeResp:
         self.sent.append((url, kw["headers"]["Authorization"]))
-        return FakeResp('{"id": "7", "username": "ada"}')
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        return self.answer
 
     async def close(self) -> None:
         pass
@@ -384,6 +387,50 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         await self.engine.use_token(' "' + TOKEN + '"\n', True)
         self.assertEqual(discord.sent, [("https://discord.com/api/v9/users/@me", TOKEN)])
         self.assertEqual(self.store.token(), TOKEN)
+
+    async def test_checked_token_reports_the_user_and_keeps_nothing(self) -> None:
+        discord = FakeDiscord()
+        self.engine.session = discord
+        report = await self.engine.check_token(' "' + TOKEN + '"\n')
+        self.assertEqual(report, {"result": "works", "user": {"id": "7", "username": "ada", "global_name": ""}})
+        self.assertEqual(discord.sent, [("https://discord.com/api/v9/users/@me", TOKEN)])
+        self.assertEqual(self.store.token(), "")
+        self.assertIsNone(self.engine.snapshot()["user"])
+        self.assertFalse(self.engine.snapshot()["has_token"])
+
+    async def test_checked_token_too_short_is_refused_before_discord(self) -> None:
+        discord = FakeDiscord()
+        self.engine.session = discord
+        for raw in ("  ", '"MTIz.Gx_y-Z"'):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ApiError) as caught:
+                    await self.engine.check_token(raw)
+                self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(discord.sent, [])
+
+    async def test_checked_token_refused_by_discord_is_rejected(self) -> None:
+        for answer in (
+            FakeResp('{"message": "401: Unauthorized"}', 401),
+            FakeResp('{"message": "Forbidden"}', 403),
+            FakeResp("{}"),
+        ):
+            with self.subTest(status=answer.status, body=answer.body):
+                self.engine.session = FakeDiscord(answer)
+                self.assertEqual(await self.engine.check_token(TOKEN), {"result": "rejected"})
+
+    async def test_checked_token_on_discord_5xx_is_unreachable(self) -> None:
+        self.engine.session = FakeDiscord(FakeResp("bad gateway", 502))
+        report = await self.engine.check_token(TOKEN)
+        self.assertEqual(report, {"result": "unreachable", "reason": "GET /users/@me failed"})
+
+    async def test_checked_token_on_network_error_is_unreachable(self) -> None:
+        for error, reason in (
+            (aiohttp.ClientConnectionError("connection refused"), "connection refused"),
+            (asyncio.TimeoutError(), "network error"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                self.engine.session = FakeDiscord(error)
+                self.assertEqual(await self.engine.check_token(TOKEN), {"result": "unreachable", "reason": reason})
 
     async def test_update_after_restart_edits_relay(self) -> None:
         self.store.set_options(0, False, "", True)
