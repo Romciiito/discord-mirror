@@ -126,9 +126,12 @@ therefore reopened and replaced (owner, 2026-10-09):
   same name as the source channel is reused and only gets a webhook.
 - **9j.** Several source servers may share one target server. When a target is
   shared, each source gets its own category named after the source.
-- **Before implementation:** a second probe on one empty server the owner owns
-  measures that his token may create a category, a channel and a webhook there
-  (and delete what the probe created).
+- **Measured 2026-10-09 on a fresh server the owner created in Discord:**
+  `/users/@me/guilds` returns `owner: true` for it (and `false` for the 27 others);
+  `POST /guilds/{id}/channels` type 4 -> 201, type 0 with `parent_id` and `topic`
+  -> 201, `POST /channels/{id}/webhooks` -> 200 with a token, `DELETE /webhooks/{id}`
+  -> 204, `DELETE /channels/{id}` -> 200 twice. The server's own channels were
+  untouched. 9b' stands on measured calls.
 
 ## Decision 10: "identical format" (decided 2026-10-09)
 
