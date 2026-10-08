@@ -370,6 +370,12 @@ function cancelEdit() {
   render();
 }
 
+function typeToken(text) {
+  typing = "token";
+  draft = text;
+  render();
+}
+
 function escapeToken() {
   if (typing === "token") commitToken();
   else cancelEdit();
@@ -556,7 +562,7 @@ async function selectAllChannels() {
   await saveSelection();
 }
 
-async function press(key) {
+async function press(key, plain) {
   if (busy) return;
   if (flow.screen === "welcome") {
     flow = reduce(flow, { key }, ctx());
@@ -594,12 +600,12 @@ async function press(key) {
     render();
     return;
   }
-  if (flow.screen === "token") return tokenKey(key);
+  if (flow.screen === "token") return tokenKey(key, plain);
   if (flow.screen === "webhooks") return hookKey(key);
   if (flow.screen === "servers") return serverKey(key);
 }
 
-function tokenKey(key) {
+function tokenKey(key, plain) {
   if (typing === "token" || typing === "service" || typing === "account") {
     if (key === "Enter") commitToken();
     else if (key === "Escape") escapeToken();
@@ -615,7 +621,7 @@ function tokenKey(key) {
   } else if (key >= "1" && key <= String(rows.length)) {
     tokenIndex = Number(key) - 1;
     return tokenAction();
-  }
+  } else if (plain && rows[tokenIndex] === "token") return typeToken(key);
   render();
 }
 
@@ -785,7 +791,13 @@ document.addEventListener("keydown", (event) => {
   if (plain || ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Enter", "Escape"].includes(event.key)) {
     event.preventDefault();
   }
-  press(event.key);
+  press(event.key, plain);
+});
+
+document.addEventListener("paste", (event) => {
+  if (busy || flow.screen !== "token" || typing || tokenRows()[tokenIndex] !== "token") return;
+  event.preventDefault();
+  typeToken(event.clipboardData.getData("text"));
 });
 
 term.addEventListener("click", () => {

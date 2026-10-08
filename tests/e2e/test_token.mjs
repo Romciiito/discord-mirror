@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { click, harness, row, said, token, until } from "./server.mjs";
+import { chosen, click, harness, row, said, token, until } from "./server.mjs";
 
 const h = harness();
 const EDIT = "enter keeps it, esc cancels the edit";
@@ -118,6 +118,24 @@ test("escape and enter keep the token", { timeout: 20000 }, async (t) => {
   await page.keyboard.press("1");
   await editing(page, "token ");
   assert.equal(await page.inputValue("#screen .row input"), "zzz");
+});
+
+test("typing on the closed token row opens it with the text", { timeout: 20000 }, async (t) => {
+  const page = await h.page(t);
+  await token(page, h.srv.base);
+  await chosen(page, "1  token");
+  await page.keyboard.type("MTIz.Gx_y-Z");
+  await editing(page, "token ");
+  assert.equal(await page.inputValue("#screen .row input"), "MTIz.Gx_y-Z");
+});
+
+test("pasting on the closed token row opens it with the text", { timeout: 20000 }, async (t) => {
+  const page = await h.page(t);
+  await token(page, h.srv.base);
+  await chosen(page, "1  token");
+  await paste(page, PASTED);
+  await editing(page, "token ");
+  assert.equal(await page.inputValue("#screen .row input"), PASTED);
 });
 
 test("keep on this machine toggles", { timeout: 20000 }, async (t) => {
