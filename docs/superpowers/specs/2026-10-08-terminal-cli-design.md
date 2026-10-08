@@ -65,47 +65,99 @@ the server received an empty token. Underscores were never the cause. Whether
 Discord accepts a given token cannot be measured from the cloud container, because
 Discord answers it with 403.
 
-## Open: owner requirement for server selection (decision 9 pending)
+## Decision 9: server selection (decided 2026-10-09)
 
-The owner's words, translated:
+Facts measured on `feat/terminal-cli` @ `b213deb` before deciding:
 
-- In Select servers, **Enter ticks a whole server** and the **right arrow
-  opens it** to tick single channels. This works today; the CLI keeps it.
-- **A ticked whole server** offers to create a new server under a name the
-  owner chooses. It spawns the original's categories and channels, readable ones
-  only.
-  - This already exists as `Engine.copy_guild` (`mirror/engine.py:259-334`,
-    `POST /api/guilds/{id}/copy`).
-  - The new server's name is taken from the source and cannot be chosen.
-  - The old page never offered it.
-- **A single ticked channel** asks for a webhook URL of the owner's own channel.
-  Messages are posted there in the same format as the original: embeds, visuals
-  and images.
-  - The backend stores a per-channel `webhook_url` (`mirror/engine.py:425`).
-  - The old page never let anyone enter it.
-- **Today's default is different.** Everything selected goes into ONE shared
-  mirror server named `dest_name` (default "mirror"), with a category per source
-  server (`Engine._provision`, `mirror/engine.py:489`).
-- **Still to decide:** does the shared-mirror mode go away? And what does a server
-  with only some channels ticked do?
+- `copy_guild` (`mirror/engine.py:282-357`) names the new server after the source
+  (`:316`), creates it at once (`POST /guilds`, `:324`) and starts the mirror.
+- `copy_guild` calls `store.replace_selection(rows)` (`:344`) and the store keeps a
+  single `dest_guild_id` (`mirror/store.py:204`), so copying a second server wipes
+  the first copy's selection.
+- Rows without a `webhook_url` are provisioned into the shared `dest_name` server
+  at start (`_start` -> `_provision`, `mirror/engine.py:480-481, 512`).
+- `global_webhook` is dead: rows without a webhook are provisioned first
+  (`:480-482`) and start clears the option while `mirror` is false (`:486-487`).
+- A per-channel `webhook_url` is stored (`save_setup`, `:448`) but no screen lets
+  anyone enter it.
 
-## Open: "identical format" (decision 10 pending)
+Decisions (owner):
 
-Today's relay changes messages in these ways (`mirror/relay.py`):
+- **9a.** The shared "mirror" server goes away: `dest_name`, `_provision`,
+  `destination_layout` and the "server name" item in webhook settings are removed.
+- **9b.** Every ticked source server gets its own copy; several copies can run at
+  once. `dest_guild_id` becomes a per-source-server link, not a global option.
+- **9c.** Enter on a server asks for the copy's name (prefilled with the source
+  name) and creates the server right away, as `copy_guild` does today.
+- **9d.** `global_webhook` is removed. A single ticked channel must have its own
+  webhook URL.
+- **9e.** When a server is unticked, Mando stops mirroring it and keeps the copy;
+  the CLI says "copy <name> kept, delete it in Discord if you do not need it".
+  Delete Guild is not in the current Discord docs, so Mando does not delete.
+- **9f.** A server with only some channels ticked has no copy; each ticked
+  channel needs a webhook URL, otherwise Start refuses with "#x has no webhook"
+  and the CLI jumps to that row.
 
-- A reply becomes a text line "replying to X: …" (`relay.py:72-87`).
-- Stickers are sent as names only (`relay.py:132-137`).
-- More than 10 attachments, or more than 10 MB in total, go out as links
-  (`relay.py:17-19`).
-- Embeds are filtered by type and clipped (`relay.py:90-129`).
-- Author names containing "discord" or "clyde" get a dot added
-  (`relay.py:27-43`).
-- When several channels share one webhook, a "server / #channel" prefix is added
-  (`relay.py:230-235`).
+**Pending measurement (blocks 9b/9c).** The Discord changelog of 2025-04-15,
+"Deprecating Guild Creation by Apps", says `POST /guilds` "will no longer be
+available" for applications from 2025-07-15, and `developers/resources/guild.mdx`
+on `main` has no Create Guild or Delete Guild section any more. Mando calls
+`POST /guilds` with a user token (`mirror/engine.py:324`); whether that still works
+is not documented. The owner runs a one-off probe (create `mando-probe-<time>`,
+delete it) from his machine; the result decides whether the copy feature stays as
+designed.
 
-What Discord webhooks allow to change here is **not verified yet**.
+## Decision 10: "identical format" (decided 2026-10-09)
 
-## Open: engine risks found while comparing with stegripe/discord-chat-mirror
+Facts from `discord/discord-api-docs` (`main`, read 2026-10-09; file:line in the
+`developers/` tree):
+
+- Execute Webhook has no `message_reference` and no `sticker_ids`: a webhook
+  message cannot be a real reply and cannot carry a sticker
+  (`resources/webhook.mdx`, params table).
+- Webhook embeds are always `rich`; `type`, `provider`, `video` and image
+  `height`/`width`/`proxy_url` cannot be set (`resources/webhook.mdx:259`).
+- At most 10 embeds, and at most 6000 characters across all embeds, else 400
+  (`resources/message.mdx:621`).
+- Upload limit: 20 MiB per file by default, higher with Nitro or server boost
+  (`reference.mdx:438`). The number of files per webhook request and a total
+  request size for webhooks are not documented; 25 MiB is stated for Create
+  Message only.
+- Attachment CDN URLs are signed and expire (`reference.mdx:413-431`); the
+  lifetime is not stated. Sticker images are on unsigned CDN paths:
+  `stickers/<id>.png` for PNG/APNG, `media.discordapp.net/stickers/<id>.gif` for
+  GIF; Lottie has no image (`reference.mdx`, image formatting table).
+- `clyde`/`discord` are forbidden in a webhook's name at creation
+  (`resources/webhook.mdx:127`); for the per-message `username` override nothing
+  is documented.
+- Edit Webhook Message: "All parameters to this endpoint are optional and
+  nullable" (`resources/webhook.mdx:315`); what an omitted `embeds` key does is
+  not documented.
+
+Today's relay (`mirror/relay.py`) measured against that:
+
+- Reply as a text line (`relay.py:72-87`): forced, no webhook reply exists.
+- Embed filter and clipping (`relay.py:90-130`): forced by the rich-only rule and
+  the limits; the 6000 total is missing (issue #8).
+- Stickers as names only (`relay.py:132-137`), attachments over 10 files / 10 MB
+  as links (`relay.py:18-19, 187-207`), the name dot (`relay.py:27-43`) and the
+  "server / #channel" prefix (`relay.py:230-235`): see decisions below.
+
+Decisions (owner):
+
+- **10a.** Stickers: PNG, APNG and GIF are sent as images from the CDN, Lottie
+  keeps the name. This is tested on a real webhook before anyone else uses it.
+- **10b.** Files are re-uploaded 1:1 up to the documented 20 MiB per file (the
+  10 MB threshold goes up). A file over the limit is replaced by one line:
+  "This message has a file over the upload limit: <name> (<size>)", followed by a
+  link to the original message (`https://discord.com/channels/<guild>/<channel>/<message>`,
+  permanent) and the attachment's download link (signed, expires).
+- **10c.** The dot in author names containing "discord" or "clyde" stays. It is
+  the safe choice while the per-message rule is undocumented.
+- **10d.** The "server / #channel" prefix stays and applies only when two channels
+  share the same webhook URL.
+
+## Engine risks found while comparing with stegripe/discord-chat-mirror (filed 2026-10-09)
 
 The comparison was made against stegripe commit `ba0a5f9`. stegripe only mirrors
 new messages; it has no edits, deletes, backfill, threads, retries or reconnect
@@ -116,17 +168,17 @@ handler. It has four things we lack:
 - sticker images;
 - one channel fanned out to many webhooks.
 
-Our risks (the proposal is separate issues; the owner has not decided yet):
+Our risks, filed as GitHub issues with line numbers measured on `b213deb`:
 
-- **R1.** `on_dispatch` is awaited inside the gateway read loop
+- **R1 (#4).** `on_dispatch` is awaited inside the gateway read loop
   (`gateway.py:294`). A long relay wait can miss the heartbeat ack, and the
   heartbeat check (`gateway.py:222-225`) then drops the socket. The code path is
   verified; the behaviour is inference.
-- **R2.** A failed webhook delete still drops the relay row (`engine.py:802-803`).
-- **R3.** An edit that removes all embeds sends no `embeds` key
+- **R2 (#5).** A failed webhook delete still drops the relay row (`engine.py:802-803`).
+- **R3 (#6).** An edit that removes all embeds sends no `embeds` key
   (`relay.py:254-255`), so old embeds probably stay. The Discord side is inference.
-- **R4.** `THREAD_CREATE` does not resubscribe (`engine.py:719-726`).
-- **R5.** A live message is dropped after 5 failed attempts. The 6000-character
+- **R4 (#7).** `THREAD_CREATE` does not resubscribe (`engine.py:719-726`).
+- **R5 (#8).** A live message is dropped after 5 failed attempts. The 6000-character
   embed total is not enforced. The `relayed` table is never pruned.
 
 ## Small points from the token fix (closed)
