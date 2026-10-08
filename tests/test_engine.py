@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ from mirror.store import Store
 
 HOOK = "https://discord.com/api/webhooks/111/aaa"
 HOOK_B = "https://discord.com/api/webhooks/222/bbb"
+TOKEN = "fake-token_for.tests_only-0123456789.abcdefghij_klmnop"
 
 OLD_SCHEMA = """
 CREATE TABLE account (id INTEGER PRIMARY KEY CHECK (id = 1), token TEXT, keep INTEGER NOT NULL DEFAULT 0);
@@ -101,6 +103,39 @@ class FakeHTTP:
 
     async def active_threads(self, guild_id: str) -> list[dict]:
         return []
+
+
+class FakeResp:
+    def __init__(self, body: str) -> None:
+        self.status = 200
+        self.body = body
+
+    async def text(self) -> str:
+        return self.body
+
+    async def json(self, content_type: Any = None) -> Any:
+        return json.loads(self.body)
+
+    async def __aenter__(self) -> FakeResp:
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+
+class FakeDiscord:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    def get(self, url: str, **kw: Any) -> FakeResp:
+        return FakeResp('{"versions": [{"version": "131.0.0.0"}]}')
+
+    def request(self, method: str, url: str, **kw: Any) -> FakeResp:
+        self.sent.append((url, kw["headers"]["Authorization"]))
+        return FakeResp('{"id": "7", "username": "ada"}')
+
+    async def close(self) -> None:
+        pass
 
 
 class FakeGateway:
@@ -342,6 +377,13 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         await self.engine.forget()
         self.assertTrue(task.cancelled())
         self.assertIsNone(self.engine._restore_task)
+
+    async def test_pasted_token_is_cleaned_before_check_and_store(self) -> None:
+        discord = FakeDiscord()
+        self.engine.session = discord
+        await self.engine.use_token(' "' + TOKEN + '"\n', True)
+        self.assertEqual(discord.sent, [("https://discord.com/api/v9/users/@me", TOKEN)])
+        self.assertEqual(self.store.token(), TOKEN)
 
     async def test_update_after_restart_edits_relay(self) -> None:
         self.store.set_options(0, False, "", True)

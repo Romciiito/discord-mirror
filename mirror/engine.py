@@ -10,7 +10,7 @@ import aiohttp
 
 from .access import TEXT_TYPES, readable_plan
 from .provision import destination_layout, webhook_name
-from .discord_api import ApiError, DiscordHTTP, clean_webhook, load_properties, webhook_parts
+from .discord_api import ApiError, DiscordHTTP, clean_token, clean_webhook, load_properties, webhook_parts
 from .gateway import Gateway
 from .relay import Relay, safe_embeds, view_from_message
 from .store import Store
@@ -137,7 +137,7 @@ class Engine:
 
     async def use_token(self, token: str, keep: bool) -> dict[str, Any]:
         await self._cancel_restore()
-        token = token.strip()
+        token = clean_token(token)
         if len(token) < 40:
             raise ApiError(400, "token looks too short")
         if self.session is None:
