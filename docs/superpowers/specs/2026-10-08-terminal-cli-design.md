@@ -97,6 +97,12 @@ Decisions (owner):
 - **9f.** A server with only some channels ticked has no copy; each ticked
   channel needs a webhook URL, otherwise Start refuses with "#x has no webhook"
   and the CLI jumps to that row.
+- **9g.** In the channel list, Enter ticks a channel and opens the webhook URL row
+  at once; Esc without a URL unticks it again. The URL is checked on entry with
+  the existing `clean_webhook`.
+- **9h.** Upgrade keeps the selection. The old `dest_name` and `dest_guild_id`
+  columns are ignored, channels without a webhook follow 9f, and the old shared
+  server on Discord is left alone (as in 9e).
 
 **Pending measurement (blocks 9b/9c).** The Discord changelog of 2025-04-15,
 "Deprecating Guild Creation by Apps", says `POST /guilds` "will no longer be
