@@ -1,5 +1,8 @@
 # Terminal CLI and token input: decisions so far
 
+The spec synthesised from these decisions is GitHub issue #9 (`ready-for-agent`).
+Glossary: `CONTEXT.md`. Decision record: `docs/adr/0001-copies-live-in-servers-the-owner-creates.md`.
+
 Brainstorming record, 2026-10-08. Every decision below was made by the owner;
 facts carry the file and line they were measured at (base `main` @ `0416376`).
 
