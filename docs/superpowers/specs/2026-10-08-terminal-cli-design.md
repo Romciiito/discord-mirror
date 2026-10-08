@@ -104,14 +104,17 @@ Decisions (owner):
   columns are ignored, channels without a webhook follow 9f, and the old shared
   server on Discord is left alone (as in 9e).
 
-**Pending measurement (blocks 9b/9c).** The Discord changelog of 2025-04-15,
-"Deprecating Guild Creation by Apps", says `POST /guilds` "will no longer be
-available" for applications from 2025-07-15, and `developers/resources/guild.mdx`
-on `main` has no Create Guild or Delete Guild section any more. Mando calls
-`POST /guilds` with a user token (`mirror/engine.py:324`); whether that still works
-is not documented. The owner runs a one-off probe (create `mando-probe-<time>`,
-delete it) from his machine; the result decides whether the copy feature stays as
-designed.
+**Measured 2026-10-09: Mando cannot create servers.** The Discord changelog of
+2025-04-15, "Deprecating Guild Creation by Apps", retired `POST /guilds` for
+applications from 2025-07-15; `developers/resources/guild.mdx` on `main` has no
+Create Guild or Delete Guild section and `guild-template.mdx` has no Create Guild
+From Guild Template section. A one-off probe from the owner's machine with the
+owner's user token (`POST /guilds` with `{"name": "mando-probe-<time>"}`, the same
+headers as `DiscordHTTP`) answered **403 `{"code": 10008, "message": "Unknown
+Message"}`**. `copy_guild` (`mirror/engine.py:324`) would fail the same way.
+Still documented and used by `_wire_copy`: Create Guild Channel
+(`guild.mdx:893`) and Create Webhook (`webhook.mdx`). Decisions 9b and 9c are
+therefore reopened; see the round below.
 
 ## Decision 10: "identical format" (decided 2026-10-09)
 
