@@ -14,13 +14,15 @@ macOS and Linux:
 sh start.sh
 ```
 
-Windows: double-click `start.bat`. In PowerShell:
+Windows: double-click `start.bat`. It does not need PowerShell. If Windows shows "Windows protected your PC", choose More info, then Run anyway.
+
+`start.ps1` does the same from PowerShell. Windows blocks scripts that came from a downloaded ZIP, so unblock the folder once:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File start.ps1
+Get-ChildItem -Recurse | Unblock-File
 ```
 
-With PowerShell 7 use `pwsh -File start.ps1`.
+Then run `pwsh -File start.ps1`, or `powershell -ExecutionPolicy Bypass -File start.ps1` without unblocking.
 
 Each script creates `.venv`, installs the requirements the first time and whenever `requirements.txt` changes, and starts the server. On Windows the scripts find Python through the `py -3` launcher, then `python`, and open the page by themselves. Otherwise open [http://127.0.0.1:8765](http://127.0.0.1:8765).
 
