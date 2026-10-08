@@ -205,7 +205,7 @@ function renderToken() {
           commitToken();
         } else if (event.key === "Escape") {
           event.preventDefault();
-          cancelEdit();
+          escapeToken();
         }
       });
       row.append(input);
@@ -368,6 +368,11 @@ function cancelEdit() {
   typing = null;
   draft = "";
   render();
+}
+
+function escapeToken() {
+  if (typing === "token") commitToken();
+  else cancelEdit();
 }
 
 async function signIn(body) {
@@ -597,7 +602,7 @@ async function press(key) {
 function tokenKey(key) {
   if (typing === "token" || typing === "service" || typing === "account") {
     if (key === "Enter") commitToken();
-    else if (key === "Escape") cancelEdit();
+    else if (key === "Escape") escapeToken();
     return;
   }
   const rows = tokenRows();

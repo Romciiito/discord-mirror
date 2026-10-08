@@ -6,6 +6,7 @@ const h = harness();
 const EDIT = "enter keeps it, esc cancels the edit";
 const IDLE = "up and down move, enter opens, esc back";
 const TEN = "abcdefghij";
+const PASTED = "fake-token_for.tests_only-0123456789.abcdefghij_klmnop";
 
 function editing(page, label) {
   return until(page, (want) => {
@@ -16,6 +17,12 @@ function editing(page, label) {
 
 function closed(page) {
   return until(page, () => !document.querySelector("#screen .row input"));
+}
+
+async function paste(page, value) {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: h.srv.base });
+  await page.evaluate((text) => navigator.clipboard.writeText(text), value);
+  await page.keyboard.press("ControlOrMeta+V");
 }
 
 test("clicking the row being edited keeps the draft", { timeout: 20000 }, async (t) => {
@@ -84,32 +91,33 @@ test("escape restores and enter keeps the keychain fields", { timeout: 20000 }, 
   }
 });
 
-test("escape restores and enter keeps the token", { timeout: 20000 }, async (t) => {
+test("escape and enter keep the token", { timeout: 20000 }, async (t) => {
   const page = await h.page(t);
   await token(page, h.srv.base);
   await row(page, 0, "1  token");
   await page.keyboard.press("1");
   await editing(page, "token ");
   assert.equal(await page.getAttribute("#screen .row input", "type"), "password");
-  await page.keyboard.type("q");
+  await paste(page, PASTED);
   await page.keyboard.press("Escape");
   await closed(page);
-  await row(page, 0, "1  token");
+  await row(page, 0, "1  token  set");
   await page.keyboard.press("1");
   await editing(page, "token ");
-  assert.equal(await page.inputValue("#screen .row input"), "");
-  await page.keyboard.type(TEN);
-  await page.keyboard.press("Enter");
-  await row(page, 0, "1  token  set");
+  assert.equal(await page.inputValue("#screen .row input"), PASTED);
+  await page.locator("#screen .row input").fill(TEN);
+  await page.click("#hint");
+  await page.keyboard.press("Escape");
+  await closed(page);
   await page.keyboard.press("1");
   await editing(page, "token ");
   assert.equal(await page.inputValue("#screen .row input"), TEN);
   await page.locator("#screen .row input").fill("zzz");
-  await page.keyboard.press("Escape");
+  await page.keyboard.press("Enter");
   await row(page, 0, "1  token  set");
   await page.keyboard.press("1");
   await editing(page, "token ");
-  assert.equal(await page.inputValue("#screen .row input"), TEN);
+  assert.equal(await page.inputValue("#screen .row input"), "zzz");
 });
 
 test("keep on this machine toggles", { timeout: 20000 }, async (t) => {
