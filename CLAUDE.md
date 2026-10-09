@@ -6,8 +6,8 @@ Model per node, the main loop and gates: the global `~/.claude/CLAUDE.md`, secti
 "Model-per-node allocation (D272, revised D305)". Process: sections "Working mode (D299)"
 and "Skill routing (D300)". Nothing here overrides them.
 
-Library graphs for the Workflow tool live in `.claude/workflows/` (copies from
-claude-config; the global copies do not resolve by name).
+Library graphs for the Workflow tool live in `.claude/workflows/` (copies of the shared
+workflow graphs; the global copies do not resolve by name).
 
 ## Checks
 
