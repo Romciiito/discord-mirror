@@ -360,13 +360,14 @@ class Engine:
         source_id: str,
     ) -> tuple[list[tuple[str, str]], int]:
         """Find or create each channel of the layout in the target and give it a webhook (decisions 9i, 9o). A
-        channel is found again by `same_name` under its own category (loose for a loose one; `existing` holds only
-        the categories this source may use), of two or more there the one that carries the row's webhook (`before`),
-        so two rows of one name never swap copies. One of the same name elsewhere is taken when it carries the row's
-        webhook (`before`), or, when none does, if the target holds no other source (`alone`), since it may
-        otherwise be another source's channel. An existing channel serves one row only, a category is created only
-        for a channel created under it and recorded for `source_id` as soon as Discord made it, and a channel whose
-        category Discord refuses is skipped, never put loose."""
+        channel of the same name (`same_name`) that carries a row's webhook (`before`) is that row's, under its own
+        category or elsewhere, and every row with a URL claims it before any row takes a channel by name, so two
+        rows of one name never swap copies. Then a row takes the first free channel of its name under its own
+        category (loose for a loose one; `existing` holds only the categories this source may use), and after that
+        one elsewhere if the target holds no other source (`alone`), since it may otherwise be another source's
+        channel. An existing channel serves one row only, a category is created only for a channel created under it
+        and recorded for `source_id` as soon as Discord made it, and a channel whose category Discord refuses is
+        skipped, never put loose."""
         categories: dict[str, str] = {}
         texts: list[dict[str, Any]] = []
         for item in existing:
@@ -415,28 +416,43 @@ class Engine:
                 return spot
             return ""
 
-        # every channel in its own place first, so a name found elsewhere never takes a channel another row has there;
-        # of two or more of the same name there, the one that carries the row's webhook, so two rows never swap copies
-        for channel in layout["channels"]:
+        def home(channel: dict[str, Any]) -> str | None:
+            """The parent of the channel's own place in the target ("" when loose), None when its category is not in
+            the target yet, so nothing is under it."""
             key = channel["category_key"]
-            if key and key not in parents:
-                continue  # its category is not in the target yet, so nothing is under it
-            spots = free(channel["name"], parents.get(key, ""))
-            if spots:
-                pick = (await carrier(channel["source_id"], spots) if len(spots) > 1 else "") or spots[0]
-                found[channel["source_id"]] = pick
-                claimed.add(pick)
+            return None if key and key not in parents else parents.get(key, "")
+
+        # a channel that carries a row's own webhook is that row's copy, wherever it stands: every row with a URL
+        # claims it before any row takes a channel by its name, first in its own place, then elsewhere, so a row
+        # without a URL, or a row listed first, never takes another row's copy and history
+        for channel in layout["channels"]:
+            parent = home(channel)
+            if parent is not None:
+                pick = await carrier(channel["source_id"], free(channel["name"], parent))
+                if pick:
+                    found[channel["source_id"]] = pick
+                    claimed.add(pick)
         for channel in layout["channels"]:
             source = channel["source_id"]
-            if source in found:
-                continue
-            spots = free(channel["name"], None)
-            pick = await carrier(source, spots)
-            if not pick and alone and spots:
-                pick = spots[0]
-            if pick:
-                found[source] = pick
-                claimed.add(pick)
+            if source not in found:
+                pick = await carrier(source, free(channel["name"], None))
+                if pick:
+                    found[source] = pick
+                    claimed.add(pick)
+        # then by name, every channel in its own place first, so a name found elsewhere never takes a channel another
+        # row has there; elsewhere only when the target holds no other source (`alone`)
+        for channel in layout["channels"]:
+            source, parent = channel["source_id"], home(channel)
+            spots = free(channel["name"], parent) if source not in found and parent is not None else []
+            if spots:
+                found[source] = spots[0]
+                claimed.add(spots[0])
+        for channel in layout["channels"] if alone else []:
+            source = channel["source_id"]
+            spots = free(channel["name"], None) if source not in found else []
+            if spots:
+                found[source] = spots[0]
+                claimed.add(spots[0])
         needed = {channel["category_key"] for channel in layout["channels"] if channel["source_id"] not in found}
         for category in layout["categories"]:
             if category["key"] in parents or category["key"] not in needed:

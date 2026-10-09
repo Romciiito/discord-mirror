@@ -818,6 +818,91 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, urls)
         self.assertFalse(any("replaced" in line for line in self.notes()))
 
+    async def test_a_newly_ticked_row_of_the_same_name_never_takes_a_copy_that_carries_another_rows_webhook(self) -> None:
+        # 10 and 11 have their copies t10 and t11 under Talk; 12, a third "general" ticked since and without a URL,
+        # comes first in the store. The rows whose webhook a channel carries take it first, so 12 gets a new channel
+        # and neither history flows into the other row's copy
+        http = KeepingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [
+            {"id": "c1", "type": 4, "name": "Talk"},
+            {"id": "t10", "type": 0, "name": "general", "parent_id": "c1"},
+            {"id": "t11", "type": 0, "name": "general", "parent_id": "c1"},
+        ]
+        http.hooks["t10"] = [{"id": "1", "name": "general", "token": "a"}]
+        http.hooks["t11"] = [{"id": "2", "name": "general", "token": "b"}]
+        self.engine.http = http
+        urls = {"10": "https://discord.com/api/webhooks/1/a", "11": "https://discord.com/api/webhooks/2/b"}
+        self.store.replace_selection(
+            [
+                row("12", name="general") | {"parent": "Talk"},
+                row("10", urls["10"], name="general") | {"parent": "Talk"},
+                row("11", urls["11"], name="general") | {"parent": "Talk"},
+            ]
+        )
+        self.assertEqual([r["channel_id"] for r in self.store.selection()], ["12", "10", "11"])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 3, "reused": 2, "replaced": 0})
+        self.assertEqual(self.posts(http, "/guilds/900/channels"), [{"name": "general", "type": 0, "parent_id": "c1"}])
+        after = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertEqual((after["10"], after["11"]), (urls["10"], urls["11"]))
+        self.assertNotIn(after["12"], urls.values())
+        self.assertFalse(any("replaced" in line for line in self.notes()))
+
+    async def test_a_row_without_a_url_never_takes_the_copy_of_a_row_of_the_same_name(self) -> None:
+        # two "general" under Talk: 10 has no URL any more, 11 has its own, and Discord lists 11's copy first. 11 takes
+        # the copy that carries its webhook, 10 the other one, and no URL counts as replaced
+        http = KeepingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [
+            {"id": "c1", "type": 4, "name": "Talk"},
+            {"id": "t11", "type": 0, "name": "general", "parent_id": "c1"},
+            {"id": "t10", "type": 0, "name": "general", "parent_id": "c1"},
+        ]
+        http.hooks["t10"] = [{"id": "1", "name": "general", "token": "a"}]
+        http.hooks["t11"] = [{"id": "2", "name": "general", "token": "b"}]
+        self.engine.http = http
+        self.store.replace_selection(
+            [
+                row("10", name="general") | {"parent": "Talk"},
+                row("11", "https://discord.com/api/webhooks/2/b", name="general") | {"parent": "Talk"},
+            ]
+        )
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 2, "replaced": 0})
+        self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
+        self.assertEqual(
+            {r["channel_id"]: r["webhook_url"] for r in self.store.selection()},
+            {"10": "https://discord.com/api/webhooks/1/a", "11": "https://discord.com/api/webhooks/2/b"},
+        )
+        self.assertFalse(any("replaced" in line for line in self.notes()))
+
+    async def test_a_row_ticked_in_its_own_place_never_takes_a_copy_found_elsewhere_for_another_row(self) -> None:
+        # Desk (5), alone in 900, reused the server's own "general" under "Text Channels" for its "general" under
+        # "Talk" (decision 9i). The owner then ticks Desk's "general" under "Text Channels": the channel carries 10's
+        # webhook, so 10 keeps it and 12 gets a new channel in its category, not 10's copy and history
+        http = KeepingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [
+            {"id": "c1", "type": 4, "name": "Text Channels"},
+            {"id": "t1", "type": 0, "name": "general", "parent_id": "c1"},
+        ]
+        self.engine.http = http
+        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}])
+        await self.engine.fill_copy("5", "900")
+        first = self.store.selection()[0]["webhook_url"]
+        self.assertEqual(self.posts(http, "/guilds/900/channels"), [])
+        self.store.replace_selection(
+            [row("10", name="general") | {"parent": "Talk"}, row("12", name="general") | {"parent": "Text Channels"}]
+        )
+        http.calls.clear()
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 1, "replaced": 0})
+        self.assertEqual(self.posts(http, "/guilds/900/channels"), [{"name": "general", "type": 0, "parent_id": "c1"}])
+        after = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertEqual(after["10"], first)
+        self.assertNotEqual(after["12"], first)
+
     async def test_a_second_source_whose_category_fails_takes_no_loose_channel(self) -> None:
         # Desk (5) holds a loose "general" with its webhook in 900. Other (6) comes second and Discord refuses its
         # "Other / Talk": its "general" is skipped, never put loose beside Desk's and never given Desk's webhook (9o)
@@ -950,7 +1035,8 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         report = await self.engine.fill_copy("5", "900")
         self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1, "replaced": 0})
         self.assertEqual([path for method, path, body in http.calls if method == "POST"], [])
-        # one spot of that name: its webhooks are listed once, in the webhook step, with no wait of their own
+        # one spot of that name: its webhooks are listed once, when the row looks for the channel that carries its
+        # webhook, with one wait; the webhook step then neither lists nor waits
         self.assertEqual([path for method, path, body in http.calls if method == "GET"], ["/channels/t1/webhooks"])
         self.assertEqual(self.delays, [0.25])
         self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, {"10": "https://discord.com/api/webhooks/77/old"})
