@@ -1,0 +1,1650 @@
+# Own Copies and Relay Format Implementation Plan (plans B and C)
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** A ticked source server is filled into a server the owner owns with one key, the shared "mirror" server and its provisioning go, Start refuses in the engine when a ticked channel has no webhook, and the relay sends stickers and files 1:1 within Discord's limits.
+
+**Architecture:** The store gains a `targets` table (one target server per source server) and loses the shared-server options. `provision.py` keeps `webhook_name` and gets a pure `copy_layout` that turns the ticked rows of one source into the categories and channels a fill creates. The engine's `fill_copy` writes those into a target the account owns, reusing channels of the same name and webhooks it made before, and never deletes. `Engine._start` carries the Start rule. The CLI opens a target picker with `c` on a server row. The relay uploads up to 10 files of up to 20 MiB each, replaces a larger file with one line and two links, uploads PNG, APNG and GIF stickers as images, always sends the `embeds` key on an edit and keeps the embeds under 6000 characters in total.
+
+**Tech Stack:** Python 3.10+, aiohttp, `prompt_toolkit` 3.0.53, `unittest` + `IsolatedAsyncioTestCase` (as the existing tests). No new dependency.
+
+**Spec:** GitHub issue #9 (`gh issue view 9`), design notes `docs/superpowers/specs/2026-10-08-terminal-cli-design.md` — decisions 9a, 9b', 9d, 9e, 9g', 9h, 9i, 9j, 9k, 9l, 9m, 9n, 9o (plan B) and 10a–10e (plan C); glossary `CONTEXT.md`; ADR `docs/adr/0001-copies-live-in-servers-the-owner-creates.md`. Plan A (`docs/superpowers/plans/2026-10-09-cli-shell.md`) is done on `main`'s PR #10; this plan builds on its head `3fb3269`.
+
+## Global Constraints
+
+- Python floor 3.10; CI runs Ubuntu 3.12 x64 and Windows 3.10 x64 / 3.12 x64 / 3.12 x86. No dependency without a `py3-none-any` or x86 wheel.
+- Everything user-facing and in the repo is English (decision 7).
+- Commit messages: one technical sentence ending with a period, as the repo does (`git log --oneline -5`). No AI trailers, no AI mentions in code, docs or commits.
+- `git add` names files; never `git add -A`. Files are LF (`git ls-files --eol` shows `i/lf w/lf`); an editor that writes CRLF must be undone before the commit.
+- Tests never call Discord: every HTTP object is a fake (`tests/test_engine.py` `FakeHTTP`, `tests/test_relay.py` `FakeSession`). Tests never touch a `data/` folder: every `Store` opens in a `tempfile.TemporaryDirectory()`.
+- Mando writes to a Discord server only when the account **owns** it (`owner` flag of `/users/@me/guilds`, decision 9b') and **never deletes** anything there (decision 9i): no `DELETE` request appears in `Engine.fill_copy` or anything it calls.
+- The Start rule (decisions 9f, 9k): a ticked channel without a webhook URL makes `Engine._start` raise `ApiError(400, "#<name> has no webhook")`; it never creates a server, channel or webhook.
+- The test command and its module list are unchanged: `python -m unittest tests.test_core tests.test_store tests.test_keychain tests.test_provision tests.test_relay tests.test_gateway tests.test_engine tests.test_web tests.test_cli_flow tests.test_cli_controller tests.test_cli_render -q` (`CLAUDE.md`, `.github/workflows/test.yml`, `README.md`). The CI smoke step (`/api/state` 200, cross-origin `/api/stop` 403 "bad origin", same-origin 200) must keep passing.
+- Hint lines fit 60 columns (plan A's rule): count the characters of every new hint.
+- **Error handling around every engine call in the controller** (plan A's rule): `except (ApiError, RuntimeError) as exc: self.error = str(exc)` and then `except Exception: log.exception("<what> failed"); self.error = UNEXPECTED`; `CancelledError` is never caught; `busy` is set for the call's duration and released in `finally`.
+- Engine notes are one line each, lower case, no trailing period, as the existing `self.note(...)` calls.
+
+## Review Focus
+
+Inputs the spec implies but no decision names; each line's test is pinned to the task that owns the code:
+
+1. **A second fill into the same target** (after a crash mid-fill, or because the owner ticked two more channels): no second channel of the same name and no second webhook on a reused channel. → Task 4 (`test_fill_reuses_channels_and_their_webhooks`).
+2. **A ticked channel that the lists do not show** (decision 9k's row, stored without `parent`): a fill still creates a channel for it from the stored name. → Task 4 (`test_fill_covers_an_unlisted_ticked_channel`).
+3. **Two sources into one target**: the second gets "<source> / <category>" categories and a "<source>" category for loose channels; the first's channels are untouched. → Task 2 (`test_copy_layout_prefixes_only_a_shared_target`) and Task 4 (`test_second_source_into_a_target_gets_prefixed_categories`).
+4. **A fill while the mirror runs**: the new webhook URLs are mirrored to without a restart. → Task 4 (`test_fill_while_running_refreshes`).
+5. **A message with a sticker and a file over 20 MiB**: one post, the sticker uploaded, the file as one line with two links, no second attempt. → Task 8 (`test_sticker_and_oversize_file_in_one_post`).
+
+---
+
+## File structure
+
+| File | Responsibility |
+|---|---|
+| `mirror/store.py` | `targets` table; `options()` without `global_webhook`, `dest_name`, `dest_guild_id`; `set_options(backfill, include_threads, mirror)`; `set_target`, `targets`; `set_dest_guild` and `clear_destination` removed |
+| `mirror/provision.py` | `copy_layout(source_name, rows, shared)` and `same_name(a, b)` (new, pure); `webhook_name` kept; `destination_layout` removed |
+| `mirror/engine.py` | `owned_guilds()`, `fill_copy()`, `_fill()`, `_webhook_on()`; `_start` with the Start rule; `copy_guild`, `_wire_copy`, `reset_destination`, `_provision`, `_wire_layout`, `GONE` removed; no `global_webhook` anywhere |
+| `mirror/web.py` | `GET /api/targets`, `POST /api/guilds/{guild_id}/fill`; the copy and reset routes removed |
+| `mirror/cli/controller.py` | `c` opens the target picker (depth `targets`), Enter fills, Esc returns; the 9e notice on untick; hints |
+| `mirror/cli/render.py` | the target picker screen; `copy: <name>` on a server row |
+| `mirror/relay.py` | 20 MiB per file, no total cap, the over-limit line (10b); stickers as uploads (10a); `embeds` always on an edit (#6); 6000-character embed total (#8 part); `guild_id` in the view |
+| `tests/test_core.py`, `tests/test_provision.py`, `tests/test_engine.py`, `tests/test_web.py`, `tests/test_cli_controller.py`, `tests/test_cli_render.py`, `tests/test_relay.py` | extended and pruned |
+| `README.md`, `CONTEXT.md` | the fill, the key `c`, the relay limits |
+
+Names used across tasks: a **target** is `{"id": str, "name": str}`; a **link** in `Store.targets()` is `{"target_id": str, "target_name": str}` keyed by the source server id; a **layout** is `{"categories": [{"key", "name"}], "channels": [{"source_id", "name", "category_key", "topic"}]}`; **pairs** are `list[tuple[source_channel_id, webhook_url]]` as `Store.fill_webhooks` takes them.
+
+---
+
+### Task 1: Store — one target per source server, no shared-server options
+
+**Files:**
+- Modify: `mirror/store.py`
+- Test: `tests/test_core.py` (`test_store_roundtrip`, new `test_store_targets_per_source`, new `test_old_database_opens_and_ignores_the_shared_server_columns`), `tests/test_engine.py` (`test_store_hooks_survive_untick_and_retick`, line 202)
+
+**Interfaces:**
+- Produces: `Store.options() -> {"backfill": int, "include_threads": bool, "mirror": bool}`; `Store.set_options(backfill: int, include_threads: bool, mirror: bool) -> None`; `Store.set_target(source_guild_id: str, target_guild_id: str, target_name: str) -> None`; `Store.targets() -> dict[str, dict[str, str]]` as `{source_guild_id: {"target_id", "target_name"}}`. `Store.set_dest_guild` and `Store.clear_destination` no longer exist. `fill_webhooks`, `hooks`, `selection`, `replace_selection` unchanged.
+- Callers of `set_options` to update in this task so the suite stays green: `mirror/engine.py:344` (inside `copy_guild`, removed in Task 3 — for now pass `(options["backfill"], options["include_threads"], True)`), `:463` (`save_setup`), `:489` (`_start`); `tests/test_engine.py:667`. `options()["dest_name"]`, `["dest_guild_id"]`, `["global_webhook"]` readers: `mirror/engine.py:521` (`_provision`), `:877`, `:886`, `:897` — until Task 3 removes them, read with `.get(..., "")` so nothing raises. `clear_destination`/`set_dest_guild` callers: `mirror/engine.py:345-346`, `:469`, `:529` and the tests named above — Task 3 removes the engine code; in this task replace `self.store.clear_destination()` in `copy_guild` and `reset_destination` with nothing (the method goes) and `set_dest_guild(...)` with nothing, and delete the three `_provision`/`copy_guild` tests that assert on them only if they fail (`test_provision_reports_gone_destination`, `test_provision_into_existing_server_reuses_categories`, `test_start_while_running_provisions_and_refreshes`, `test_stop_during_running_start_is_respected`, `test_copy_guild_keeps_new_destination`); Task 3 rewrites what survives. Record every deleted test in the commit message.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `tests/test_core.py`, replace `test_store_roundtrip` and add two tests:
+
+```python
+    def test_store_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            store.set_token("x" * 50, True)
+            self.assertEqual(store.token(), "x" * 50)
+            store.set_options(25, True, True)
+            self.assertEqual(store.options(), {"backfill": 25, "include_threads": True, "mirror": True})
+            store.replace_selection(
+                [
+                    {
+                        "channel_id": "10",
+                        "guild_id": "20",
+                        "guild_name": "Desk",
+                        "channel_name": "general",
+                        "webhook_url": "",
+                        "enabled": 1,
+                        "parent": "talk",
+                    }
+                ]
+            )
+            self.assertEqual(store.selection()[0]["channel_name"], "general")
+            self.assertEqual(store.selection()[0]["parent"], "talk")
+            store.fill_webhooks([("10", "https://discord.com/api/webhooks/1/abc")])
+            self.assertEqual(store.selection()[0]["webhook_url"], "https://discord.com/api/webhooks/1/abc")
+            self.assertEqual(store.hooks(), {"10": "https://discord.com/api/webhooks/1/abc"})
+            store.remember_relay("1", "10", "https://discord.com/api/webhooks/1/abc", "99")
+            self.assertEqual(store.relay_row("1")["webhook_message_id"], "99")
+            store.forget_token()
+            self.assertEqual(store.token(), "")
+            if sys.platform != "win32":
+                self.assertEqual((Path(tmp) / "state.db").stat().st_mode & 0o777, 0o600)
+            store.close()
+
+    def test_store_targets_per_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            self.assertEqual(store.targets(), {})
+            store.set_target("5", "900", "Desk copy")
+            store.set_target("6", "900", "Desk copy")
+            store.set_target("5", "901", "Other")
+            self.assertEqual(
+                store.targets(),
+                {"5": {"target_id": "901", "target_name": "Other"}, "6": {"target_id": "900", "target_name": "Desk copy"}},
+            )
+            self.assertFalse(hasattr(store, "set_dest_guild"))
+            self.assertFalse(hasattr(store, "clear_destination"))
+            store.close()
+
+    def test_old_database_opens_and_ignores_the_shared_server_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = sqlite3.connect(Path(tmp) / "state.db")
+            conn.executescript(
+                """
+                CREATE TABLE account (id INTEGER PRIMARY KEY CHECK (id = 1), token TEXT, keep INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE options (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    backfill INTEGER NOT NULL DEFAULT 0,
+                    include_threads INTEGER NOT NULL DEFAULT 0,
+                    global_webhook TEXT NOT NULL DEFAULT '',
+                    mirror INTEGER NOT NULL DEFAULT 0,
+                    dest_name TEXT NOT NULL DEFAULT 'mirror',
+                    dest_guild_id TEXT NOT NULL DEFAULT ''
+                );
+                INSERT INTO options (id, backfill, global_webhook, dest_name, dest_guild_id) VALUES (1, 50, 'https://x', 'Old', '7');
+                CREATE TABLE selection (
+                    channel_id TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    guild_name TEXT NOT NULL DEFAULT '',
+                    channel_name TEXT NOT NULL DEFAULT '',
+                    webhook_url TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1
+                );
+                INSERT INTO selection (channel_id, guild_id, guild_name, channel_name, webhook_url) VALUES ('10', '5', 'Desk', 'general', 'https://discord.com/api/webhooks/1/abc');
+                """
+            )
+            conn.commit()
+            conn.close()
+            store = Store(tmp)
+            self.assertEqual(store.options(), {"backfill": 50, "include_threads": False, "mirror": False})
+            self.assertEqual(store.selection()[0]["webhook_url"], "https://discord.com/api/webhooks/1/abc")
+            self.assertEqual(store.selection()[0]["parent"], "")
+            self.assertEqual(store.hooks(), {"10": "https://discord.com/api/webhooks/1/abc"})
+            self.assertEqual(store.targets(), {})
+            store.set_options(0, True, True)
+            self.assertEqual(store.options(), {"backfill": 0, "include_threads": True, "mirror": True})
+            store.close()
+```
+
+`tests/test_core.py` does not import `sqlite3` yet (measured: its imports are `json`, `sys`, `tempfile`, `unittest`, `zlib`, `Path`); add `import sqlite3` to them. In `tests/test_engine.py` `test_store_hooks_survive_untick_and_retick`, delete the five lines from `self.store.clear_destination()` to the end of the test (the hooks memory is kept, decision 9l; a cleared destination no longer exists).
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `PYTHONUTF8=1 python -X utf8 -m unittest tests.test_core -q`
+Expected: FAIL — `set_options() missing 1 required positional argument` for the roundtrip, `AttributeError: 'Store' object has no attribute 'targets'` for the two new tests.
+
+- [ ] **Step 3: Implement the store**
+
+In `mirror/store.py`:
+
+```python
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS account (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    token TEXT,
+    keep INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS options (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    backfill INTEGER NOT NULL DEFAULT 0,
+    include_threads INTEGER NOT NULL DEFAULT 0,
+    mirror INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS selection (
+    channel_id TEXT PRIMARY KEY,
+    guild_id TEXT NOT NULL,
+    guild_name TEXT NOT NULL DEFAULT '',
+    channel_name TEXT NOT NULL DEFAULT '',
+    webhook_url TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS relayed (
+    source_id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    webhook_url TEXT NOT NULL,
+    webhook_message_id TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS hooks (
+    channel_id TEXT PRIMARY KEY,
+    webhook_url TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS targets (
+    source_guild_id TEXT PRIMARY KEY,
+    target_guild_id TEXT NOT NULL,
+    target_name TEXT NOT NULL DEFAULT ''
+);
+"""
+```
+
+`_migrate` keeps only the `selection` columns and the `hooks` back-fill (the old `options` columns `global_webhook`, `dest_name`, `dest_guild_id` stay in old files and are never read, decision 9h):
+
+```python
+    def _migrate(self) -> None:
+        picked_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(selection)")}
+        if "parent" not in picked_cols:
+            self.conn.execute("ALTER TABLE selection ADD COLUMN parent TEXT NOT NULL DEFAULT ''")
+        if "topic" not in picked_cols:
+            self.conn.execute("ALTER TABLE selection ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
+        self.conn.execute(
+            "INSERT OR IGNORE INTO hooks (channel_id, webhook_url) "
+            "SELECT channel_id, webhook_url FROM selection WHERE webhook_url != ''"
+        )
+```
+
+Options and targets:
+
+```python
+    def options(self) -> dict:
+        row = self.conn.execute("SELECT backfill, include_threads, mirror FROM options WHERE id = 1").fetchone()
+        return {
+            "backfill": int(row["backfill"]),
+            "include_threads": bool(row["include_threads"]),
+            "mirror": bool(row["mirror"]),
+        }
+
+    def set_options(self, backfill: int, include_threads: bool, mirror: bool) -> None:
+        self.conn.execute(
+            "UPDATE options SET backfill = ?, include_threads = ?, mirror = ? WHERE id = 1",
+            (int(backfill), int(include_threads), int(mirror)),
+        )
+        self.conn.commit()
+
+    def set_target(self, source_guild_id: str, target_guild_id: str, target_name: str) -> None:
+        """The server the owner picked as the copy of one source server (decision 9b'); a later pick replaces it."""
+        self.conn.execute(
+            "INSERT INTO targets (source_guild_id, target_guild_id, target_name) VALUES (?, ?, ?) "
+            "ON CONFLICT(source_guild_id) DO UPDATE SET "
+            "target_guild_id = excluded.target_guild_id, target_name = excluded.target_name",
+            (str(source_guild_id), str(target_guild_id), str(target_name or "")[:100]),
+        )
+        self.conn.commit()
+
+    def targets(self) -> dict[str, dict[str, str]]:
+        rows = self.conn.execute("SELECT source_guild_id, target_guild_id, target_name FROM targets").fetchall()
+        return {
+            str(row["source_guild_id"]): {"target_id": str(row["target_guild_id"]), "target_name": str(row["target_name"])}
+            for row in rows
+        }
+```
+
+Delete `set_dest_guild` and `clear_destination`. Then update the callers listed under Interfaces so the whole suite runs: in `mirror/engine.py` change the three `set_options` calls, make the four `options[...]` reads of removed keys `options.get(..., "")`, drop the `clear_destination`/`set_dest_guild` calls, and in `tests/test_engine.py` change line 667 to `self.engine.store.set_options(0, False, True)`. Add `"targets": self.store.targets()` to `Engine.snapshot()` (the CLI and the API read it in Tasks 5 and 6).
+
+- [ ] **Step 4: Run the full suite**
+
+Run: `PYTHONUTF8=1 python -X utf8 -m unittest tests.test_core tests.test_store tests.test_keychain tests.test_provision tests.test_relay tests.test_gateway tests.test_engine tests.test_web tests.test_cli_flow tests.test_cli_controller tests.test_cli_render -q`
+Expected: OK. If one of the five provisioning tests named under Interfaces fails only because `set_dest_guild`/`clear_destination` are gone, delete that test (Task 3 replaces the behaviour) and name it in the commit message.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add mirror/store.py mirror/engine.py tests/test_core.py tests/test_engine.py
+git commit -m "Store one target server per source server and drop the shared-server options."
+```
+
+---
+
+### Task 2: `copy_layout` — the categories and channels a fill creates
+
+**Files:**
+- Modify: `mirror/provision.py`
+- Test: `tests/test_provision.py`
+
+**Interfaces:**
+- Produces: `copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict` with `{"categories": [{"key": str, "name": str}], "channels": [{"source_id": str, "name": str, "category_key": str, "topic": str}]}`; `same_name(a: str, b: str) -> bool` (two channel names Discord would show the same way: lower case, runs of non-word characters as one dash); `webhook_name` unchanged. `destination_layout` and its tests are removed.
+- Rules (decisions 9b', 9n, 9o): rows with `enabled` false or a non-numeric `channel_id` are skipped; a row's `parent` is the source category name (`""` for a loose channel); when `shared` is false the category name is the parent as is and a loose channel has `category_key == ""`; when `shared` is true the category name is `"<source> / <parent>"` and a loose channel goes under a category named `"<source>"`; categories are deduplicated case-insensitively, in order of first appearance, `key` is the folded name; channel `name` is the stored `channel_name` with collapsed whitespace, 100 characters at most, `"channel"` when empty; `topic` collapsed, 1024 at most.
+
+- [ ] **Step 1: Write the failing tests**
+
+Replace the `destination_layout` tests in `tests/test_provision.py` with these (keep the `webhook_name` tests as they are):
+
+```python
+from mirror.provision import copy_layout, same_name, webhook_name
+
+
+def row(channel_id: str, name: str, parent: str = "", topic: str = "", enabled: bool = True) -> dict:
+    return {"channel_id": channel_id, "channel_name": name, "parent": parent, "topic": topic, "enabled": enabled}
+
+
+class CopyLayoutTests(unittest.TestCase):
+    def test_first_source_keeps_its_own_categories(self) -> None:
+        plan = copy_layout("Desk", [row("10", "general", "Talk"), row("11", "dev", "Talk", "  builds  here "), row("12", "news")], False)
+        self.assertEqual(plan["categories"], [{"key": "talk", "name": "Talk"}])
+        self.assertEqual(
+            plan["channels"],
+            [
+                {"source_id": "10", "name": "general", "category_key": "talk", "topic": ""},
+                {"source_id": "11", "name": "dev", "category_key": "talk", "topic": "builds here"},
+                {"source_id": "12", "name": "news", "category_key": "", "topic": ""},
+            ],
+        )
+
+    def test_copy_layout_prefixes_only_a_shared_target(self) -> None:
+        rows = [row("10", "general", "Talk"), row("12", "news")]
+        plan = copy_layout("Desk", rows, True)
+        self.assertEqual(plan["categories"], [{"key": "desk / talk", "name": "Desk / Talk"}, {"key": "desk", "name": "Desk"}])
+        self.assertEqual([c["category_key"] for c in plan["channels"]], ["desk / talk", "desk"])
+        self.assertEqual(copy_layout("Desk", rows, False)["categories"], [{"key": "talk", "name": "Talk"}])
+
+    def test_copy_layout_skips_disabled_and_bad_rows_and_folds_categories(self) -> None:
+        plan = copy_layout("  Desk  ", [row("10", "a", "Talk"), row("11", "b", "talk"), row("x", "c"), row("13", "d", enabled=False), row("14", "   ")], False)
+        self.assertEqual(plan["categories"], [{"key": "talk", "name": "Talk"}])
+        self.assertEqual([c["source_id"] for c in plan["channels"]], ["10", "11", "14"])
+        self.assertEqual(plan["channels"][2]["name"], "channel")
+        self.assertEqual(copy_layout("", [row("1", "a")], True)["categories"], [{"key": "server", "name": "server"}])
+        self.assertEqual(len(copy_layout("x" * 200, [row("1", "y" * 200, "z" * 200)], True)["categories"][0]["name"]), 100)
+        self.assertEqual(len(copy_layout("x", [row("1", "y" * 200)], False)["channels"][0]["name"]), 100)
+
+    def test_same_name_follows_what_discord_shows(self) -> None:
+        self.assertTrue(same_name("General Chat", "general-chat"))
+        self.assertTrue(same_name("dev", "DEV"))
+        self.assertTrue(same_name("a  b", "a-b"))
+        self.assertFalse(same_name("general", "general-2"))
+        self.assertFalse(same_name("", "channel"))
+```
+
+Check the file's existing imports (`unittest`) and keep the `webhook_name` test class.
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `PYTHONUTF8=1 python -X utf8 -m unittest tests.test_provision -q`
+Expected: FAIL — `ImportError: cannot import name 'copy_layout'`.
+
+- [ ] **Step 3: Implement**
+
+In `mirror/provision.py`, replace `destination_layout` with:
+
+```python
+def copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict[str, Any]:
+    """The categories and channels a fill creates in the target for the ticked rows of one source server
+    (decisions 9b', 9n, 9o). The first source into a target keeps the source's own category names; a
+    source filled into a target that already holds another source gets "<source> / <category>" and a
+    "<source>" category for its loose channels, so two sources never mix in one category."""
+    source = " ".join(str(source_name or "").split())[:100] or "server"
+    categories: list[dict[str, str]] = []
+    seen: set[str] = set()
+    channels: list[dict[str, str]] = []
+    for row in rows:
+        if row.get("enabled") is False:
+            continue
+        channel_id = str(row.get("channel_id") or "")
+        if not channel_id.isdigit():
+            continue
+        parent = " ".join(str(row.get("parent") or "").split())
+        if shared:
+            label = f"{source} / {parent}" if parent else source
+        else:
+            label = parent
+        label = label[:100]
+        key = label.casefold()
+        if label and key not in seen:
+            seen.add(key)
+            categories.append({"key": key, "name": label})
+        name = " ".join(str(row.get("channel_name") or "").split())[:100] or "channel"
+        topic = " ".join(str(row.get("topic") or "").split())[:1024]
+        channels.append({"source_id": channel_id, "name": name, "category_key": key if label else "", "topic": topic})
+    return {"categories": categories, "channels": channels}
+
+
+def same_name(a: str, b: str) -> bool:
+    """Whether Discord shows two text channel names the same way: it lowers the case and turns runs of
+    spaces and punctuation into one dash, so a reused channel is found by that form (decision 9i)."""
+    first, second = _slug(a), _slug(b)
+    return first == second and first != "channel"
+```
+
+Keep `_slug`, `webhook_name` and `_fold`; `_slug` returns `"channel"` for an empty name, which `same_name` treats as no match.
+
+- [ ] **Step 4: Run the full suite**
+
+Run the full test command from Global Constraints. Expected: OK. `mirror/engine.py` still imports and calls `destination_layout` in this task, so `destination_layout` stays in `provision.py` untouched here; Task 3 deletes it together with `_provision`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add mirror/provision.py tests/test_provision.py
+git commit -m "Add copy_layout and same_name for filling a source's ticked channels into an owned server."
+```
+
+---
+
+### Task 3: Start refuses a ticked channel without a webhook; the shared mirror server goes
+
+**Files:**
+- Modify: `mirror/engine.py`, `mirror/provision.py` (delete `destination_layout` and `_slug` users of it — keep `_slug` for `same_name`), `mirror/web.py` (delete the two routes and handlers)
+- Test: `tests/test_engine.py`, `tests/test_web.py`
+
+**Interfaces:**
+- Produces: `Engine._start` raises `ApiError(400, "#<channel_name or id> has no webhook")` for the first enabled row without a URL in `store.selection()` order (the store orders by guild name then channel name), before anything else happens; while running, `start()` only refreshes. `Engine.refresh` notes `"#<name> has no webhook, not mirrored"` per such row and survives a stop during its awaits. `save_setup(body)` reads `backfill`, `include_threads`, `mirror`, `channels` only. `_webhook_for`, `_prefix`, `_own_webhook` use row URLs only. Removed from the engine: `copy_guild`, `_wire_copy`, `reset_destination`, `_provision`, `_wire_layout`, `GONE`, the `destination_layout` import. Removed from `web.py`: `reset_destination`, `copy_guild` handlers and the routes `POST /api/guilds/{guild_id}/copy`, `POST /api/destination/reset`.
+- Consumes: Task 1's `set_options(backfill, include_threads, mirror)`.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `tests/test_engine.py`, delete `test_wire_layout_reuses_category_and_survives_failure`, `test_provision_reports_gone_destination`, `test_provision_into_existing_server_reuses_categories`, `test_copy_guild_keeps_new_destination` and the `from mirror.provision import destination_layout` import if any of them is still there. Replace `test_start_while_running_provisions_and_refreshes`, `test_stop_during_running_start_is_respected` and `test_refresh_notes_missing_webhooks` with:
+
+```python
+    async def test_start_refuses_the_first_ticked_channel_without_a_webhook(self) -> None:
+        http = FakeHTTP()
+        self.engine.http = http
+        self.store.replace_selection([row("11", name="lobby"), row("10", HOOK, name="general")])
+        with mock.patch.object(engine_mod, "Gateway", FakeGateway):
+            with self.assertRaises(ApiError) as caught:
+                await self.engine.start()
+        self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(str(caught.exception), "#lobby has no webhook")
+        self.assertFalse(self.engine.running)
+        self.assertEqual(FakeGateway.made, [])
+        self.assertFalse(any(method == "POST" for method, path, body in http.calls))
+        self.assertFalse(self.store.options()["mirror"])
+
+    async def test_start_while_running_refreshes_instead_of_starting_again(self) -> None:
+        self.engine.http = FakeHTTP()
+        self.store.replace_selection([row("10", HOOK)])
+        with mock.patch.object(engine_mod, "Gateway", FakeGateway):
+            await self.engine.start()
+            self.assertTrue(self.engine.running)
+            self.store.replace_selection([row("10", HOOK), row("11", HOOK_B, name="lobby")])
+            await self.engine.start()
+            gateway = FakeGateway.made[0]
+            self.assertEqual(len(FakeGateway.made), 1)
+            self.assertEqual(sorted(gateway.subs[-1]["5"]), ["10", "11"])
+            self.assertEqual(gateway.resubscribed, 1)
+            await self.engine.stop()
+
+    async def test_stop_during_a_running_refresh_is_respected(self) -> None:
+        http = FakeHTTP()
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def held(guild_id: str) -> list[dict]:
+            entered.set()
+            await gate.wait()
+            return []
+
+        self.engine.http = http
+        self.store.replace_selection([row("10", HOOK)])
+        self.store.set_options(0, True, True)
+        with mock.patch.object(engine_mod, "Gateway", FakeGateway):
+            await self.engine.start()
+            http.active_threads = held
+            self.store.replace_selection([row("10", HOOK), row("11", HOOK_B, name="lobby")])
+            task = asyncio.create_task(self.engine.start())
+            await asyncio.wait_for(entered.wait(), 1)
+            await self.engine.stop()
+            gate.set()
+            await asyncio.wait_for(task, 1)
+            self.assertFalse(self.engine.running)
+            self.assertEqual(len(FakeGateway.made), 1)
+            self.assertEqual(FakeGateway.made[0].resubscribed, 0)
+
+    async def test_refresh_notes_a_ticked_channel_without_a_webhook(self) -> None:
+        self.engine.http = FakeHTTP()
+        self.store.replace_selection([row("10", HOOK)])
+        with mock.patch.object(engine_mod, "Gateway", FakeGateway):
+            await self.engine.start()
+            self.store.replace_selection([row("10", HOOK), row("11", name="lobby")])
+            await self.engine.refresh()
+            self.assertIn("#lobby has no webhook, not mirrored", self.notes())
+            self.assertEqual(sorted(FakeGateway.made[0].subs[-1]["5"]), ["10", "11"])
+            await self.engine.stop()
+
+    def test_save_setup_keeps_only_the_three_options(self) -> None:
+        self.engine.save_setup({"backfill": 999, "include_threads": True, "mirror": True, "global_webhook": HOOK, "dest_name": "x", "channels": [row("10", HOOK)]})
+        self.assertEqual(self.store.options(), {"backfill": 500, "include_threads": True, "mirror": True})
+        self.assertEqual(self.store.selection()[0]["webhook_url"], HOOK)
+
+    def test_prefix_only_when_two_channels_share_a_webhook(self) -> None:
+        self.store.replace_selection([row("10", HOOK), row("11", HOOK_B, name="lobby"), row("12", "", name="quiet")])
+        self.assertFalse(self.engine._prefix(HOOK))
+        self.assertFalse(self.engine._prefix(""))
+        self.store.replace_selection([row("10", HOOK), row("11", HOOK, name="lobby")])
+        self.assertTrue(self.engine._prefix(HOOK))
+        self.assertFalse(hasattr(self.engine, "copy_guild"))
+        self.assertFalse(hasattr(self.engine, "reset_destination"))
+        self.assertFalse(hasattr(self.engine, "_provision"))
+```
+
+In `tests/test_web.py`, add to `WebTests`:
+
+```python
+    async def test_copy_and_reset_routes_are_gone(self) -> None:
+        client = await self.client()
+        resp = await client.post("/api/guilds/5/copy")
+        self.assertEqual(resp.status, 404)
+        resp = await client.post("/api/destination/reset")
+        self.assertEqual(resp.status, 404)
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `PYTHONUTF8=1 python -X utf8 -m unittest tests.test_engine tests.test_web -q`
+Expected: FAIL — the refusal test sees provisioning `POST` calls and `running` true; the `hasattr` assertions fail; the web test gets 401/400, not 404.
+
+- [ ] **Step 3: Implement**
+
+In `mirror/engine.py`:
+
+- Imports: `from .provision import webhook_name` only (Task 4 adds `copy_layout, same_name`); drop `GONE`.
+- Delete `copy_guild`, `_wire_copy`, `reset_destination`, `_provision`, `_wire_layout`.
+- `save_setup`: remove the `global_webhook` and `dest_name` lines; end with `self.store.set_options(backfill, include_threads, mirror)` then `self.store.replace_selection(cleaned)`.
+- `_start`:
+
+```python
+    async def _start(self) -> None:
+        http = self._require_http()
+        rows = [row for row in self.store.selection() if row["enabled"]]
+        if not rows:
+            raise ApiError(400, "select servers first")
+        # the Start rule (decisions 9f, 9k): Mando never creates a webhook at Start; the CLI jumps to this row
+        missing = next((row for row in rows if not str(row.get("webhook_url") or "").strip()), None)
+        if missing is not None:
+            raise ApiError(400, f"#{missing.get('channel_name') or missing['channel_id']} has no webhook")
+        if self.running:
+            await self.refresh()
+            return
+        options = self.store.options()
+        if not options["mirror"]:
+            self.store.set_options(options["backfill"], options["include_threads"], True)
+            options = self.store.options()
+        self._index(rows, options["include_threads"])
+        ... (unchanged from here: _load_threads, Gateway, backfill task, status event)
+```
+
+- `refresh`: after `await self._load_threads(self.http, rows)` re-read the gateway, because a stop during that await sets it to `None`:
+
+```python
+    async def refresh(self) -> None:
+        if not self.running or self.gateway is None or self.http is None:
+            return
+        options = self.store.options()
+        rows = [row for row in self.store.selection() if row["enabled"]]
+        if not rows:
+            raise ApiError(400, "pick at least one channel")
+        self._index(rows, options["include_threads"])
+        if options["include_threads"]:
+            await self._load_threads(self.http, rows)
+        gateway = self.gateway
+        if gateway is None or not self.running:
+            return  # stopped while the threads were listed
+        gateway.set_subscriptions(self._guild_map(rows), options["include_threads"])
+        await gateway.resubscribe()
+        self.note(f"selection updated, {len(rows)} channel(s)")
+        for row in rows:
+            if not str(row.get("webhook_url") or "").strip():
+                self.note(f"#{row.get('channel_name') or row['channel_id']} has no webhook, not mirrored")
+```
+
+- `_webhook_for`: `return row["webhook_url"]`; `_prefix`: `target = row["webhook_url"]` and `if target and target == url`; `_own_webhook`: drop the `global_webhook` block. Remove every remaining `options[...]` read of the three dead keys (`grep -n "global_webhook\|dest_name\|dest_guild" mirror/` must print nothing afterwards).
+
+In `mirror/provision.py` delete `destination_layout` (keep `_slug`, `copy_layout`, `same_name`, `webhook_name`, `_fold`).
+
+In `mirror/web.py` delete the `reset_destination` and `copy_guild` handlers and their two `app.router.add_post` lines.
+
+- [ ] **Step 4: Run the full suite**
+
+Run the full test command. Expected: OK. Also run `grep -rn "global_webhook\|dest_name\|dest_guild\|destination_layout\|copy_guild\|reset_destination\|_provision" mirror/ tests/` — only `tests/test_core.py`'s old-database test and `tests/test_cli_controller.py` (Task 6 cleans the fake) may still mention the dead names.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add mirror/engine.py mirror/provision.py mirror/web.py tests/test_engine.py tests/test_web.py
+git commit -m "Refuse Start on a ticked channel without a webhook and remove the shared mirror server with its provisioning."
+```
+
+---
+
+### Task 4: `owned_guilds` and `fill_copy` — filling a server the owner owns
+
+**Files:**
+- Modify: `mirror/engine.py`
+- Test: `tests/test_engine.py`
+
+**Interfaces:**
+- Produces: `Engine.owned_guilds() -> list[{"id", "name"}]` sorted by folded name, the servers whose `/users/@me/guilds` entry has `owner` true; `Engine.fill_copy(source_id: str, target_id: str) -> {"target": str, "filled": int, "reused": int}`; `Engine._fill(http, target_id, layout, existing) -> tuple[pairs, reused]`; `Engine._webhook_on(http, channel_id, name, look: bool) -> tuple[str, bool]`.
+- Errors (`ApiError(400, ...)`): `"unknown server"` (non-numeric id), `"a server cannot be its own copy"`, `"tick the server or some of its channels first"` (no enabled row of the source), `"pick a server you own"` (target not in `owned_guilds()`), `"no webhook could be created"` (no pair at the end). `"add a token first"` (401) comes from `_require_http`.
+- Behaviour: `rows` are every enabled row of the source, with or without a webhook URL (a second fill finds its own webhooks again and keeps the same URLs; a URL the owner typed for another place is replaced by the copy's webhook, because the owner just chose the copy as the target); `shared` is true when another source already links to this target in `store.targets()` (read **before** `set_target`); the layout is `copy_layout(rows[0]["guild_name"], rows, shared)`; `existing = await http.channels(target_id)`; categories are reused by folded name or created (type 4); a channel is reused when an existing text channel has `same_name` and the same `parent_id` as the one wanted (empty for a loose channel), otherwise created (type 0, `parent_id`, `topic` when present); a reused channel's webhooks are listed with `GET /channels/{id}/webhooks` and one whose `name == webhook_name(channel name)` and that has a `token` is reused, otherwise a webhook is created; a created channel gets a new webhook without the listing; paces: `_wait(0.3)` after each category request, `_wait(0.25)` after each channel and webhook request; no `DELETE` ever; a channel or webhook that fails is noted and skipped (`"#<name> was not created (<exc>)"`, `"webhook for #<name> failed (<exc>)"`); then `store.fill_webhooks(pairs)`, `store.set_target(source_id, target_id, target name)`, a note `"webhooks on <n> channel(s) in <target>"` (`", <k> reused"` appended when `k > 0`), and `await self.refresh()` when running. Returns `{"target": name, "filled": len(pairs), "reused": k}` where `k` counts reused webhooks.
+- Consumes: Task 1 `set_target`/`targets`, Task 2 `copy_layout`/`same_name`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Extend `FakeHTTP` in `tests/test_engine.py`: record `GET` calls on `/webhooks` and answer from a `hooks: dict[str, list[dict]]` map keyed by channel id; created channels are remembered in `self.made: list[dict]` so a later `channels(target)` can return them when the test wants:
+
+```python
+class FakeHTTP:
+    def __init__(self, existing: list[dict] | None = None, gone: ApiError | None = None, fail: tuple = ()) -> None:
+        self.calls: list[tuple[str, str, dict]] = []
+        self.existing = existing or []
+        self.gone = gone
+        self.fail = set(fail)
+        self.sources: dict[str, list[dict]] = {}
+        self.listed: list[dict] = []
+        self.hooks: dict[str, list[dict]] = {}
+        self.seq = 1000
+
+    async def call(self, method: str, path: str, **kw: Any) -> Any:
+        body = kw.get("json") or {}
+        self.calls.append((method, path, body))
+        if method == "GET" and path.endswith("/webhooks"):
+            return list(self.hooks.get(path.split("/")[2], []))
+        if method == "POST" and path.endswith("/webhooks"):
+            self.seq += 1
+            return {"id": str(self.seq), "token": "tok"}
+        if method == "POST" and path.endswith("/channels"):
+            if body.get("name") in self.fail:
+                raise ApiError(400, "no")
+            self.seq += 1
+            return {"id": str(self.seq), **body}
+        if method == "GET" and path.endswith("/member"):
+            return {"roles": []}
+        return None
+```
+
+(`channels`, `guilds`, `active_threads` stay as they are.) Add the tests:
+
+```python
+    def posts(self, http: FakeHTTP, suffix: str) -> list[dict]:
+        return [body for method, path, body in http.calls if method == "POST" and path.endswith(suffix)]
+
+    async def test_owned_guilds_lists_only_servers_the_account_owns(self) -> None:
+        http = FakeHTTP()
+        http.listed = [
+            {"id": "5", "name": "Desk", "owner": False},
+            {"id": "900", "name": "zeta copy", "owner": True},
+            {"id": "901", "name": "Alpha", "owner": True},
+        ]
+        self.engine.http = http
+        self.assertEqual(await self.engine.owned_guilds(), [{"id": "901", "name": "Alpha"}, {"id": "900", "name": "zeta copy"}])
+        self.engine.http = None
+        with self.assertRaises(ApiError):
+            await self.engine.owned_guilds()
+
+    async def test_fill_creates_categories_channels_and_webhooks_in_an_owned_server(self) -> None:
+        http = FakeHTTP()
+        http.listed = [{"id": "5", "name": "Desk", "owner": False}, {"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}, row("11", name="news"), row("20", name="other", guild_id="6")])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 0})
+        categories = [b for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 4]
+        self.assertEqual([c["name"] for c in categories], ["Talk"])
+        texts = [b for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 0]
+        self.assertEqual([(t["name"], "parent_id" in t) for t in texts], [("general", True), ("news", False)])
+        self.assertEqual(len(self.posts(http, "/webhooks")), 2)
+        self.assertFalse(any(method == "DELETE" for method, path, body in http.calls))
+        self.assertFalse(any(method == "GET" and path.endswith("/webhooks") for method, path, body in http.calls))
+        hooks = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertTrue(hooks["10"].startswith("https://discord.com/api/webhooks/"))
+        self.assertTrue(hooks["11"].startswith("https://discord.com/api/webhooks/"))
+        self.assertEqual(hooks["20"], "")
+        self.assertEqual(self.store.targets(), {"5": {"target_id": "900", "target_name": "Desk copy"}})
+        self.assertIn("webhooks on 2 channel(s) in Desk copy", self.notes())
+        self.assertEqual(self.delays, [0.3, 0.25, 0.25, 0.25, 0.25])
+
+    async def test_fill_reuses_channels_and_their_webhooks(self) -> None:
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [
+            {"id": "c1", "type": 4, "name": "talk"},
+            {"id": "t1", "type": 0, "name": "General", "parent_id": "c1"},
+            {"id": "t2", "type": 0, "name": "news", "parent_id": None},
+            {"id": "t3", "type": 0, "name": "general", "parent_id": None},
+        ]
+        http.hooks["t1"] = [{"id": "77", "name": "general", "token": "old"}, {"id": "78", "name": "someone else", "token": "x"}]
+        http.hooks["t2"] = [{"id": "79", "name": "news"}]
+        self.engine.http = http
+        # the source channel "general" sits under "Talk": the existing "General" under "talk" is reused (same name as
+        # Discord shows it, same parent), not the loose "general"; its webhook named "general" has a token and is kept
+        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}, row("11", name="news")])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 1})
+        self.assertEqual(self.posts(http, "/guilds/900/channels"), [])
+        self.assertEqual([path for method, path, body in http.calls if method == "POST"], ["/channels/t2/webhooks"])
+        hooks = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertEqual(hooks["10"], "https://discord.com/api/webhooks/77/old")
+        self.assertTrue(hooks["11"].startswith("https://discord.com/api/webhooks/1001/"))
+        self.assertIn("webhooks on 2 channel(s) in Desk copy, 1 reused", self.notes())
+
+    async def test_fill_covers_an_unlisted_ticked_channel(self) -> None:
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection([{"channel_id": "12", "guild_id": "5", "guild_name": "Desk", "channel_name": "gone", "webhook_url": "", "enabled": True}])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report["filled"], 1)
+        self.assertEqual([t["name"] for t in self.posts(http, "/guilds/900/channels")], ["gone"])
+
+    async def test_second_source_into_a_target_gets_prefixed_categories(self) -> None:
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [{"id": "c1", "type": 4, "name": "Talk"}, {"id": "t1", "type": 0, "name": "general", "parent_id": "c1"}]
+        self.engine.http = http
+        self.store.set_target("5", "900", "Desk copy")
+        self.store.replace_selection([row("20", name="general", guild_id="6") | {"guild_name": "Other", "parent": "Talk"}, row("21", name="loose", guild_id="6") | {"guild_name": "Other"}])
+        report = await self.engine.fill_copy("6", "900")
+        self.assertEqual(report["filled"], 2)
+        categories = [b["name"] for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 4]
+        self.assertEqual(categories, ["Other / Talk", "Other"])
+        texts = [b for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 0]
+        self.assertEqual([t["name"] for t in texts], ["general", "loose"])
+        self.assertTrue(all(t.get("parent_id") for t in texts))
+        self.assertEqual(self.store.targets()["6"], {"target_id": "900", "target_name": "Desk copy"})
+        self.assertEqual(self.store.targets()["5"], {"target_id": "900", "target_name": "Desk copy"})
+
+    async def test_fill_refuses_bad_servers(self) -> None:
+        http = FakeHTTP()
+        http.listed = [{"id": "5", "name": "Desk", "owner": True}, {"id": "900", "name": "Desk copy", "owner": True}]
+        self.engine.http = http
+        self.store.replace_selection([row("10", name="general")])
+        for source, target, text in (("x", "900", "unknown server"), ("5", "5", "a server cannot be its own copy"), ("6", "900", "tick the server or some of its channels first"), ("5", "7", "pick a server you own")):
+            with self.assertRaises(ApiError) as caught:
+                await self.engine.fill_copy(source, target)
+            self.assertEqual(str(caught.exception), text)
+        self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
+        self.assertEqual(self.store.targets(), {})
+
+    async def test_fill_skips_what_discord_refuses_and_fails_when_nothing_is_wired(self) -> None:
+        http = FakeHTTP(fail=("Talk", "news"))
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}, row("11", name="news")])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report["filled"], 1)
+        self.assertIn("category Talk was not created (no)", self.notes())
+        self.assertIn("#news was not created (no)", self.notes())
+        created = [b for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 0]
+        self.assertNotIn("parent_id", created[0])
+        http = FakeHTTP(fail=("general",))
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection([row("10", name="general")])
+        with self.assertRaises(ApiError) as caught:
+            await self.engine.fill_copy("5", "900")
+        self.assertEqual(str(caught.exception), "no webhook could be created")
+
+    async def test_fill_while_running_refreshes(self) -> None:
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        with mock.patch.object(engine_mod, "Gateway", FakeGateway):
+            self.store.replace_selection([row("10", HOOK)])
+            await self.engine.start()
+            self.store.replace_selection([row("10", HOOK), row("11", name="lobby")])
+            await self.engine.fill_copy("5", "900")
+            self.assertEqual(FakeGateway.made[0].resubscribed, 1)
+            self.assertTrue(self.engine._webhook_for("11").startswith("https://discord.com/api/webhooks/"))
+            await self.engine.stop()
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `PYTHONUTF8=1 python -X utf8 -m unittest tests.test_engine -q`
+Expected: FAIL — `AttributeError: 'Engine' object has no attribute 'owned_guilds'` / `'fill_copy'`.
+
+- [ ] **Step 3: Implement**
+
+In `mirror/engine.py` (`from .provision import copy_layout, same_name, webhook_name`), after `channels()`:
+
+```python
+    async def owned_guilds(self) -> list[dict[str, Any]]:
+        """The servers the account owns (the `owner` flag of /users/@me/guilds): the only servers a fill writes to
+        (decision 9b')."""
+        http = self._require_http()
+        rows = [
+            {"id": str(guild.get("id")), "name": guild.get("name") or "server"}
+            for guild in await http.guilds()
+            if guild.get("owner")
+        ]
+        rows.sort(key=lambda item: item["name"].casefold())
+        return rows
+
+    async def fill_copy(self, source_id: str, target_id: str) -> dict[str, Any]:
+        """Create the ticked channels of one source server, with their categories and one webhook each, inside a
+        server the owner owns, and keep the webhook URLs (decisions 9b', 9i, 9n, 9o). Nothing is ever deleted."""
+        if not source_id.isdigit() or not target_id.isdigit():
+            raise ApiError(400, "unknown server")
+        if source_id == target_id:
+            raise ApiError(400, "a server cannot be its own copy")
+        http = self._require_http()
+        rows = [row for row in self.store.selection() if row["enabled"] and row["guild_id"] == source_id]
+        if not rows:
+            raise ApiError(400, "tick the server or some of its channels first")
+        target = next((guild for guild in await self.owned_guilds() if guild["id"] == target_id), None)
+        if target is None:
+            raise ApiError(400, "pick a server you own")
+        shared = any(
+            source != source_id and link["target_id"] == target_id for source, link in self.store.targets().items()
+        )
+        source_name = rows[0].get("guild_name") or "server"
+        layout = copy_layout(source_name, rows, shared)
+        existing = await http.channels(target_id)
+        self.note(f"filling {target['name']} from {source_name}")
+        pairs, reused = await self._fill(http, target_id, layout, existing)
+        self.store.fill_webhooks(pairs)
+        self.store.set_target(source_id, target_id, target["name"])
+        text = f"webhooks on {len(pairs)} channel(s) in {target['name']}"
+        if reused:
+            text += f", {reused} reused"
+        self.note(text)
+        if self.running:
+            await self.refresh()
+        return {"target": target["name"], "filled": len(pairs), "reused": reused}
+
+    async def _fill(
+        self, http: DiscordHTTP, target_id: str, layout: dict[str, Any], existing: list[dict[str, Any]]
+    ) -> tuple[list[tuple[str, str]], int]:
+        categories: dict[str, str] = {}
+        texts: list[dict[str, Any]] = []
+        for item in existing:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            if item.get("type") == 4:
+                categories.setdefault(str(item.get("name") or "").casefold(), str(item["id"]))
+            elif item.get("type") in TEXT_TYPES:
+                texts.append(item)
+        parents: dict[str, str] = {}
+        for category in layout["categories"]:
+            found = categories.get(category["name"].casefold())
+            if found:
+                parents[category["key"]] = found
+                continue
+            try:
+                created = await http.call("POST", f"/guilds/{target_id}/channels", json={"name": category["name"], "type": 4})
+            except ApiError as exc:
+                self.note(f"category {category['name']} was not created ({exc})")
+                await self._wait(0.3)
+                continue
+            if isinstance(created, dict) and created.get("id"):
+                parents[category["key"]] = str(created["id"])
+                categories[category["name"].casefold()] = str(created["id"])
+            else:
+                self.note(f"category {category['name']} was not created")
+            await self._wait(0.3)
+        pairs: list[tuple[str, str]] = []
+        reused = 0
+        for channel in layout["channels"]:
+            parent = parents.get(channel["category_key"], "")
+            match = next(
+                (
+                    item
+                    for item in texts
+                    if same_name(str(item.get("name") or ""), channel["name"]) and str(item.get("parent_id") or "") == parent
+                ),
+                None,
+            )
+            if match is not None:
+                dest = str(match["id"])
+            else:
+                body: dict[str, Any] = {"name": channel["name"], "type": 0}
+                if parent:
+                    body["parent_id"] = parent
+                if channel["topic"]:
+                    body["topic"] = channel["topic"]
+                try:
+                    created = await http.call("POST", f"/guilds/{target_id}/channels", json=body)
+                except ApiError as exc:
+                    self.note(f"#{channel['name']} was not created ({exc})")
+                    await self._wait(0.25)
+                    continue
+                if not isinstance(created, dict) or not created.get("id"):
+                    self.note(f"#{channel['name']} was not created")
+                    await self._wait(0.25)
+                    continue
+                dest = str(created["id"])
+                texts.append({"id": dest, "type": 0, "name": channel["name"], "parent_id": parent or None})
+                await self._wait(0.25)
+            url, kept = await self._webhook_on(http, dest, channel["name"], look=match is not None)
+            if url:
+                pairs.append((channel["source_id"], url))
+                reused += int(kept)
+                self.note(f"#{channel['name']}")
+            await self._wait(0.25)
+        if not pairs:
+            raise ApiError(400, "no webhook could be created")
+        return pairs, reused
+
+    async def _webhook_on(self, http: DiscordHTTP, channel_id: str, name: str, look: bool) -> tuple[str, bool]:
+        """The URL of a webhook on the channel: one this fill made before, when `look` and it is still there
+        (same name, token visible), otherwise a new one. ("", False) when Discord refuses."""
+        wanted = webhook_name(name)
+        if look:
+            try:
+                listed = await http.call("GET", f"/channels/{channel_id}/webhooks")
+            except ApiError:
+                listed = []
+            for hook in listed if isinstance(listed, list) else []:
+                if isinstance(hook, dict) and hook.get("token") and hook.get("name") == wanted:
+                    try:
+                        return clean_webhook(f"https://discord.com/api/webhooks/{hook['id']}/{hook['token']}"), True
+                    except ApiError:
+                        continue
+        try:
+            hook = await http.call("POST", f"/channels/{channel_id}/webhooks", json={"name": wanted})
+        except ApiError as exc:
+            self.note(f"webhook for #{name} failed ({exc})")
+            return "", False
+        if not isinstance(hook, dict) or not hook.get("id") or not hook.get("token"):
+            self.note(f"webhook for #{name} failed")
+            return "", False
+        try:
+            return clean_webhook(f"https://discord.com/api/webhooks/{hook['id']}/{hook['token']}"), False
+        except ApiError as exc:
+            self.note(f"webhook for #{name} failed ({exc})")
+            return "", False
+```
+
+Check the expected `self.delays` in the first test against this pacing (`0.3` after the one category, `0.25` after each of two channels and two webhooks) and adjust the test only if the implementation above is what the plan says and the numbers were miscounted here — then record it in `odchylky`.
+
+- [ ] **Step 4: Run the full suite**
+
+Run the full test command. Expected: OK.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add mirror/engine.py tests/test_engine.py
+git commit -m "Fill a server the owner owns with a source's ticked channels, reusing channels and webhooks of the same name."
+```
+
+---
+
+### Task 5: API — the owned servers and the fill
+
+**Files:**
+- Modify: `mirror/web.py`
+- Test: `tests/test_web.py`
+
+**Interfaces:**
+- Produces: `GET /api/targets` → `{"targets": [...]}` from `engine.owned_guilds()`; `POST /api/guilds/{guild_id}/fill` with JSON `{"target": "<id>"}` → the snapshot plus `"report"` from `engine.fill_copy(guild_id, target)`; `_json` already enforces the JSON content type (415) and an object body (400). Without a token both answer 401 `{"error": "add a token first"}` through `guard`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+    async def test_targets_and_fill_need_a_token(self) -> None:
+        client = await self.client()
+        resp = await client.get("/api/targets")
+        self.assertEqual(resp.status, 401)
+        self.assertEqual(await resp.json(), {"error": "add a token first"})
+        resp = await client.post("/api/guilds/5/fill", json={"target": "900"})
+        self.assertEqual(resp.status, 401)
+        resp = await client.post("/api/guilds/5/fill", data="x", headers={"Content-Type": "text/plain"})
+        self.assertEqual(resp.status, 415)
+
+    async def test_fill_route_calls_the_engine_and_returns_the_report(self) -> None:
+        client = await self.client()
+        engine = client.server.app["engine"]
+
+        async def fill(source: str, target: str) -> dict:
+            return {"target": f"{source}->{target}", "filled": 2, "reused": 0}
+
+        engine.fill_copy = fill
+        resp = await client.post("/api/guilds/5/fill", json={"target": 900})
+        self.assertEqual(resp.status, 200)
+        body = await resp.json()
+        self.assertEqual(body["report"], {"target": "5->900", "filled": 2, "reused": 0})
+        self.assertIn("selection", body)
+        self.assertEqual(body["targets"], {})
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `PYTHONUTF8=1 python -X utf8 -m unittest tests.test_web -q`
+Expected: FAIL — 404 for both routes.
+
+- [ ] **Step 3: Implement**
+
+In `mirror/web.py`:
+
+```python
+async def targets(request: web.Request) -> web.Response:
+    return web.json_response({"targets": await request.app["engine"].owned_guilds()})
+
+
+async def fill_copy(request: web.Request) -> web.Response:
+    engine: Engine = request.app["engine"]
+    body = await _json(request)
+    report = await engine.fill_copy(request.match_info["guild_id"], str(body.get("target") or ""))
+    out = engine.snapshot()
+    out["report"] = report
+    return web.json_response(out)
+```
+
+Routes, next to `channels`:
+
+```python
+    app.router.add_get("/api/targets", targets)
+    app.router.add_post("/api/guilds/{guild_id}/fill", fill_copy)
+```
+
+- [ ] **Step 4: Run the full suite**
+
+Run the full test command. Expected: OK.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add mirror/web.py tests/test_web.py
+git commit -m "Add the owned servers and the fill to the API."
+```
+
+---
+
+### Task 6: CLI — `c` picks the copy, Enter fills it, unticking keeps it
+
+**Files:**
+- Modify: `mirror/cli/controller.py`, `mirror/cli/render.py`
+- Test: `tests/test_cli_controller.py`, `tests/test_cli_render.py`
+
+**Interfaces:**
+- Produces, on the servers screen at depth `guilds`: `c`/`C` on a server row opens the target picker (depth `targets`): `self.targets` = `engine.owned_guilds()` without the source itself, `self.target_source` = the server, `local_index` on the current target when the snapshot's `targets` links the source, else 0. Errors before opening: `"tick the server or some of its channels first"` when no picked row belongs to the server; `"you own no other server, create one in Discord first"` when the list is empty. At depth `targets`: Up/Down wrap, Enter → `engine.fill_copy(source id, target id)` then `refresh()`, `self.error = "<filled> channel(s) ready in <target>"`, back to depth `guilds` with the cursor on the source; an `ApiError`/`RuntimeError` keeps the picker open with its text; Esc → depth `guilds`, cursor on the source. Unticking a server (Enter on a ticked server) whose source has a link in the snapshot's `targets` ends with `self.error = "copy in <target_name> kept, delete it in Discord if you do not need it"` (decision 9e). Hints: depth `guilds` `"enter toggles, c fills copy, right opens channels, esc back"` (59 characters); depth `targets` `"enter fills the copy, esc back"`. `_save_options` sends `backfill`, `include_threads`, `mirror`, `channels` only.
+- Render: depth `targets`: title `"Copy of <source> into"`, rows `"[x] <name>"` for the linked target and `"[ ] <name>"` otherwise, `"no servers you own"` when empty; depth `guilds`: a linked server row ends with `"  copy: <target_name>"`.
+- Consumes: Task 1's snapshot key `targets`, Task 4's `owned_guilds`/`fill_copy`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Update `FakeEngine` in `tests/test_cli_controller.py`: `self.options = {"backfill": 0, "include_threads": False, "mirror": False}`; `self.targets: dict = {}`; `self.owned: list[dict] = []`; `snapshot()` adds `"targets": dict(self.targets)`; `save_setup` drops the `dest_name` line; delete `reset_destination`; add:
+
+```python
+    async def owned_guilds(self) -> list[dict]:
+        self.calls.append(("owned_guilds",))
+        self._maybe_fail("owned_guilds")
+        return list(self.owned)
+
+    async def fill_copy(self, source_id: str, target_id: str) -> dict:
+        self.calls.append(("fill_copy", source_id, target_id))
+        self._maybe_fail("fill_copy")
+        name = next(g["name"] for g in self.owned if g["id"] == target_id)
+        self.targets[source_id] = {"target_id": target_id, "target_name": name}
+        for row in self.selection:
+            if row["guild_id"] == source_id and not row["webhook_url"]:
+                row["webhook_url"] = f"https://discord.com/api/webhooks/{row['channel_id']}/t"
+        return {"target": name, "filled": 2, "reused": 0}
+```
+
+Change the assertions at lines 494–495 (the `_save_options` body) to `self.assertNotIn("global_webhook", engine.calls[-1][1])` and `self.assertNotIn("dest_name", engine.calls[-1][1])`. Add to `ServersScreenTests`:
+
+```python
+    async def test_c_opens_the_target_picker_and_enter_fills(self) -> None:
+        ui, engine = await self.open_servers()
+        engine.owned = [{"id": "g1", "name": "Qwen"}, {"id": "t1", "name": "Qwen copy"}, {"id": "t2", "name": "Spare"}]
+        await keys(ui, "c")
+        self.assertEqual(ui.error, "tick the server or some of its channels first")
+        self.assertEqual(ui.depth, "guilds")
+        await keys(ui, "Enter", "c")
+        self.assertEqual(ui.depth, "targets")
+        self.assertEqual([t["id"] for t in ui.targets], ["t1", "t2"])
+        self.assertEqual(ui.target_source["id"], "g1")
+        self.assertEqual(ui.hint(), "enter fills the copy, esc back")
+        await keys(ui, "ArrowDown", "Enter")
+        self.assertEqual(engine.calls[-1], ("fill_copy", "g1", "t2"))
+        self.assertEqual(ui.depth, "guilds")
+        self.assertEqual(ui.local_index, 0)
+        self.assertEqual(ui.error, "2 channel(s) ready in Spare")
+        self.assertEqual(ui.snap["targets"]["g1"]["target_name"], "Spare")
+        self.assertTrue(all(row["webhook_url"] for row in ui.picked.values()))
+        self.assertEqual(ui.hint(), "enter toggles, c fills copy, right opens channels, esc back")
+        self.assertLessEqual(len(ui.hint()), 60)
+
+    async def test_target_picker_starts_on_the_linked_target_and_escape_returns(self) -> None:
+        ui, engine = await self.open_servers()
+        engine.owned = [{"id": "t1", "name": "Qwen copy"}, {"id": "t2", "name": "Spare"}]
+        engine.targets["g1"] = {"target_id": "t2", "target_name": "Spare"}
+        ui.refresh()
+        await keys(ui, "Enter", "c")
+        self.assertEqual(ui.local_index, 1)
+        await keys(ui, "ArrowDown")
+        self.assertEqual(ui.local_index, 0)
+        await keys(ui, "Escape")
+        self.assertEqual(ui.depth, "guilds")
+        self.assertEqual(ui.local_index, 0)
+        self.assertEqual(ui.error, "")
+
+    async def test_fill_errors_keep_the_picker_open(self) -> None:
+        ui, engine = await self.open_servers()
+        engine.owned = [{"id": "t1", "name": "Qwen copy"}]
+        engine.fail["fill_copy"] = ApiError(400, "no webhook could be created")
+        await keys(ui, "Enter", "c", "Enter")
+        self.assertEqual(ui.depth, "targets")
+        self.assertEqual(ui.error, "no webhook could be created")
+        engine.fail["fill_copy"] = aiohttp.ClientError("boom")
+        with self.assertLogs("mirror.cli", level="ERROR"):
+            await keys(ui, "Enter")
+        self.assertEqual(ui.error, "request failed")
+        self.assertFalse(ui.busy)
+
+    async def test_no_owned_server_and_a_failed_list_show_errors(self) -> None:
+        ui, engine = await self.open_servers()
+        engine.owned = [{"id": "g1", "name": "Qwen"}]
+        await keys(ui, "Enter", "c")
+        self.assertEqual(ui.depth, "guilds")
+        self.assertEqual(ui.error, "you own no other server, create one in Discord first")
+        engine.fail["owned_guilds"] = ApiError(401, "add a token first")
+        await keys(ui, "c")
+        self.assertEqual(ui.error, "add a token first")
+        self.assertEqual(ui.depth, "guilds")
+
+    async def test_unticking_a_server_with_a_copy_says_the_copy_is_kept(self) -> None:
+        ui, engine = await self.open_servers()
+        engine.targets["g1"] = {"target_id": "t2", "target_name": "Spare"}
+        ui.refresh()
+        await keys(ui, "Enter")
+        self.assertEqual(ui.error, "")
+        await keys(ui, "Enter")
+        self.assertEqual(ui.picked, {})
+        self.assertEqual(ui.error, "copy in Spare kept, delete it in Discord if you do not need it")
+        self.assertEqual(engine.calls[-1][0], "save_setup")
+```
+
+In `tests/test_cli_render.py`:
+
+```python
+    def test_target_picker_and_the_copy_mark(self) -> None:
+        ui = ui_on("servers", targets={"g1": {"target_id": "t2", "target_name": "Spare"}})
+        ui.guilds = [{"id": "g1", "name": "Qwen", "icon": ""}, {"id": "g2", "name": "Moody", "icon": ""}]
+        ui.picked = {"c1": {"channel_id": "c1", "guild_id": "g1", "webhook_url": ""}}
+        lines = render(ui, 60, 8)
+        self.assertEqual(lines[1], "Select servers")
+        self.assertEqual(lines[2], "> [x] Qwen  copy: Spare")
+        self.assertEqual(lines[3], "  [ ] Moody")
+        ui.depth = "targets"
+        ui.target_source = ui.guilds[0]
+        ui.targets = [{"id": "t1", "name": "Qwen copy"}, {"id": "t2", "name": "Spare"}]
+        ui.local_index = 1
+        lines = render(ui, 60, 8)
+        self.assertEqual(lines[1], "Copy of Qwen into")
+        self.assertEqual(lines[2], "  [ ] Qwen copy")
+        self.assertEqual(lines[3], "> [x] Spare")
+        self.assertEqual(lines[-1], "enter fills the copy, esc back")
+        ui.targets = []
+        self.assertIn("no servers you own", render(ui, 60, 8))
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `PYTHONUTF8=1 python -X utf8 -m unittest tests.test_cli_controller tests.test_cli_render -q`
+Expected: FAIL — `c` does nothing (`depth` stays `guilds`, `error` empty); the render test lacks the copy mark.
+
+- [ ] **Step 3: Implement**
+
+`mirror/cli/controller.py`:
+
+- `__init__`: `self.targets: list[dict[str, Any]] = []`, `self.target_source: dict[str, Any] | None = None`.
+- `hint()`: before the `screen == "servers"` lines add `if screen == "servers" and self.depth == "targets": return "enter fills the copy, esc back"`; change the guilds hint to `"enter toggles, c fills copy, right opens channels, esc back"`.
+- `_save_options`: body is `{"backfill": ..., "include_threads": ..., "mirror": ..., "channels": list(self.picked.values())}`.
+- `_server_key`: at the top, after the `channels` branch:
+
+```python
+        if self.depth == "targets":
+            await self._target_key(key)
+            return
+```
+
+and in the guilds branch: `elif key in ("c", "C"): await self._open_targets(self.guilds[self.local_index])`.
+
+- New methods:
+
+```python
+    # ---- the copy of a source server: a server the owner owns, filled by Mando (decisions 9b', 9m, 9e) ----
+
+    def _target_of(self, guild_id: str) -> dict[str, Any] | None:
+        return (self.snap.get("targets") or {}).get(guild_id)
+
+    async def _open_targets(self, guild: dict[str, Any]) -> None:
+        self.error = ""
+        if not any(row.get("guild_id") == guild["id"] for row in self.picked.values()):
+            self.error = "tick the server or some of its channels first"
+            return
+        self.busy = True
+        try:
+            owned = [g for g in await self.engine.owned_guilds() if g["id"] != guild["id"]]
+        except (ApiError, RuntimeError) as exc:
+            self.error = str(exc)
+            return
+        except Exception:
+            log.exception("owned server list failed")
+            self.error = UNEXPECTED
+            return
+        finally:
+            self.busy = False
+        if not owned:
+            self.error = "you own no other server, create one in Discord first"
+            return
+        self.targets = owned
+        self.target_source = guild
+        self.depth = "targets"
+        link = self._target_of(guild["id"]) or {}
+        self.local_index = max(0, next((at for at, g in enumerate(owned) if g["id"] == link.get("target_id")), 0))
+
+    async def _target_key(self, key: str) -> None:
+        if key == "Escape":
+            self._leave_targets()
+            return
+        if not self.targets:
+            return
+        if key == "ArrowDown":
+            self.local_index = (self.local_index + 1) % len(self.targets)
+        elif key == "ArrowUp":
+            self.local_index = (self.local_index - 1 + len(self.targets)) % len(self.targets)
+        elif key == "Enter":
+            await self._fill(self.targets[self.local_index])
+
+    def _leave_targets(self) -> None:
+        source = self.target_source["id"] if self.target_source else None
+        self.depth = "guilds"
+        self.target_source = None
+        self.local_index = max(0, next((at for at, g in enumerate(self.guilds) if g["id"] == source), 0))
+
+    async def _fill(self, target: dict[str, Any]) -> None:
+        source = self.target_source or {}
+        self.busy = True
+        try:
+            report = await self.engine.fill_copy(str(source.get("id") or ""), target["id"])
+            self.refresh()
+        except (ApiError, RuntimeError) as exc:
+            self.error = str(exc)
+            return
+        except Exception:
+            log.exception("fill failed")
+            self.error = UNEXPECTED
+            return
+        finally:
+            self.busy = False
+        self._leave_targets()
+        self.error = f"{report.get('filled', 0)} channel(s) ready in {report.get('target') or target.get('name')}"
+```
+
+- `_toggle_guild`, untick branch: after `await self._save_options()`, add
+
+```python
+            link = self._target_of(guild["id"])
+            if link and not self.error:
+                self.error = f"copy in {link.get('target_name') or 'the copy'} kept, delete it in Discord if you do not need it"
+```
+
+`mirror/cli/render.py`, in the `servers` branch before the `else` for the guild list:
+
+```python
+        elif ui.depth == "targets" and ui.target_source:
+            title = f"Copy of {ui.target_source.get('name') or 'server'} into"
+            if not ui.targets:
+                rows.append("no servers you own")
+            link = (ui.snap.get("targets") or {}).get(ui.target_source.get("id")) or {}
+            for at, target in enumerate(ui.targets):
+                mark = "[x] " if target.get("id") == link.get("target_id") else "[ ] "
+                rows.append(_row(f"{mark}{target.get('name')}", at == ui.local_index))
+```
+
+and in the guild list loop:
+
+```python
+            links = ui.snap.get("targets") or {}
+            for at, guild in enumerate(ui.guilds):
+                mark = "[x] " if guild.get("id") in selected else "[ ] "
+                label = f"{mark}{guild.get('name')}"
+                link = links.get(guild.get("id"))
+                if link:
+                    label += f"  copy: {link.get('target_name') or link.get('target_id')}"
+                rows.append(_row(label, at == ui.local_index))
+```
+
+- [ ] **Step 4: Run the full suite**
+
+Run the full test command. Expected: OK. Also `grep -n "dest_name\|global_webhook\|reset_destination" mirror/ tests/test_cli_controller.py tests/test_cli_render.py` prints nothing.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add mirror/cli/controller.py mirror/cli/render.py tests/test_cli_controller.py tests/test_cli_render.py
+git commit -m "Pick the copy of a source server with c and fill it from the CLI."
+```
+
+---
+
+### Task 7: Relay — files 1:1 up to 20 MiB each, a larger file as one line with two links
+
+**Files:**
+- Modify: `mirror/relay.py`, `mirror/engine.py` (`guild_id` into the view)
+- Test: `tests/test_relay.py`, `tests/test_engine.py`
+
+**Interfaces:**
+- Produces: `UPLOAD_LIMIT = 20 * 1024 * 1024` (per file, decision 10b); `UPLOAD_FILES = 10` kept; `plan_uploads(attachments) -> (upload, linked)` takes a file when its host is a CDN host, `0 < size <= UPLOAD_LIMIT` and fewer than `UPLOAD_FILES` are taken — no total cap (a 413 still falls back to links as today); `Relay._files` drops its total cap too. `oversize_lines(view) -> list[str]`: for each attachment with `size > UPLOAD_LIMIT`, three lines: `"This message has a file over the upload limit: <name> (<size>)"`, `"https://discord.com/channels/<guild_id or @me>/<channel_id>/<id>"`, `<url>`; `<size>` is `f"{size / 1048576:.1f} MiB"`. `payload_for` puts those lines after the content and before the links block, and the links block (`link_urls`) leaves the oversize files out. `view_from_message(message, channel_name, guild_name, guild_id="")` adds `"guild_id": str(message.get("guild_id") or guild_id)` to the view; the engine passes the row's guild id (`self.guild_of[channel_id]`, filled in `_index` from `row["guild_id"]`, threads mapped to their parent's).
+
+- [ ] **Step 1: Write the failing tests**
+
+In `tests/test_relay.py` replace `test_plan_uploads_limits` and add two tests; `make_view` gets `"guild_id": "9"`:
+
+```python
+    def test_plan_uploads_limits(self) -> None:
+        many = [attachment(f"f{i}.png", 1_000) for i in range(12)]
+        upload, linked = plan_uploads(many)
+        self.assertEqual(upload, many[:10])
+        self.assertEqual(linked, many[10:])
+        big = attachment("big.bin", UPLOAD_LIMIT + 1)
+        off = attachment("x.png", 10, "https://example.com/x.png")
+        zero = attachment("zero.png", 0)
+        upload, linked = plan_uploads([big, off, zero])
+        self.assertEqual(upload, [])
+        self.assertEqual(linked, [big, off, zero])
+        six = [attachment(f"s{i}.bin", UPLOAD_LIMIT) for i in range(6)]
+        upload, linked = plan_uploads(six)
+        self.assertEqual(upload, six)
+        self.assertEqual(linked, [])
+        self.assertEqual(UPLOAD_LIMIT, 20 * 1024 * 1024)
+
+    def test_oversize_file_becomes_a_line_with_two_links(self) -> None:
+        big = attachment("movie.mp4", 25 * 1024 * 1024 + 1)
+        off = attachment("x.png", 10, "https://example.com/x.png")
+        view = make_view([big, off])
+        body = payload_for(view, False)
+        lines = body["content"].split("\n")
+        self.assertEqual(lines[0], "hello")
+        self.assertEqual(lines[1], "This message has a file over the upload limit: movie.mp4 (25.0 MiB)")
+        self.assertEqual(lines[2], "https://discord.com/channels/9/2/1")
+        self.assertEqual(lines[3], big["url"])
+        self.assertEqual(lines[4], off["url"])
+        self.assertEqual(len(lines), 5)
+        view["guild_id"] = ""
+        self.assertIn("https://discord.com/channels/@me/2/1", payload_for(view, False)["content"])
+
+    async def test_oversize_file_is_never_downloaded(self) -> None:
+        big = attachment("movie.mp4", UPLOAD_LIMIT + 1)
+        self.session.queue.append(FakeResp(200, {"id": "5"}))
+        sent = await self.relay.create(HOOK, make_view([big]), False)
+        self.assertEqual(sent, "5")
+        self.assertEqual([c for c in self.session.calls if c[0] == "get"], [])
+        method, url, kwargs = self.sends()[0]
+        self.assertIn("json", kwargs)
+        self.assertIn("over the upload limit: movie.mp4", kwargs["json"]["content"])
+```
+
+In `tests/test_engine.py` add:
+
+```python
+    def test_views_carry_the_guild_id(self) -> None:
+        self.engine._index([row("10", HOOK)], False)
+        view = engine_mod.view_from_message({"id": "1", "channel_id": "10", "author": {"username": "a"}}, "general", "Desk", self.engine.guild_of.get("10", ""))
+        self.assertEqual(view["guild_id"], "5")
+        view = engine_mod.view_from_message({"id": "1", "channel_id": "10", "guild_id": "77", "author": {"username": "a"}}, "general", "Desk", "5")
+        self.assertEqual(view["guild_id"], "77")
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `PYTHONUTF8=1 python -X utf8 -m unittest tests.test_relay tests.test_engine -q`
+Expected: FAIL — `UPLOAD_LIMIT` is 10_000_000, no oversize line, `guild_of` missing.
+
+- [ ] **Step 3: Implement**
+
+`mirror/relay.py`:
+
+```python
+UPLOAD_FILES = 10
+UPLOAD_LIMIT = 20 * 1024 * 1024  # per file, the documented default (decision 10b)
+OVER_LIMIT = "This message has a file over the upload limit"
+```
+
+```python
+def plan_uploads(attachments: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    upload: list[dict[str, Any]] = []
+    linked: list[dict[str, Any]] = []
+    for item in attachments or []:
+        if not isinstance(item, dict):
+            continue
+        size = size_of(item)
+        if host_of(str(item.get("url") or "")) in CDN_HOSTS and 0 < size <= UPLOAD_LIMIT and len(upload) < UPLOAD_FILES:
+            upload.append(item)
+        else:
+            linked.append(item)
+    return upload, linked
+
+
+def oversize(item: dict[str, Any]) -> bool:
+    return size_of(item) > UPLOAD_LIMIT
+
+
+def message_link(view: dict[str, Any]) -> str:
+    guild = str(view.get("guild_id") or "") or "@me"
+    return f"https://discord.com/channels/{guild}/{view.get('channel_id')}/{view.get('id')}"
+
+
+def oversize_lines(view: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for item in view.get("attachments") or []:
+        if isinstance(item, dict) and oversize(item):
+            size = f"{size_of(item) / 1048576:.1f} MiB"
+            lines.append(f"{OVER_LIMIT}: {item.get('name') or 'file'} ({size})")
+            lines.append(message_link(view))
+            if item.get("url"):
+                lines.append(str(item["url"]))
+    return lines
+
+
+def link_urls(view: dict[str, Any]) -> list[str]:
+    links = view.get("links")
+    if not isinstance(links, list):
+        links = [item.get("url") for item in plan_uploads(view.get("attachments") or [])[1] if not oversize(item)]
+    return [str(url) for url in links if url]
+```
+
+In `payload_for`, after the content line and before the stickers line: `lines.extend(oversize_lines(view))`. In `Relay._post`, the fallback link lists must leave oversize items out: `links = [str(item.get("url")) for item in attachments if id(item) not in sent and item.get("url") and not oversize(item)]` and the same filter in the `too_large` branch. In `_files`, drop `total` and its check. In `view_from_message(message, channel_name, guild_name, guild_id="")` add `"guild_id": str(message.get("guild_id") or guild_id or "")`.
+
+`mirror/engine.py`: `self.guild_of: dict[str, str] = {}` in `__init__`; in `_index`: `self.guild_of[row["channel_id"]] = str(row.get("guild_id") or "")`; in `_load_threads` and the `THREAD_CREATE` branch: `self.guild_of[thread_id] = self.guild_of.get(parent, "")`; the two `view_from_message(...)` calls in `_create` and `_restore_view` pass `self.guild_of.get(channel_id, "")`.
+
+- [ ] **Step 4: Run the full suite**
+
+Run the full test command. Expected: OK (`test_files_reject_bad_downloads` still passes: its "huge" body is `UPLOAD_LIMIT + 1` bytes, now 20 MiB — keep it, it runs in well under a second).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add mirror/relay.py mirror/engine.py tests/test_relay.py tests/test_engine.py
+git commit -m "Upload files up to 20 MiB each and replace a larger file with one line and two links."
+```
+
+---
+
+### Task 8: Relay — stickers as images, the embeds key on every edit, the 6000-character embed total
+
+**Files:**
+- Modify: `mirror/relay.py`
+- Test: `tests/test_relay.py`
+
+**Interfaces:**
+- Produces: `sticker_files(message) -> list[dict]`: for each `sticker_items` entry with `format_type` 1 or 2 an attachment `{"name": "<name>.png", "url": "https://cdn.discordapp.com/stickers/<id>.png", "content_type": "image/png", "size": 0, "sticker": True}`, for 4 `{"name": "<name>.gif", "url": "https://media.discordapp.net/stickers/<id>.gif", "content_type": "image/gif", "size": 0, "sticker": True}`; `sticker_names(message)` returns only the names of format 3 (Lottie) stickers (decision 10a). `view_from_message` appends the sticker files to `attachments`. `plan_uploads` takes a sticker item with `size == 0` (its size is unknown; `_fetch` enforces the limit on the body). `Relay.edit` always sends `"embeds"` (`[]` when none, issue #6). `safe_embeds` stops adding embeds once the total of title, description, field names and values, footer text and author name would pass 6000 characters (`EMBED_TOTAL = 6000`). Decision 10c (the dot) and 10d (prefix only on a shared URL, pinned in Task 3) need no change.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+    def test_stickers_become_image_uploads_and_lottie_stays_a_name(self) -> None:
+        message = {
+            "id": "1", "channel_id": "2", "author": {"username": "a"},
+            "sticker_items": [
+                {"id": "100", "name": "wave", "format_type": 1},
+                {"id": "101", "name": "spin", "format_type": 2},
+                {"id": "102", "name": "dance", "format_type": 4},
+                {"id": "103", "name": "vector", "format_type": 3},
+            ],
+        }
+        view = view_from_message(message, "general", "Desk")
+        self.assertEqual(view["stickers"], ["vector"])
+        self.assertEqual(
+            [(a["name"], a["url"], a["content_type"]) for a in view["attachments"]],
+            [
+                ("wave.png", "https://cdn.discordapp.com/stickers/100.png", "image/png"),
+                ("spin.png", "https://cdn.discordapp.com/stickers/101.png", "image/png"),
+                ("dance.gif", "https://media.discordapp.net/stickers/102.gif", "image/gif"),
+            ],
+        )
+        upload, linked = plan_uploads(view["attachments"])
+        self.assertEqual(len(upload), 3)
+        self.assertEqual(linked, [])
+        self.assertEqual(payload_for(view, False)["content"], "stickers: vector")
+
+    async def test_sticker_and_oversize_file_in_one_post(self) -> None:
+        big = attachment("movie.mp4", UPLOAD_LIMIT + 1)
+        sticker = {"name": "wave.png", "url": "https://cdn.discordapp.com/stickers/100.png", "content_type": "image/png", "size": 0, "sticker": True}
+        self.session.downloads[sticker["url"]] = FakeResp(200, body=b"\x89PNG")
+        view = make_view([big, sticker])
+        self.session.queue.append(FakeResp(200, {"id": "5"}))
+        sent = await self.relay.create(HOOK, view, False)
+        self.assertEqual(sent, "5")
+        self.assertEqual(len(self.sends()), 1)
+        method, url, kwargs = self.sends()[0]
+        self.assertEqual(form_files(kwargs["data"]), [b"\x89PNG"])
+        content = form_payload(kwargs["data"])["content"]
+        self.assertIn("over the upload limit: movie.mp4", content)
+        self.assertNotIn("wave.png", content)
+        self.assertEqual(view["links"], [])
+
+    async def test_edit_always_sends_the_embeds_key(self) -> None:
+        self.session.queue.append(FakeResp(200, {"id": "5"}))
+        await self.relay.edit(HOOK, "5", make_view([]), False)
+        method, url, kwargs = self.sends()[0]
+        self.assertEqual(method, "patch")
+        self.assertEqual(kwargs["json"]["embeds"], [])
+        self.assertNotIn("username", kwargs["json"])
+
+    def test_embeds_stay_under_the_total(self) -> None:
+        from mirror.relay import safe_embeds
+        embeds = [{"title": "t", "description": "d" * 4000}, {"description": "e" * 1990}, {"description": "f" * 20}, {"title": "g"}]
+        kept = safe_embeds({"embeds": embeds})
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(kept[1]["description"], "e" * 1990)
+        many = [{"title": f"t{i}", "fields": [{"name": "n" * 256, "value": "v" * 1024}]} for i in range(10)]
+        kept = safe_embeds({"embeds": many})
+        self.assertLessEqual(sum(len(e["title"]) + 256 + 1024 for e in kept), 6000)
+        self.assertEqual(len(kept), 4)
+```
+
+Add `view_from_message` to the `from mirror.relay import (...)` list.
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `PYTHONUTF8=1 python -X utf8 -m unittest tests.test_relay -q`
+Expected: FAIL — `view["stickers"]` lists all four names and `attachments` is empty; the edit body has no `embeds`; `safe_embeds` keeps every embed up to ten.
+
+- [ ] **Step 3: Implement**
+
+`mirror/relay.py`:
+
+```python
+EMBED_TOTAL = 6000
+STICKER_PNG = 1
+STICKER_APNG = 2
+STICKER_LOTTIE = 3
+STICKER_GIF = 4
+
+
+def sticker_names(message: dict[str, Any]) -> list[str]:
+    """Stickers that have no image to send: Lottie (decision 10a)."""
+    names = []
+    for sticker in message.get("sticker_items") or []:
+        if isinstance(sticker, dict) and sticker.get("name") and sticker.get("format_type") == STICKER_LOTTIE:
+            names.append(str(sticker["name"])[:64])
+    return names
+
+
+def sticker_files(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """PNG, APNG and GIF stickers as image files from the CDN, uploaded like attachments (decision 10a)."""
+    files: list[dict[str, Any]] = []
+    for sticker in message.get("sticker_items") or []:
+        if not isinstance(sticker, dict) or not sticker.get("id"):
+            continue
+        kind = sticker.get("format_type")
+        name = str(sticker.get("name") or "sticker")[:64]
+        if kind in (STICKER_PNG, STICKER_APNG):
+            url, ext, mime = f"https://cdn.discordapp.com/stickers/{sticker['id']}.png", "png", "image/png"
+        elif kind == STICKER_GIF:
+            url, ext, mime = f"https://media.discordapp.net/stickers/{sticker['id']}.gif", "gif", "image/gif"
+        else:
+            continue
+        files.append({"name": f"{name}.{ext}", "url": url, "content_type": mime, "size": 0, "sticker": True})
+    return files
+```
+
+In `view_from_message`, after the attachments loop: `attachments.extend(sticker_files(message))`. In `plan_uploads`, the size condition becomes `(0 < size <= UPLOAD_LIMIT or (size == 0 and item.get("sticker")))`. In `oversize`, a sticker is never oversize (`size_of` is 0). In `Relay.edit`: after `body = payload_for(view, prefix)` add `body["embeds"] = view.get("embeds") or []` (the key is always present on an edit, issue #6). In `safe_embeds`: keep a running `total`; compute `used = embed_chars(item)` before appending and `if total + used > EMBED_TOTAL: break` where
+
+```python
+def embed_chars(item: dict[str, Any]) -> int:
+    count = len(item.get("title") or "") + len(item.get("description") or "")
+    for field in item.get("fields") or []:
+        count += len(field.get("name") or "") + len(field.get("value") or "")
+    footer = item.get("footer") or {}
+    author = item.get("author") or {}
+    return count + len(str(footer.get("text") or "")) + len(str(author.get("name") or ""))
+```
+
+- [ ] **Step 4: Run the full suite**
+
+Run the full test command. Expected: OK.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add mirror/relay.py tests/test_relay.py
+git commit -m "Send PNG, APNG and GIF stickers as images, always send the embeds key on an edit and keep embeds under 6000 characters."
+```
+
+---
+
+### Task 9: Docs — README, glossary, design notes
+
+**Files:**
+- Modify: `README.md`, `CONTEXT.md`, `docs/superpowers/specs/2026-10-08-terminal-cli-design.md`
+
+**Interfaces:** none (text only). Every sentence below is checked against the code of Tasks 1–8 before it is written; a sentence the code does not do is a finding, not a doc fix.
+
+- [ ] **Step 1: README "First run"**
+
+Replace steps 3 and 4 and the paragraph after the list with:
+
+```markdown
+3. In Discord, create a server for the copy, or pick one you already own. Mando only writes to servers your account owns.
+4. Select servers. Enter on a source server ticks all its listed channels; right arrow opens them to tick a few. Then `c` on the server lists the servers you own: Enter on one fills it with the ticked channels, their categories and one webhook per channel. Or give a ticked channel your own webhook URL: Enter on it opens its webhook row, paste the URL and press Enter.
+5. Webhook settings: pick backfill and threads.
+6. Back to the menu and Start/Resume mirror.
+
+The ticked source channels are the selection, kept in `state.db` across restarts. Each one is mirrored to its own webhook, its target. Mando never creates a server and never deletes anything in yours: a fill adds the categories and channels that are missing and reuses a channel of the same name and the webhook it made there before. Several sources can share one server; the second source gets its own categories, named `source / category`. Unticking a server stops mirroring it and keeps the copy. Start refuses while a ticked channel has no webhook: it shows `#channel has no webhook` and opens Select servers at that channel.
+```
+
+- [ ] **Step 2: README "Menu"**
+
+In the Select servers paragraph, add after the first sentence: "`c` on a server lists the servers you own, with the one that is this server's copy marked; Enter fills it and the server row then shows `copy: <name>`." Replace the sentence about `a` and the server Enter with: "Enter on a source server and `a` in the channel list tick channels without opening their rows; a channel that shows `no webhook` gets its URL with Enter or through a fill."
+
+- [ ] **Step 3: README "What gets mirrored"**
+
+Replace the attachments bullet with: "- Up to 10 files per message are uploaded 1:1, each up to 20 MiB. A larger file is replaced by one line naming it and its size, a link to the original message and the file's download link." Add: "- PNG, APNG and GIF stickers are posted as images; a Lottie sticker is named." Replace the shared-webhook bullet with: "- When two selected channels share one webhook URL, each message starts with a `server / #channel` line." Add: "- An edit that removes every embed removes them in the mirrored message too; embeds are kept under Discord's 6000-character total."
+
+- [ ] **Step 4: CONTEXT.md**
+
+Replace the **Copy** entry with:
+
+```markdown
+**Copy**:
+A Discord server the owner owns and picks for one ticked source server; a fill adds the
+source's ticked channels, their categories and one webhook per channel to it and never
+deletes anything in it. Two sources may share one copy.
+_Avoid_: mirror server, destination server, dest
+
+**Fill**:
+Mando creating, inside a copy, the channels and webhooks that the ticked channels of one
+source still lack, reusing what is already there.
+_Avoid_: provision, sync, deploy
+```
+
+- [ ] **Step 5: Design notes**
+
+Under decision 9b' add one line: "Implemented in plan B (`docs/superpowers/plans/2026-10-09-own-copies.md`): `Engine.fill_copy`, the `c` key (9m)." Under 10a add: "Implemented in plan B's Task 8; the real-webhook check is the owner's manual step at the end of the plan."
+
+- [ ] **Step 6: Run the full suite and the attribution scan, then commit**
+
+Run the full test command (OK expected) and `git grep -niwE 'claude|anthropic' -- ':!CLAUDE.md'` (only `.gitignore:.claude/` may match).
+
+```bash
+git add README.md CONTEXT.md docs/superpowers/specs/2026-10-08-terminal-cli-design.md
+git commit -m "Describe the fill, the c key and the relay limits in the README and the glossary."
+```
+
+---
+
+## Manual check by the owner (attended, after the gate)
+
+Not a task for an agent: it writes to the owner's Discord account.
+
+1. `start.bat`, sign in, tick a small source server, `c`, pick the test server `1557894816161992704`, Enter. Expect the categories, channels and webhooks in that server, the row `copy: <name>`, and no deleted channel there.
+2. `c` again on the same server, Enter on the same target. Expect "n channel(s) ready in <name>, n reused" style notes in `data/mando.log` and no second channel or webhook.
+3. Start. Post in a source channel a PNG sticker, a GIF sticker and a file over 20 MiB. Expect the stickers as images and the file as one line with two links in the copy. Edit a source message to remove an embed; expect the mirrored embed gone.

@@ -151,6 +151,21 @@ Decisions (owner):
 - **9l.** (owner, 2026-10-09) The gap in 9g stays open for plan B: the store keeps the
   `hooks` memory unchanged in plan A, and plan B, which reshapes the store for targets
   per source, decides whether unticking forgets a kept webhook URL.
+- **9m.** (owner, 2026-10-09, plan B) The target picker opens with the letter `c` on a
+  server row of Select servers; Enter keeps its plan A meaning (tick all listed channels,
+  or untick every channel of the server). 9b' said Enter; the two could not both hold.
+- **9n.** (owner, 2026-10-09, plan B) A fill covers the ticked channels of the source,
+  whether the whole server or a few channels are ticked; 9f's "no copy for a partly
+  ticked server" was written for the server Mando created and is dropped. 9f's rule
+  that every ticked channel needs a webhook stays as the Start rule (9k).
+- **9o.** (owner, 2026-10-09, plan B) 9j in practice: the first source filled into a
+  target keeps the source's own category names. A source filled into a target that
+  already holds another source gets its categories as "<source> / <category>" and its
+  loose channels under a category "<source>". A fill reuses a channel of the same name
+  (9i) and a webhook it already created on it, instead of adding a second webhook.
+- **10e.** (owner, 2026-10-09, plan C) Issue #6 (an edit that removes every embed sends
+  `embeds: []`) and the 6000-character embed total from #8 ship in plan C. The rest of
+  #8 and #4, #5, #7 stay separate.
 
 **Measured 2026-10-09: Mando cannot create servers.** The Discord changelog of
 2025-04-15, "Deprecating Guild Creation by Apps", retired `POST /guilds` for
