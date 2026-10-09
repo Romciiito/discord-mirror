@@ -781,6 +781,19 @@ class ServersScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.calls[-1][1]["channels"], [])
         self.assertEqual(ui.error, "")
 
+    async def test_a_ticked_server_the_account_cannot_list_any_more_still_unticks(self) -> None:
+        # access lost after the tick: the channel list answers 403, and the stale tick must still go
+        ui, engine = make()
+        self.unlisted(ui, engine, ["12", "13"])
+        engine.fail["channels"] = ApiError(403, "Missing Access")
+        await keys(ui, "Enter", "2", "2", "Enter")
+        self.assertEqual(ui.error, "")
+        self.assertEqual(ui.picked, {})
+        self.assertNotIn("channels", [call[0] for call in engine.calls])
+        self.assertEqual(engine.calls[-1][0], "save_setup")
+        self.assertEqual(engine.calls[-1][1]["channels"], [])
+        self.assertFalse(ui.busy)
+
     async def test_keys_are_dropped_while_a_server_is_listed(self) -> None:
         ui, engine = await self.open_servers()
         entered, gate = asyncio.Event(), asyncio.Event()

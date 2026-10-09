@@ -623,8 +623,16 @@ class Controller:
             await self._save_options()
 
     async def _toggle_guild(self, guild: dict[str, Any]) -> None:
-        self.busy = True
         self.error = ""
+        # ticked as the servers screen marks it: any picked row of the server, listed or not; unticking needs no
+        # channel list, so a stored row the account cannot list now (deleted, hidden, access lost) still goes
+        ours = [cid for cid, row in self.picked.items() if row.get("guild_id") == guild["id"]]
+        if ours:
+            for cid in ours:
+                del self.picked[cid]
+            await self._save_options()
+            return
+        self.busy = True
         try:
             listed = list(await self.engine.channels(guild["id"]))
         except (ApiError, RuntimeError) as exc:
@@ -636,18 +644,11 @@ class Controller:
             return
         finally:
             self.busy = False
-        # ticked as the servers screen marks it: any picked row of the server, listed or not; a stored row the
-        # account cannot list now (deleted, hidden, a failed member call) is unticked with the listed ones
-        ours = [cid for cid, row in self.picked.items() if row.get("guild_id") == guild["id"]]
-        if ours:
-            for cid in ours:
-                del self.picked[cid]
-        else:
-            if not listed:
-                self.error = "nothing in that server can be read"
-                return
-            for channel in listed:
-                self._remember(guild, channel)
+        if not listed:
+            self.error = "nothing in that server can be read"
+            return
+        for channel in listed:
+            self._remember(guild, channel)
         # _save_options sets busy for its own duration, so ours is released before it runs
         await self._save_options()
 
