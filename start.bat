@@ -2,7 +2,6 @@
 setlocal
 pushd "%~dp0." || goto no_dir
 set "VPY=%~dp0.venv\Scripts\python.exe"
-set "VPYW=%~dp0.venv\Scripts\pythonw.exe"
 set "PY="
 set "OLD="
 
@@ -42,27 +41,13 @@ if not exist "%VPY%" goto no_venv
 
 :reqs
 "%VPY%" -c "import filecmp, sys; sys.exit(0 if filecmp.cmp('requirements.txt', '.venv/requirements.txt', shallow=False) else 1)" >nul 2>&1
-if %errorlevel% equ 0 goto url
+if %errorlevel% equ 0 goto run
 "%VPY%" -m pip install -r requirements.txt
 if %errorlevel% neq 0 goto no_pip
 copy /y "requirements.txt" ".venv\requirements.txt" >nul
 
-:url
-set "UHOST=%HOST%"
-if not defined HOST set "UHOST=127.0.0.1"
-if "%UHOST%"=="0.0.0.0" set "UHOST=127.0.0.1"
-if "%UHOST%"=="::" set "UHOST=127.0.0.1"
-if "%UHOST:~0,1%"=="[" goto port
-if not "%UHOST::=%"=="%UHOST%" set "UHOST=[%UHOST%]"
-
-:port
-set "UPORT=%PORT%"
-if not defined PORT set "UPORT=8765"
-set "URL=http://%UHOST%:%UPORT%/"
-if not exist "%VPYW%" set "VPYW=%VPY%"
-start "" /b "%VPYW%" -c "import socket, sys, time, urllib.parse, webbrowser; u = sys.argv[1]; s = urllib.parse.urlsplit(u); exec('for i in range(30):\n try:\n  socket.create_connection((s.hostname, s.port), 1).close(); break\n except OSError:\n  time.sleep(0.5)'); webbrowser.open(u)" "%URL%"
-
-echo starting on %URL%
+:run
+echo starting Mando
 set "PYTHONUTF8=1"
 "%VPY%" -m mirror
 set "CODE=%ERRORLEVEL%"

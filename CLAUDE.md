@@ -11,10 +11,8 @@ claude-config; the global copies do not resolve by name).
 
 ## Checks
 
-- Unit: `python -m unittest tests.test_core tests.test_store tests.test_keychain tests.test_provision tests.test_relay tests.test_gateway tests.test_engine tests.test_web -q`
-- Front-end flow: `node --test tests/test_flow.mjs`
-- Browser e2e: `npm ci && npm run e2e` (Playwright, Chromium)
-- CI: `.github/workflows/test.yml` runs all three on Ubuntu and Windows (x64, x86).
+- Unit: `python -m unittest tests.test_core tests.test_store tests.test_keychain tests.test_provision tests.test_relay tests.test_gateway tests.test_engine tests.test_web tests.test_cli_flow tests.test_cli_controller tests.test_cli_render -q`
+- CI: `.github/workflows/test.yml` runs the unit tests on Ubuntu and Windows (x64, x86) and the Windows smoke step (`python -m mirror` without a terminal serves `/api/state` and `/api/stop`).
 
 ## Agent skills
 
