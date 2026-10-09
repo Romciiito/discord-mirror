@@ -882,6 +882,20 @@ class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
     async def test_escape_after_one_character_keeps_a_channel_that_a_ticked(self) -> None:
         await self.assert_escape_keeps_a_channel_ticked_by_a("h")
 
+    async def test_escape_on_a_channel_ticked_before_saves_and_refreshes_nothing(self) -> None:
+        # nothing changed, so a running mirror is not refreshed (gateway resubscribe, "selection updated")
+        ui, engine = await self.open_channels()
+        engine.running = True
+        await keys(ui, "a", "Enter")
+        self.assertEqual((ui.typing, ui.webhook_channel["id"]), ("webhook", "c1"))
+        before = list(engine.calls)
+        await ui.paste("https://")
+        await keys(ui, "Escape")
+        self.assertIsNone(ui.typing)
+        self.assertEqual(engine.calls, before)
+        self.assertEqual(set(ui.picked), {"c1", "c2"})
+        self.assertEqual(ui.picked["c1"]["webhook_url"], "")
+
     async def test_backspace_edits_the_url_row(self) -> None:
         ui, engine = await self.open_channels()
         await keys(ui, "Enter")

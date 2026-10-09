@@ -599,14 +599,15 @@ class Controller:
             await self._close_webhook_row(untick=False)
         elif key == "Escape":
             # cancel puts the channel back as it was before Enter, typed or not; a channel this Enter ticked must
-            # not be saved without a URL, because Store.replace_selection fills such a row from the URL it had
-            await self._close_webhook_row(untick=self.webhook_new)
+            # not be saved without a URL, because Store.replace_selection fills such a row from the URL it had;
+            # a channel ticked before is unchanged, so nothing is saved and a running mirror is not refreshed
+            await self._close_webhook_row(untick=self.webhook_new, save=self.webhook_new)
         elif key == "Backspace":
             self.draft = self.draft[:-1]
         elif len(key) == 1:
             self.draft += key
 
-    async def _close_webhook_row(self, untick: bool) -> None:
+    async def _close_webhook_row(self, untick: bool, save: bool = True) -> None:
         channel = self.webhook_channel or {}
         if untick:
             self.picked.pop(channel.get("id"), None)
@@ -615,7 +616,8 @@ class Controller:
         self.webhook_new = False
         self.draft = ""
         self.error = ""
-        await self._save_options()
+        if save:
+            await self._save_options()
 
     async def _toggle_guild(self, guild: dict[str, Any]) -> None:
         self.busy = True
