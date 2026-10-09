@@ -147,6 +147,84 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(lines[3], "  2  threads  off")
         self.assertEqual(lines[4], "  3  back")
 
+    def test_status_line_shows_why_the_engine_stopped(self) -> None:
+        # the engine reports a failed run only as a log note followed by a status event "error"
+        # (Engine._fatal, e.g. the gateway closing with 4004); the status line must carry that reason
+        ui = ui_on("running", running=True, status="live")
+        ui.on_event({"kind": "log", "text": "token was rejected"})
+        ui.on_event({"kind": "status", "running": False, "status": "error"})
+        self.assertEqual(render(ui, 70, 8)[0], "signed out · stopped · 0 mirrored · token was rejected")
+        # Exit afterwards: stop() notes "stopped" and reports status "stopped"; the reason stays
+        ui.on_event({"kind": "log", "text": "stopped"})
+        ui.on_event({"kind": "status", "running": False, "status": "stopped"})
+        self.assertEqual(status_line(ui), "signed out · stopped · 0 mirrored · token was rejected")
+        ui.error = "pick at least one channel"
+        self.assertEqual(status_line(ui), "signed out · stopped · 0 mirrored · pick at least one channel")
+        ui.error = ""
+        # a new run starts: the old reason no longer describes the mirror
+        ui.on_event({"kind": "status", "running": True, "status": "connecting"})
+        self.assertEqual(status_line(ui), "signed out · running · 0 mirrored · -")
+
+    def test_long_list_keeps_the_cursor_row_in_view(self) -> None:
+        ui = ui_on("servers")
+        ui.guilds = [{"id": f"g{n}", "name": f"Server {n}"} for n in range(40)]
+        hint = "enter toggles the server, right opens channels, esc back"
+        for height, index in ((12, 25), (10, 25), (12, 39), (12, 0), (4, 17)):
+            ui.local_index = index
+            lines = render(ui, 60, height)
+            self.assertEqual(len(lines), height, (height, index))
+            self.assertIn(f"> [ ] Server {index}", lines, (height, index))
+            self.assertEqual(lines[-1], hint, (height, index))
+            self.assertEqual(sum(line.startswith("> ") for line in lines), 1, (height, index))
+        ui.local_index = 25
+        lines = render(ui, 60, 12)
+        self.assertEqual(lines[1], "Select servers")
+        rows = lines[2:-1]
+        self.assertEqual(rows, [f"{'> ' if n == 25 else '  '}[ ] Server {n}" for n in range(21, 30)])
+
+    def test_channel_list_keeps_the_open_webhook_row_in_view(self) -> None:
+        ui = ui_on("servers")
+        ui.depth = "channels"
+        ui.active_guild = {"id": "g1", "name": "Qwen"}
+        ui.channel_rows = [{"id": f"c{n}", "name": f"ch{n}", "parent": ""} for n in range(30)]
+        ui.picked = {"c20": {"channel_id": "c20", "guild_id": "g1", "enabled": True}}
+        ui.local_index = 20
+        ui.typing = "webhook"
+        ui.webhook_channel = ui.channel_rows[20]
+        ui.draft = "https://"
+        lines = render(ui, 60, 9)
+        self.assertEqual(lines[1], "Qwen")
+        self.assertIn("> [x] #ch20  webhook: https://", lines)
+        self.assertEqual(lines[-1], "enter keeps it, esc cancels the edit")
+
+    def test_short_window_keeps_the_cursor_row_check_and_error(self) -> None:
+        ui = ui_on("token")
+        ui.token_index = 6
+        ui.token_check = "✗ token rejected by Discord"
+        ui.error = "paste a token or use the keychain fields"
+        lines = render(ui, 60, 8)
+        self.assertEqual(lines[1], "Add token")
+        self.assertIn("> 7  back", lines)
+        self.assertEqual(lines[-3:-1], ["✗ token rejected by Discord", "paste a token or use the keychain fields"])
+        # too short for the title: the cursor row, then the check and the error win
+        self.assertEqual(
+            render(ui, 60, 5)[1:-1],
+            ["> 7  back", "✗ token rejected by Discord", "paste a token or use the keychain fields"],
+        )
+        self.assertEqual(render(ui, 60, 3)[1], "> 7  back")
+        ui = ui_on("menu")
+        ui.error = "add a working token first"
+        self.assertEqual(
+            render(ui, 70, 5),
+            [
+                "signed out · stopped · 0 mirrored · add a working token first",
+                "menu",
+                "> 1  Start/Resume mirror",
+                "add a working token first",
+                "up and down move, enter or a number opens, esc back",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

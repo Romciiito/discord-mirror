@@ -35,6 +35,9 @@ class Controller:
         self.snap: dict[str, Any] = {"user": None, "running": False, "status": "idle", "options": {}, "selection": [], "log": [], "mirrored": 0}
         self.messages: list[dict[str, Any]] = []
         self.error = ""
+        # why the engine's last run failed: the log text it noted just before the status event "error"
+        # (Engine._fatal); kept after Exit, cleared when the engine reports running again
+        self.engine_error = ""
         self.busy = False
         self.typing: str | None = None
         self.draft = ""
@@ -74,6 +77,10 @@ class Controller:
         elif kind == "status":
             self.snap["running"] = bool(item.get("running"))
             self.snap["status"] = item.get("status") or self.snap.get("status")
+            if self.snap["status"] == "error":
+                self.engine_error = str((self.snap.get("log") or ["error"])[0])
+            elif self.snap["running"]:
+                self.engine_error = ""
             if "mirrored" in item:
                 self.snap["mirrored"] = item["mirrored"]
         elif kind == "message" and item.get("message"):

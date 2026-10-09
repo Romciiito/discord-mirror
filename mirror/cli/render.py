@@ -14,6 +14,9 @@ TOKEN_LABELS = {
 # the lines with "\n", so one of these inside an error, a name or a message would break a line
 BREAKS = dict.fromkeys([*range(0x20), *range(0x7F, 0xA0), 0x2028, 0x2029], " ")
 
+# a screen body: title lines, list rows, the row the window must keep in view, notes under the list
+Body = tuple[list[str], list[str], int, list[str]]
+
 
 def _plain(text: str) -> str:
     return text.translate(BREAKS)
@@ -22,7 +25,8 @@ def _plain(text: str) -> str:
 def status_line(ui: Any) -> str:
     who = _display(ui.snap.get("user") or {}) or "signed out"
     state = "running" if ui.snap.get("running") else "stopped"
-    return f"{who} · {state} · {int(ui.snap.get('mirrored') or 0)} mirrored · {ui.error or '-'}"
+    last = ui.error or ui.engine_error or "-"
+    return f"{who} · {state} · {int(ui.snap.get('mirrored') or 0)} mirrored · {last}"
 
 
 def feed_lines(messages: list[dict[str, Any]], count: int) -> list[str]:
@@ -50,30 +54,31 @@ def _backfill_label(value: Any) -> str:
     return f"last {amount}" if amount else "live only"
 
 
-def _body(ui: Any, height: int) -> list[str]:
+def _notes(ui: Any) -> list[str]:
+    return [ui.error] if ui.error else []
+
+
+def _body(ui: Any, height: int) -> Body:
     screen = ui.flow["screen"]
-    lines: list[str] = []
+    rows: list[str] = []
     if screen == "welcome":
-        return ["Discord smart scraper - Mando", "Press any key to continue"]
+        return ["Discord smart scraper - Mando", "Press any key to continue"], [], 0, []
     if screen == "exit":
-        return ["Stopped", "Press any key to continue"]
+        return ["Stopped", "Press any key to continue"], [], 0, []
     if screen == "running":
-        lines.append("mirroring" if ui.snap.get("running") else "working")
-        lines.extend(feed_lines(ui.messages, max(0, height - 4)))
-        return lines
+        rows = feed_lines(ui.messages, max(0, height - 4))
+        return ["mirroring" if ui.snap.get("running") else "working"], rows, len(rows) - 1, []
     if screen in ("menu", "settings"):
-        lines.append(screen)
         for at, item in enumerate(items(screen, ui.ctx())):
             label = f"{at + 1}  {item['label']}" + ("  locked" if item.get("locked") else "")
-            lines.append(_row(label, at == ui.flow["index"]))
-        return lines + ([ui.error] if ui.error else [])
+            rows.append(_row(label, at == ui.flow["index"]))
+        return [screen], rows, ui.flow["index"], _notes(ui)
     if screen == "token":
-        lines.append("Add token")
         for at, key in enumerate(TOKEN_ROWS):
             label = TOKEN_LABELS[key]
             if ui.typing == key:
                 shown = "*" * len(ui.draft) if key == "token" else ui.draft
-                lines.append(_row(f"{label} {shown}", at == ui.token_index))
+                rows.append(_row(f"{label} {shown}", at == ui.token_index))
                 continue
             extra = ""
             if key == "token" and ui.fields.get("token"):
@@ -82,26 +87,25 @@ def _body(ui: Any, height: int) -> list[str]:
                 extra = "  yes" if ui.fields.get("keep") else "  no"
             elif key in ("service", "account") and ui.fields.get(key):
                 extra = "  " + str(ui.fields[key])
-            lines.append(_row(f"{at + 1}  {label}{extra}", at == ui.token_index))
-        if ui.token_check:
-            lines.append(ui.token_check)
-        return lines + ([ui.error] if ui.error else [])
+            rows.append(_row(f"{at + 1}  {label}{extra}", at == ui.token_index))
+        focus = TOKEN_ROWS.index(ui.typing) if ui.typing in TOKEN_ROWS else ui.token_index
+        return ["Add token"], rows, focus, ([ui.token_check] if ui.token_check else []) + _notes(ui)
     if screen == "webhooks":
         options = ui.snap.get("options") or {}
-        lines.append("Webhook settings")
         labels = {
             "backfill": f"backfill  {_backfill_label(options.get('backfill'))}",
             "threads": f"threads  {'on' if options.get('include_threads') else 'off'}",
             "back": "back",
         }
         for at, key in enumerate(HOOK_ROWS):
-            lines.append(_row(f"{at + 1}  {labels[key]}", at == ui.hook_index))
-        return lines + ([ui.error] if ui.error else [])
+            rows.append(_row(f"{at + 1}  {labels[key]}", at == ui.hook_index))
+        return ["Webhook settings"], rows, ui.hook_index, _notes(ui)
     if screen == "servers":
+        focus = ui.local_index
         if ui.depth == "channels" and ui.active_guild:
-            lines.append(str(ui.active_guild.get("name") or "server"))
+            title = str(ui.active_guild.get("name") or "server")
             if not ui.channel_rows:
-                lines.append("nothing in that server can be read")
+                rows.append("nothing in that server can be read")
             for at, channel in enumerate(ui.channel_rows):
                 row = ui.picked.get(channel.get("id"))
                 mark = "[x] " if row else "[ ] "
@@ -109,21 +113,37 @@ def _body(ui: Any, height: int) -> list[str]:
                 label = f"{mark}{parent}#{channel.get('name')}"
                 if ui.typing == "webhook" and ui.webhook_channel and ui.webhook_channel.get("id") == channel.get("id"):
                     label += f"  webhook: {ui.draft}"
+                    focus = at
                 elif row and row.get("webhook_url"):
                     label += "  webhook set"
                 elif row:
                     label += "  no webhook"
-                lines.append(_row(label, at == ui.local_index))
+                rows.append(_row(label, at == ui.local_index))
         else:
-            lines.append("Select servers")
+            title = "Select servers"
             if not ui.guilds:
-                lines.append("no servers")
+                rows.append("no servers")
             selected = {row.get("guild_id") for row in ui.picked.values()}
             for at, guild in enumerate(ui.guilds):
                 mark = "[x] " if guild.get("id") in selected else "[ ] "
-                lines.append(_row(f"{mark}{guild.get('name')}", at == ui.local_index))
-        return lines + ([ui.error] if ui.error else [])
-    return ["Press any key to continue"]
+                rows.append(_row(f"{mark}{guild.get('name')}", at == ui.local_index))
+        return [title], rows, focus, _notes(ui)
+    return ["Press any key to continue"], [], 0, []
+
+
+def _fit(body: Body, room: int) -> list[str]:
+    """At most `room` lines. A list taller than the room is cut to a window around the focus row, so
+    the cursor row (or the row being typed into) is always drawn; when the room is too short even
+    for the title, the notes and one row, the focus row wins over the notes, and the notes over the title."""
+    head, rows, focus, notes = body
+    if room <= 0:
+        return []
+    shown = min(len(rows), max(1, room - len(head) - len(notes))) if rows else 0
+    notes = notes[: room - shown]
+    head = head[: room - shown - len(notes)]
+    focus = max(0, min(focus, len(rows) - 1))
+    start = max(0, min(focus - shown // 2, len(rows) - shown))
+    return head + rows[start : start + shown] + notes
 
 
 def render(ui: Any, width: int, height: int) -> list[str]:
@@ -132,9 +152,9 @@ def render(ui: Any, width: int, height: int) -> list[str]:
     height = max(0, int(height))
     lines = [status_line(ui)]
     if height >= 2:
-        body = _body(ui, height)
         room = height - 2
-        lines.extend(body[:room])
-        lines.extend([""] * (room - min(len(body), room)))
+        body = _fit(_body(ui, height), room)
+        lines.extend(body)
+        lines.extend([""] * (room - len(body)))
         lines.append(ui.hint())
     return [_plain(line[:width]) for line in lines[:height]]
