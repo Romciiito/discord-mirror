@@ -53,6 +53,7 @@ class Controller:
         self.active_guild: dict[str, Any] | None = None
         self.picked: dict[str, dict[str, Any]] = {}
         self.webhook_channel: dict[str, Any] | None = None  # the channel whose URL row is open (Task 6b)
+        self.webhook_new = False  # the Enter that opened the URL row ticked the channel: Esc unticks it again
 
     # ---- state -------------------------------------------------------------
 
@@ -561,6 +562,7 @@ class Controller:
             self._remember(self.active_guild, channel)
         self.typing = "webhook"
         self.webhook_channel = channel
+        self.webhook_new = not row
         self.draft = ""
         self.error = ""
 
@@ -580,7 +582,9 @@ class Controller:
                 self.picked[channel["id"]]["webhook_url"] = cleaned
             await self._close_webhook_row(untick=False)
         elif key == "Escape":
-            await self._close_webhook_row(untick=not self.draft.strip())
+            # cancel puts the channel back as it was before Enter; a channel this Enter ticked must not be saved
+            # without a URL, because Store.replace_selection fills such a row from the URL the channel had
+            await self._close_webhook_row(untick=self.webhook_new or not self.draft.strip())
         elif key == "Backspace":
             self.draft = self.draft[:-1]
         elif len(key) == 1:
@@ -592,6 +596,7 @@ class Controller:
             self.picked.pop(channel.get("id"), None)
         self.typing = None
         self.webhook_channel = None
+        self.webhook_new = False
         self.draft = ""
         self.error = ""
         await self._save_options()

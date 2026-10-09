@@ -762,17 +762,27 @@ class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("c1", ui.picked)
         self.assertEqual(engine.calls[-1][1]["channels"], [])
 
-    async def test_escape_with_text_keeps_the_tick_without_a_url(self) -> None:
+    async def test_escape_with_text_cancels_the_edit(self) -> None:
+        # Esc puts the channel back as it was before Enter: a channel this Enter ticked is unticked again (the
+        # real store fills a URL it kept for a channel into a row saved without one, RealEngineStartTests), a
+        # channel that was already ticked without a URL stays ticked without one
         ui, engine = await self.open_channels()
         await keys(ui, "Enter")
         for ch in "https://":
             await ui.press(ch, plain=True)
         await keys(ui, "Escape")
         self.assertIsNone(ui.typing)
+        self.assertNotIn("c1", ui.picked)
+        self.assertEqual(engine.calls[-1][1]["channels"], [])
+        await keys(ui, "a", "Enter")
+        self.assertEqual((ui.typing, ui.webhook_channel["id"], ui.draft), ("webhook", "c1", ""))
+        await ui.paste("https://")
+        await keys(ui, "Escape")
+        self.assertIsNone(ui.typing)
         self.assertEqual(ui.picked["c1"]["webhook_url"], "")
+        self.assertEqual([row["channel_id"] for row in engine.selection], ["c1", "c2"])
         await keys(ui, "Enter")
-        self.assertEqual(ui.typing, "webhook")
-        self.assertEqual(ui.draft, "")
+        self.assertEqual((ui.typing, ui.draft), ("webhook", ""))
 
     async def test_backspace_edits_the_url_row(self) -> None:
         ui, engine = await self.open_channels()
@@ -913,10 +923,9 @@ class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_failed_url_save_keeps_start_refused(self) -> None:
         ui, engine = await self.open_channels()
-        await keys(ui, "Enter")
-        await ui.paste("https://")
-        await keys(ui, "Escape")
-        self.assertEqual(engine.selection[0]["webhook_url"], "")
+        engine.selection = [{"channel_id": "c1", "guild_id": "g1", "guild_name": "Qwen", "channel_name": "general",
+                             "parent": "", "topic": "", "webhook_url": "", "enabled": True}]
+        ui.refresh()
         await keys(ui, "Enter")
         await ui.paste(HOOK)
         engine.fail["save_setup"] = RuntimeError("database is locked")
@@ -1023,6 +1032,73 @@ class RealEngineStartTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ui.channel_rows[ui.local_index]["id"], "13")
         self.assertNotIn(("POST", "/guilds"), self.http.calls)
         self.assertFalse(self.engine.running)
+
+    async def open_channels(self) -> Controller:
+        self.store.replace_selection([])
+        ui = Controller(self.engine, read_keychain=read_keychain_fake)
+        ui.refresh()
+        await keys(ui, "Enter", "2", "2", "ArrowRight")
+        self.assertEqual([channel["id"] for channel in ui.channel_rows], ["12", "13"])
+        return ui
+
+    def stored(self) -> list[tuple[str, str]]:
+        return [(row["channel_id"], row["webhook_url"]) for row in self.store.selection()]
+
+    async def test_a_channel_ticked_again_by_enter_never_takes_its_kept_url(self) -> None:
+        # Store.replace_selection fills a row saved without a URL from the URL the channel had (hooks), so a
+        # single tick is stored only with a URL entered in its row: Esc and an empty Enter untick it again
+        ui = await self.open_channels()
+        await keys(ui, "Enter")
+        await ui.paste(HOOK)
+        await keys(ui, "Enter")
+        self.assertEqual(self.stored(), [("12", HOOK)])
+        await keys(ui, "Enter")
+        self.assertEqual(self.stored(), [])
+        self.assertEqual(self.store.hooks(), {"12": HOOK})
+        await keys(ui, "Enter")
+        self.assertEqual((ui.typing, ui.draft), ("webhook", ""))
+        await ui.paste("https://")
+        await keys(ui, "Escape")
+        self.assertIsNone(ui.typing)
+        self.assertNotIn("12", ui.picked)
+        self.assertEqual(self.stored(), [])
+        await keys(ui, "Enter", "Enter")
+        self.assertNotIn("12", ui.picked)
+        self.assertEqual(self.stored(), [])
+        await keys(ui, "Escape", "Escape", "Escape", "1")
+        self.assertEqual(ui.error, "select servers first")
+        self.assertEqual(ui.flow["screen"], "menu")
+        self.assertFalse(self.engine.running)
+        self.assertNotIn(("POST", "/guilds"), self.http.calls)
+
+    async def test_select_all_and_the_server_enter_bring_back_a_kept_url(self) -> None:
+        # plan A leaves the store as it is: a channel ticked by `a` or by Enter on its server gets back the URL
+        # the store kept for it ("webhook set"); a URL entered in its row replaces the kept one
+        ui = await self.open_channels()
+        await keys(ui, "Enter")
+        await ui.paste(HOOK)
+        await keys(ui, "Enter", "Enter")
+        self.assertEqual(self.stored(), [])
+        await keys(ui, "a")
+        self.assertEqual(self.stored(), [("12", HOOK), ("13", "")])
+        self.assertEqual(ui.picked["12"]["webhook_url"], HOOK)
+        await keys(ui, "Escape", "Enter")
+        self.assertEqual(self.stored(), [])
+        await keys(ui, "Enter")
+        self.assertEqual(self.stored(), [("12", HOOK), ("13", "")])
+        other = "https://discord.com/api/webhooks/456/def"
+        await keys(ui, "ArrowRight", "Enter")
+        self.assertEqual(self.stored(), [("13", "")])
+        await keys(ui, "Enter")
+        await ui.paste(other)
+        await keys(ui, "Enter")
+        self.assertEqual(self.stored(), [("12", other), ("13", "")])
+        self.assertEqual(self.store.hooks(), {"12": other})
+        await keys(ui, "Escape", "Escape", "Escape", "1")
+        self.assertEqual(ui.error, "#gated has no webhook")
+        self.assertEqual(ui.channel_rows[ui.local_index]["id"], "13")
+        self.assertFalse(self.engine.running)
+        self.assertNotIn(("POST", "/guilds"), self.http.calls)
 
 
 if __name__ == "__main__":

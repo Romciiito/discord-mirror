@@ -126,6 +126,20 @@ Decisions (owner):
   Start checks the stored selection, re-read at Start, because `engine.start()` reads
   that and a failed save leaves the CLI's ticks and the store apart. Plan B, which
   moves the Start rule into the engine, inherits the case.
+- **Gap in 9g, found in the Task 6b review, round 3 (2026-10-09; plan A's rule, not
+  an owner decision yet).** The store keeps every webhook URL a channel ever had:
+  `Store._keep_hook` writes each saved URL into the `hooks` table, and
+  `Store.replace_selection` fills a row saved without a URL from the stored row or
+  from `hooks` (which also holds the webhooks `_provision` made in the shared
+  server, through `fill_webhooks`; pinned by `tests/test_engine.py`). So unticking does not forget an own webhook, and a
+  channel saved again without a URL silently gets the old one back (measured with
+  the real store: untick, tick, Esc with text in the URL row → the old URL stored,
+  Start would post there). Plan A leaves the store unchanged; its Task 6b saves a
+  channel ticked by a single Enter only with a URL entered in its row (Esc and an
+  empty Enter untick it), so that path never takes a kept URL. `a` and Enter on a
+  server tick channels without a URL row, so a channel with a kept URL comes back
+  with it and shows "webhook set"; a new URL entered in the row replaces it. Plan B,
+  which owns the store, decides whether unticking forgets the URL.
 
 **Measured 2026-10-09: Mando cannot create servers.** The Discord changelog of
 2025-04-15, "Deprecating Guild Creation by Apps", retired `POST /guilds` for
