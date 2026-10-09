@@ -601,10 +601,10 @@ class Controller:
                 self.picked[channel["id"]]["webhook_url"] = cleaned
             await self._close_webhook_row(untick=False)
         elif key == "Escape":
-            # cancel puts the channel back as it was before Enter, typed or not; a channel this Enter ticked must
-            # not be saved without a URL, because Store.replace_selection fills such a row from the URL it had;
-            # a channel ticked before is unchanged, so nothing is saved and a running mirror is not refreshed
-            await self._close_webhook_row(untick=self.webhook_new, save=self.webhook_new)
+            # cancel puts the channel back as it was before Enter, typed or not: a channel this Enter ticked only in
+            # memory is unticked again, a channel ticked before is unchanged; either way the selection is the stored
+            # one, so nothing is saved and a running mirror is not refreshed
+            await self._close_webhook_row(untick=self.webhook_new, save=False)
         elif key == "Backspace":
             self.draft = self.draft[:-1]
         elif len(key) == 1:

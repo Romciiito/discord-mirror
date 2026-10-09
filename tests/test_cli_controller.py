@@ -887,7 +887,7 @@ class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
         await keys(ui, "Escape")
         self.assertIsNone(ui.typing)
         self.assertNotIn("c1", ui.picked)
-        self.assertEqual(engine.calls[-1][1]["channels"], [])
+        self.assertNotIn("save_setup", [call[0] for call in engine.calls])
         await keys(ui, "a", "Enter")
         self.assertEqual((ui.typing, ui.webhook_channel["id"], ui.draft), ("webhook", "c1", ""))
         await ui.paste("https://")
@@ -932,6 +932,22 @@ class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.calls, before)
         self.assertEqual(set(ui.picked), {"c1", "c2"})
         self.assertEqual(ui.picked["c1"]["webhook_url"], "")
+
+    async def test_escape_on_a_channel_its_enter_ticked_saves_and_refreshes_nothing(self) -> None:
+        # the Enter ticked c1 in memory only, so after Esc unticks it the selection is the stored one again
+        ui, engine = await self.open_channels()
+        engine.selection = [{"channel_id": "c2", "guild_id": "g1", "guild_name": "Qwen", "channel_name": "dev",
+                             "parent": "", "topic": "", "webhook_url": HOOK, "enabled": True}]
+        engine.running = True
+        ui.refresh()
+        before = list(engine.calls)
+        await keys(ui, "Enter")
+        self.assertEqual((ui.typing, ui.webhook_channel["id"], ui.webhook_new), ("webhook", "c1", True))
+        await ui.paste("https://")
+        await keys(ui, "Escape")
+        self.assertIsNone(ui.typing)
+        self.assertEqual(engine.calls, before)
+        self.assertEqual(set(ui.picked), {"c2"})
 
     async def test_backspace_edits_the_url_row(self) -> None:
         ui, engine = await self.open_channels()
