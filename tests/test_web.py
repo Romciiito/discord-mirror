@@ -759,6 +759,26 @@ class GracefulExitTests(unittest.TestCase):
 
         self.assertIs(self._runner_kwargs(run).get("handle_signals"), False)
 
+    def test_next_to_the_cli_the_process_sigint_handler_is_left_alone(self) -> None:
+        # prompt_toolkit binds SIGINT itself while the CLI runs: _run installs no handler of its own there
+        seen: dict[str, Any] = {}
+        installs: list[tuple] = []
+
+        async def cli(_engine: Any) -> None:
+            seen["sigint"] = signal.getsignal(signal.SIGINT)
+
+        def recording(*args: Any) -> None:
+            installs.append(args)
+            return None
+
+        port = _free_port()
+        app = create_app(self.tmp.name, "127.0.0.1", port)
+        with mock.patch("mirror.cli.app.run_cli", cli), mock.patch.object(entry, "_cancel_on_sigint", recording):
+            entry.serve_and_cli(app, "127.0.0.1", port)
+        self.assertIs(seen["sigint"], signal.default_int_handler)
+        self.assertEqual(installs, [])
+        self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)
+
     def test_both_paths_give_api_clients_the_short_shutdown_timeout(self) -> None:
         async def done(*_args: Any) -> None:
             pass
