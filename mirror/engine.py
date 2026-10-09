@@ -323,8 +323,12 @@ class Engine:
         before = {str(row["channel_id"]): str(row.get("webhook_url") or "") for row in rows}
         pairs, reused = await self._fill(http, target_id, layout, existing, before, alone, source_id)
         # a fill covers every ticked channel (decision 9n), an own webhook or an earlier copy's URL included; the
-        # store has no mark of who made a URL, so each one this fill changes is counted and noted, never kept
-        replaced = sum(1 for source, url in pairs if before.get(source) and before[source] != url)
+        # store has no mark of who made a URL, so each one this fill changes is counted and noted, never kept. A URL
+        # is compared by its webhook id and token: a found webhook is written with the discord.com host, and the
+        # same webhook pasted with a ptb., canary. or discordapp.com host is not replaced
+        replaced = sum(
+            1 for source, url in pairs if before.get(source) and webhook_parts(before[source]) != webhook_parts(url)
+        )
         self.store.fill_webhooks(pairs)
         self.store.set_target(source_id, target_id, target["name"], shared)
         text = f"webhooks on {len(pairs)} channel(s) in {target['name']}"

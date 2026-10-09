@@ -859,6 +859,20 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.hooks(), urls)
         self.assertIn("1 earlier webhook url(s) replaced", self.notes())
 
+    async def test_fill_that_finds_a_webhook_pasted_with_another_host_replaces_nothing(self) -> None:
+        # the row's URL names webhook 77 with a ptb. host; the fill finds 77 on the channel and writes it with the
+        # discord.com host, which is the same webhook, so nothing counts as replaced
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [{"id": "t1", "type": 0, "name": "general", "parent_id": None}]
+        http.hooks["t1"] = [{"id": "77", "name": "general", "token": "tok"}]
+        self.engine.http = http
+        self.store.replace_selection([row("10", "https://ptb.discord.com/api/webhooks/77/tok", name="general")])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1})
+        self.assertEqual(self.store.selection()[0]["webhook_url"], "https://discord.com/api/webhooks/77/tok")
+        self.assertFalse(any("replaced" in line for line in self.notes()))
+
     async def test_fill_covers_an_unlisted_ticked_channel(self) -> None:
         http = FakeHTTP()
         http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
