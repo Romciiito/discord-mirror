@@ -112,6 +112,8 @@ class FakeEngine:
         for row in self.selection:
             if row["guild_id"] == source_id:
                 row["webhook_url"] = f"https://discord.com/api/webhooks/{target_id}{row['channel_id']}/t"
+        # as Engine.fill_copy: the refresh of a running mirror comes after the store holds the URLs and the link
+        self._maybe_fail("fill_copy_refresh")
         return {"target": name, "filled": 2, "reused": 0}
 
 
@@ -877,6 +879,37 @@ class ServersScreenTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("mirror.cli", level="ERROR"):
             await keys(ui, "Enter")
         self.assertEqual(ui.error, "request failed")
+        self.assertFalse(ui.busy)
+
+    async def test_a_fill_that_fails_after_its_writes_shows_what_the_store_holds(self) -> None:
+        # Engine.fill_copy refreshes a running mirror after the store holds the copy's URLs and the link, and that
+        # refresh can raise: the screen must show the stored rows, or the next save puts the old URLs back
+        ui, engine = await self.open_servers()
+        engine.owned = [{"id": "t1", "name": "Qwen copy"}]
+        await keys(ui, "Enter")
+        own = "https://discord.com/api/webhooks/111/own"
+        next(row for row in engine.selection if row["channel_id"] == "c1")["webhook_url"] = own
+        ui.refresh()
+        engine.fail["fill_copy_refresh"] = RuntimeError("gateway closed")
+        await keys(ui, "c", "Enter")
+        self.assertEqual(ui.depth, "targets")
+        self.assertEqual(ui.error, "gateway closed")
+        self.assertEqual(ui.picked["c1"]["webhook_url"], "https://discord.com/api/webhooks/t1c1/t")
+        self.assertEqual(ui.snap["targets"]["g1"]["target_name"], "Qwen copy")
+        await keys(ui, "Escape", "ArrowRight", "a")
+        self.assertEqual(engine.calls[-1][0], "save_setup")
+        stored = {row["channel_id"]: row["webhook_url"] for row in engine.selection}
+        self.assertEqual(stored["c1"], "https://discord.com/api/webhooks/t1c1/t")
+        await keys(ui, "Escape")
+        next(row for row in engine.selection if row["channel_id"] == "c1")["webhook_url"] = own
+        ui.refresh()
+        engine.fail["fill_copy_refresh"] = sqlite3.OperationalError("database is locked")
+        await keys(ui, "c")
+        with self.assertLogs("mirror.cli", level="ERROR"):
+            await keys(ui, "Enter")
+        self.assertEqual(ui.depth, "targets")
+        self.assertEqual(ui.error, "request failed")
+        self.assertEqual(ui.picked["c1"]["webhook_url"], "https://discord.com/api/webhooks/t1c1/t")
         self.assertFalse(ui.busy)
 
     async def test_a_fill_that_replaces_earlier_webhook_urls_says_so(self) -> None:

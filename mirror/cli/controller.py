@@ -747,10 +747,14 @@ class Controller:
             self.refresh()
         except (ApiError, RuntimeError) as exc:
             self.error = str(exc)
+            # Engine.fill_copy can raise after the store holds the copy's URLs and the link (the refresh of a running
+            # mirror): the screen takes the stored rows, or the next save would put the URLs from before back
+            self._resync()
             return
         except Exception:
             log.exception("fill failed")
             self.error = UNEXPECTED
+            self._resync()
             return
         finally:
             self.busy = False
