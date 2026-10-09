@@ -2354,24 +2354,26 @@ git commit -m "Send PNG, APNG and GIF stickers as images, always send the embeds
 
 - [ ] **Step 1: README "First run"**
 
-Replace steps 3 and 4 and the paragraph after the list with:
+Lead the list with how to start Mando, then replace steps 3 and 4 and the paragraph after the list with the text below. (The Task 9 implementation measured three sentences of the first draft against the code and corrected them: a single Enter in the channel list ticks a channel only together with a URL, since Esc or an empty Enter unticks it again, so "tick a few" goes through `a` and unticking; the relay posts to an own webhook in any server, so Mando does not "only write" to owned servers; and the relay deletes a mirrored message whose source was deleted, so Mando does not "never delete anything" in the copy.)
 
 ```markdown
-3. In Discord, create a server for the copy, or pick one you already own. Mando only writes to servers your account owns.
-4. Select servers. Enter on a source server ticks all its listed channels; right arrow opens them to tick a few. Then `c` on the server lists the servers you own: Enter on one fills it with the ticked channels, their categories and one webhook per channel. Or give a ticked channel your own webhook URL: Enter on it opens its webhook row, paste the URL and press Enter.
+Start Mando as described under Start (`sh start.sh`, or `start.bat` on Windows), then:
+
+3. In Discord, create a server for the copy, unless you already own one to use. Mando creates channels and webhooks only in servers your account owns. To use your own webhooks instead, create a webhook in each channel the messages should go to and copy its URL; it can be in any server, also one the account is not in.
+4. Select servers. Enter on a source server ticks all its listed channels. To tick only a few, open its channels with the right arrow, press `a` to tick them all, then untick the others: Enter on a channel that shows `no webhook`, then Enter on its empty webhook row (Enter alone unticks one that shows `webhook set`). Back in the server list (Esc), `c` on the server lists the servers you own: Enter on one fills it with the ticked channels, their categories and one webhook per channel. For your own webhooks instead, Enter on a channel that is not ticked, or that shows `no webhook`, opens its webhook row: paste the URL and press Enter.
 5. Webhook settings: pick backfill and threads.
 6. Back to the menu and Start/Resume mirror.
 
-The ticked source channels are the selection, kept in `state.db` across restarts. Each one is mirrored to its own webhook, its target. Mando never creates a server and never deletes anything in yours: a fill adds the categories and channels that are missing and reuses a channel of the same name and the webhook it made there before. Several sources can share one server; the second source gets its own categories, named `source / category`. Unticking a server stops mirroring it and keeps the copy. Start refuses while a ticked channel has no webhook: it shows `#channel has no webhook` and opens Select servers at that channel.
+The ticked source channels are the selection, kept in `state.db` across restarts. Each one is mirrored to its webhook, its target. Mando never creates a server, and in yours it never deletes a category, channel or webhook. A fill adds what is missing and reuses what it finds: a channel of the same name in the same category (or loose, for a loose one), and the webhook named after the channel on it. A channel of the same name elsewhere is reused too while no other source shares the server, or when it carries that channel's webhook. Several sources can share one server; a source filled into a server that already holds another source gets its own categories, named `source / category`, and a category named `source` for its loose channels. A fill gives each ticked channel of the source that it fills the copy's webhook, also one that had your own URL; the line after the fill then starts with `<n> earlier webhook url(s) replaced`. Unticking a server stops mirroring it and keeps the copy. Start refuses while a ticked channel has no webhook: it shows `#channel has no webhook` and opens Select servers at that channel.
 ```
 
 - [ ] **Step 2: README "Menu"**
 
-In the Select servers paragraph, add after the first sentence: "`c` on a server lists the servers you own, with the one that is this server's copy marked; Enter fills it and the server row then shows `copy: <name>`." Replace the sentence about `a` and the server Enter with: "Enter on a source server and `a` in the channel list tick channels without opening their rows; a channel that shows `no webhook` gets its URL with Enter or through a fill."
+In the Select servers paragraph, add after the first sentence: "`c` on a server lists the servers you own, with the one that is this server's copy marked; Enter fills it and the server row then shows `copy: <name>`, the line under the list `<n> channel(s) ready in <name>`. Esc goes back without a fill. `c` needs some of the server's channels ticked (`tick the server or some of its channels first`) and a server you own besides this one (`you own no other server, create one in Discord first`). A fill while the mirror runs takes effect without a restart." After the server Enter sentence add: "unticking a server with a copy shows `copy in <name> kept, delete it in Discord if you do not need it`". Replace the sentence about `a` and the server Enter with: "Enter on a source server and `a` in the channel list tick channels without opening their rows; a channel that shows `no webhook` gets its URL with Enter or through a fill."
 
 - [ ] **Step 3: README "What gets mirrored"**
 
-Replace the attachments bullet with: "- Up to 10 files per message are uploaded 1:1, each up to 20 MiB. A larger file is replaced by one line naming it and its size, a link to the original message and the file's download link." Add: "- PNG, APNG and GIF stickers are posted as images; a Lottie sticker is named." Replace the shared-webhook bullet with: "- When two selected channels share one webhook URL, each message starts with a `server / #channel` line." Add: "- An edit that removes every embed removes them in the mirrored message too; embeds are kept under Discord's 6000-character total."
+Replace the attachments bullet with: "- Up to 10 files per message are uploaded 1:1, each up to 20 MiB; sticker images count among the 10. A larger file is replaced by the line `This message has a file over the upload limit: <name> (<size> MiB)`, a link to the original message and the file's download link. A file past the tenth, a file that cannot be downloaded, and every file of an upload Discord refuses as too large are posted as links." Add: "- PNG, APNG and GIF stickers are posted as images; a Lottie sticker is named on a `stickers: <name>` line." Replace the retry bullet with "- Rate limits, Discord server errors and network errors are waited out and the request is sent again, up to five attempts in all." (`relay.ATTEMPTS` is 5 in all, a 429 included, and a 4xx other than 429 is not sent again). Replace the shared-webhook bullet with: "- When two selected channels share one webhook URL, each message starts with a `server / #channel` line." Add: "- An edit always sends the embeds the message has left, so an edit that removes every embed removes them in the mirrored message too. At most 10 embeds are posted, and an embed that would take their text past Discord's 6000-character total is left out, with the ones after it." (`safe_embeds` stops at the first embed over the total.)
 
 - [ ] **Step 4: CONTEXT.md**
 
@@ -2381,26 +2383,31 @@ Replace the **Copy** entry with:
 **Copy**:
 A Discord server the owner owns and picks for one ticked source server; a fill adds the
 source's ticked channels, their categories and one webhook per channel to it and never
-deletes anything in it. Two sources may share one copy.
+deletes anything in it. Several sources may share one copy.
 _Avoid_: mirror server, destination server, dest
 
 **Fill**:
-Mando creating, inside a copy, the channels and webhooks that the ticked channels of one
-source still lack, reusing what is already there.
+Mando creating, inside a copy, the categories, channels and webhooks that the ticked
+channels of one source still lack there, reusing what is already there; each ticked
+channel the fill gives a webhook in the copy then posts there.
 _Avoid_: provision, sync, deploy
 ```
 
+and add to the **Own webhook** entry: "A fill of its source server replaces it with the copy's webhook."
+
 - [ ] **Step 5: Design notes**
 
-Under decision 9b' add one line: "Implemented in plan B (`docs/superpowers/plans/2026-10-09-own-copies.md`): `Engine.fill_copy`, the `c` key (9m)." Under 10a add: "Implemented in plan B's Task 8; the real-webhook check is the owner's manual step at the end of the plan."
+Under decision 9b' add one line: "Implemented in plan B (`docs/superpowers/plans/2026-10-09-own-copies.md`): `Engine.fill_copy`, the `c` key (9m)." Under 10a add: "Implemented in Task 8 of `docs/superpowers/plans/2026-10-09-own-copies.md` (plans B and C); the real-webhook check is the owner's manual step at the end of that plan." (Decision 10a belongs to plan C, which this file carries with plan B.)
 
 - [ ] **Step 6: Run the full suite and the attribution scan, then commit**
 
 Run the full test command (OK expected) and `git grep -niwE 'claude|anthropic' -- ':!CLAUDE.md'` (only `.gitignore:.claude/` may match).
 
+Measured in the Task 9 implementation: at `d99fc17` the scan lists 9 lines, the `.gitignore` line, the plans' references to the root instructions file and the command line above; none is an attribution. The check is therefore that the diff adds no line the scan matches (the same pattern over the added lines of `git diff -U0` is empty).
+
 ```bash
-git add README.md CONTEXT.md docs/superpowers/specs/2026-10-08-terminal-cli-design.md
-git commit -m "Describe the fill, the c key and the relay limits in the README and the glossary."
+git add README.md CONTEXT.md docs/superpowers/specs/2026-10-08-terminal-cli-design.md docs/superpowers/plans/2026-10-09-own-copies.md
+git commit -m "Describe the fill, the c key and the relay limits in the README and the glossary, and mark decisions 9b' and 10a implemented."
 ```
 
 ---
@@ -2410,6 +2417,6 @@ git commit -m "Describe the fill, the c key and the relay limits in the README a
 Not a task for an agent: it writes to the owner's Discord account.
 
 1. `start.bat`, sign in, tick a small source server, `c`, pick the test server `1557894816161992704`, Enter. Expect the categories, channels and webhooks in that server, the row `copy: <name>`, and no deleted channel there.
-2. `c` again on the same server, Enter on the same target. Expect "n channel(s) ready in <name>, n reused" style notes in `data/mando.log` and no second channel or webhook.
+2. `c` again on the same server, Enter on the same target. Expect the CLI line "n channel(s) ready in <name>", the engine's note "webhooks on n channel(s) in <name>, n reused" in the `log` list of `http://127.0.0.1:8765/api/state` (`Engine.note` keeps its notes in memory and never writes them to `data/mando.log`), and no second channel or webhook.
 3. Start. Post in a source channel a PNG sticker, a GIF sticker and a file over 20 MiB. Expect the stickers as images and the file as one line with two links in the copy. Edit a source message to remove an embed; expect the mirrored embed gone.
 4. Decide the gap after decision 9o in the design notes: a fill gives a ticked channel with an own webhook the copy's webhook (the CLI line after the fill: "1 earlier webhook url(s) replaced, n channel(s) ready in <name>"). Keep it, or ask for own webhooks to survive a fill, which needs a mark on each URL a fill made.

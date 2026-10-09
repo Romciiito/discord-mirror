@@ -228,6 +228,8 @@ therefore reopened and replaced (owner, 2026-10-09):
   `/users/@me/guilds`); the owner picks the target and Mando creates the readable
   categories, channels and webhooks of the source inside it (Create Guild Channel,
   Create Webhook). 9c (name prompt in the CLI) is dropped.
+  Implemented in plan B (`docs/superpowers/plans/2026-10-09-own-copies.md`):
+  `Engine.fill_copy`, the `c` key (9m).
 - **9i.** In the owner's server Mando only adds, never deletes: the leftover
   cleanup in `_wire_copy` (`mirror/engine.py:418-426`) goes. A channel with the
   same name as the source channel is reused and only gets a webhook.
@@ -280,6 +282,9 @@ Decisions (owner):
 
 - **10a.** Stickers: PNG, APNG and GIF are sent as images from the CDN, Lottie
   keeps the name. This is tested on a real webhook before anyone else uses it.
+  Implemented in Task 8 of `docs/superpowers/plans/2026-10-09-own-copies.md`
+  (plans B and C); the real-webhook check is the owner's manual step at the end of
+  that plan.
 - **10b.** Files are re-uploaded 1:1 up to the documented 20 MiB per file (the
   10 MB threshold goes up). A file over the limit is replaced by one line:
   "This message has a file over the upload limit: <name> (<size>)", followed by a
