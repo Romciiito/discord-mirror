@@ -707,5 +707,132 @@ class ServersScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ui.busy)
 
 
+HOOK = "https://discord.com/api/webhooks/123/abc"
+
+
+class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
+    async def open_channels(self) -> tuple[Controller, FakeEngine]:
+        ui, engine = make()
+        engine.user = {"id": "1", "username": "sosa", "global_name": "Sosa"}
+        engine.http = object()
+        engine.guild_list = [{"id": "g1", "name": "Qwen", "icon": ""}]
+        engine.channel_lists["g1"] = [
+            {"id": "c1", "name": "general", "parent": "", "topic": ""},
+            {"id": "c2", "name": "dev", "parent": "", "topic": ""},
+        ]
+        ui.refresh()
+        await keys(ui, "Enter", "2", "2", "ArrowRight")
+        self.assertEqual(ui.depth, "channels")
+        return ui, engine
+
+    async def test_enter_ticks_the_channel_and_opens_the_url_row(self) -> None:
+        ui, engine = await self.open_channels()
+        await keys(ui, "Enter")
+        self.assertEqual(ui.typing, "webhook")
+        self.assertEqual(ui.webhook_channel["id"], "c1")
+        self.assertIn("c1", ui.picked)
+        self.assertEqual(ui.hint(), "enter keeps it, esc cancels the edit")
+        for ch in HOOK:
+            await ui.press(ch, plain=True)
+        await keys(ui, "Enter")
+        self.assertIsNone(ui.typing)
+        self.assertEqual(ui.picked["c1"]["webhook_url"], HOOK)
+        self.assertEqual(engine.calls[-1][1]["channels"][0]["webhook_url"], HOOK)
+
+    async def test_invalid_url_keeps_the_row_open_with_the_error(self) -> None:
+        ui, engine = await self.open_channels()
+        await keys(ui, "Enter")
+        for ch in "https://example.com/x":
+            await ui.press(ch, plain=True)
+        await keys(ui, "Enter")
+        self.assertEqual(ui.typing, "webhook")
+        self.assertEqual(ui.error, "webhook url is not a discord incoming webhook")
+        self.assertEqual(ui.picked["c1"]["webhook_url"], "")
+
+    async def test_empty_enter_or_escape_unticks_the_channel(self) -> None:
+        ui, engine = await self.open_channels()
+        await keys(ui, "Enter", "Enter")
+        self.assertIsNone(ui.typing)
+        self.assertNotIn("c1", ui.picked)
+        await keys(ui, "Enter", "Escape")
+        self.assertNotIn("c1", ui.picked)
+        self.assertEqual(engine.calls[-1][1]["channels"], [])
+
+    async def test_escape_with_text_keeps_the_tick_without_a_url(self) -> None:
+        ui, engine = await self.open_channels()
+        await keys(ui, "Enter")
+        for ch in "https://":
+            await ui.press(ch, plain=True)
+        await keys(ui, "Escape")
+        self.assertIsNone(ui.typing)
+        self.assertEqual(ui.picked["c1"]["webhook_url"], "")
+        await keys(ui, "Enter")
+        self.assertEqual(ui.typing, "webhook")
+        self.assertEqual(ui.draft, "")
+
+    async def test_backspace_edits_the_url_row(self) -> None:
+        ui, engine = await self.open_channels()
+        await keys(ui, "Enter")
+        await ui.paste(HOOK + "x")
+        await keys(ui, "Backspace")
+        self.assertEqual(ui.draft, HOOK)
+        await keys(ui, "Enter")
+        self.assertEqual(ui.picked["c1"]["webhook_url"], HOOK)
+
+    async def test_enter_on_a_channel_with_a_url_unticks_it(self) -> None:
+        ui, engine = await self.open_channels()
+        await keys(ui, "Enter")
+        await ui.paste(HOOK + "\n")
+        await keys(ui, "Enter")
+        self.assertEqual(ui.picked["c1"]["webhook_url"], HOOK)
+        await keys(ui, "Enter")
+        self.assertNotIn("c1", ui.picked)
+
+    async def test_start_refuses_a_ticked_channel_without_a_webhook_and_jumps_to_it(self) -> None:
+        ui, engine = await self.open_channels()
+        await keys(ui, "ArrowDown", "a", "Escape", "Escape", "Escape")
+        self.assertEqual(ui.flow["screen"], "menu")
+        self.assertEqual(set(ui.picked), {"c1", "c2"})
+        await keys(ui, "1")
+        # after the last save, Start only lists the servers and that server's channels to jump there
+        self.assertEqual([call[0] for call in engine.calls[-3:]], ["save_setup", "guilds", "channels"])
+        self.assertEqual(engine.calls[-1], ("channels", "g1"))
+        self.assertNotIn(("start",), engine.calls)
+        self.assertEqual(ui.error, "#general has no webhook")
+        self.assertEqual(ui.flow["screen"], "servers")
+        self.assertEqual(ui.depth, "channels")
+        self.assertEqual(ui.active_guild["id"], "g1")
+        self.assertEqual(ui.channel_rows[ui.local_index]["id"], "c1")
+
+    async def test_refused_start_stays_on_the_menu_when_the_channel_list_fails(self) -> None:
+        ui, engine = await self.open_channels()
+        await keys(ui, "a", "Escape", "Escape", "Escape")
+        engine.fail["channels"] = ApiError(403, "missing access")
+        await keys(ui, "1")
+        self.assertNotIn(("start",), engine.calls)
+        self.assertEqual(ui.flow["screen"], "menu")
+        self.assertEqual(ui.error, "#general has no webhook (missing access)")
+        self.assertFalse(ui.busy)
+        engine.fail["channels"] = aiohttp.ClientConnectionError("Cannot connect to host discord.com:443")
+        with self.assertLogs("mirror.cli", level="ERROR"):
+            await keys(ui, "1")
+        self.assertNotIn(("start",), engine.calls)
+        self.assertEqual(ui.flow["screen"], "menu")
+        self.assertEqual(ui.error, "#general has no webhook (request failed)")
+        self.assertFalse(ui.busy)
+
+    async def test_start_runs_when_every_ticked_channel_has_a_webhook(self) -> None:
+        ui, engine = await self.open_channels()
+        await keys(ui, "Enter")
+        await ui.paste(HOOK)
+        await keys(ui, "Enter")
+        # Start must run with the ticked channel, not with an empty selection
+        self.assertEqual(engine.selection[0]["webhook_url"], HOOK)
+        await keys(ui, "Escape", "Escape", "Escape", "1")
+        self.assertEqual(set(ui.picked), {"c1"})
+        self.assertEqual(engine.calls[-1], ("start",))
+        self.assertEqual(ui.flow["screen"], "running")
+
+
 if __name__ == "__main__":
     unittest.main()

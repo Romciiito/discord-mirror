@@ -163,7 +163,12 @@ class Controller:
             await self._server_key(key)
 
     async def paste(self, text: str) -> None:
-        if self.busy or self.flow["screen"] != "token":
+        if self.busy:
+            return
+        if self.typing == "webhook":
+            self.draft += text.strip()
+            return
+        if self.flow["screen"] != "token":
             return
         if self.typing in TEXT_FIELDS:
             # an open field takes the paste at the end, as typed keys do; the token keeps the raw
@@ -175,6 +180,10 @@ class Controller:
     # ---- menu actions ------------------------------------------------------
 
     async def _begin(self) -> None:
+        blocker = self._start_blocker()
+        if blocker is not None:
+            await self._jump_to(blocker)
+            return
         self.busy = True
         self.error = ""
         self.flow = _menu_state("running")
@@ -187,6 +196,34 @@ class Controller:
         except Exception:
             log.exception("start failed")
             self.error = UNEXPECTED
+            self.flow = _menu_state()
+        finally:
+            self.busy = False
+
+    def _start_blocker(self) -> dict[str, Any] | None:
+        """The first ticked row without an own webhook: Start refuses it (decision 9f)."""
+        for row in self.picked.values():
+            if not str(row.get("webhook_url") or "").strip():
+                return row
+        return None
+
+    async def _jump_to(self, row: dict[str, Any]) -> None:
+        self.error = f"#{row.get('channel_name') or row.get('channel_id')} has no webhook"
+        self.busy = True
+        try:
+            self.guilds = list(await self.engine.guilds())
+            guild = next((g for g in self.guilds if g["id"] == row.get("guild_id")), None) or {"id": row.get("guild_id"), "name": row.get("guild_name") or "server"}
+            self.channel_rows = list(await self.engine.channels(guild["id"]))
+            self.active_guild = guild
+            self.depth = "channels"
+            self.local_index = max(0, next((at for at, c in enumerate(self.channel_rows) if c["id"] == row.get("channel_id")), 0))
+            self.flow = _menu_state("servers")
+        except (ApiError, RuntimeError) as exc:
+            self.error = f"{self.error} ({exc})"
+            self.flow = _menu_state()
+        except Exception:
+            log.exception("jump to the channel without a webhook failed")
+            self.error = f"{self.error} ({UNEXPECTED})"
             self.flow = _menu_state()
         finally:
             self.busy = False
@@ -423,6 +460,9 @@ class Controller:
 
     async def _server_key(self, key: str) -> None:
         if self.depth == "channels":
+            if self.typing == "webhook":
+                await self._webhook_key(key)
+                return
             if key == "Escape":
                 self.depth = "guilds"
                 active = self.active_guild["id"] if self.active_guild else None
@@ -435,7 +475,7 @@ class Controller:
             elif key == "ArrowUp":
                 self.local_index = max(0, self.local_index - 1)
             elif key == "Enter":
-                await self._toggle_channel(self.channel_rows[self.local_index])  # Task 6b replaces this with _channel_enter
+                await self._channel_enter(self.channel_rows[self.local_index])
             elif key in ("a", "A"):
                 for channel in self.channel_rows:
                     self._remember(self.active_guild, channel)
@@ -475,6 +515,52 @@ class Controller:
             del self.picked[channel["id"]]
         else:
             self._remember(self.active_guild, channel)
+        await self._save_options()
+
+    # ---- own webhook URL row of a ticked channel: Task 6b (decisions 9d, 9g) ----
+
+    async def _channel_enter(self, channel: dict[str, Any]) -> None:
+        row = self.picked.get(channel["id"])
+        if row and row.get("webhook_url"):
+            await self._toggle_channel(channel)
+            return
+        if not row:
+            self._remember(self.active_guild, channel)
+        self.typing = "webhook"
+        self.webhook_channel = channel
+        self.draft = ""
+        self.error = ""
+
+    async def _webhook_key(self, key: str) -> None:
+        channel = self.webhook_channel or {}
+        if key == "Enter":
+            url = self.draft.strip()
+            if not url:
+                await self._close_webhook_row(untick=True)
+                return
+            try:
+                cleaned = clean_webhook(url)
+            except ApiError as exc:
+                self.error = str(exc)
+                return
+            if channel.get("id") in self.picked:
+                self.picked[channel["id"]]["webhook_url"] = cleaned
+            await self._close_webhook_row(untick=False)
+        elif key == "Escape":
+            await self._close_webhook_row(untick=not self.draft.strip())
+        elif key == "Backspace":
+            self.draft = self.draft[:-1]
+        elif len(key) == 1:
+            self.draft += key
+
+    async def _close_webhook_row(self, untick: bool) -> None:
+        channel = self.webhook_channel or {}
+        if untick:
+            self.picked.pop(channel.get("id"), None)
+        self.typing = None
+        self.webhook_channel = None
+        self.draft = ""
+        self.error = ""
         await self._save_options()
 
     async def _toggle_guild(self, guild: dict[str, Any]) -> None:
