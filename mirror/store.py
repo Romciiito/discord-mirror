@@ -156,6 +156,9 @@ class Store:
             self.conn.execute("ALTER TABLE selection ADD COLUMN parent TEXT NOT NULL DEFAULT ''")
         if "topic" not in picked_cols:
             self.conn.execute("ALTER TABLE selection ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
+        if "nsfw" not in picked_cols:
+            # a row stored before this column has no age gate until the owner ticks its channel again
+            self.conn.execute("ALTER TABLE selection ADD COLUMN nsfw INTEGER NOT NULL DEFAULT 0")
         # a link stored before the fills record existed: its target holds that source. A file whose targets table
         # has the shared column gives the flag from it here; nothing else reads that column, as with the options above
         target_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(targets)")}
@@ -303,7 +306,7 @@ class Store:
 
     def selection(self) -> list[dict]:
         rows = self.conn.execute(
-            "SELECT channel_id, guild_id, guild_name, channel_name, webhook_url, enabled, parent, topic "
+            "SELECT channel_id, guild_id, guild_name, channel_name, webhook_url, enabled, parent, topic, nsfw "
             "FROM selection ORDER BY guild_name, channel_name"
         ).fetchall()
         return [dict(row) for row in rows]
@@ -325,12 +328,14 @@ class Store:
                     1 if row.get("enabled", 1) else 0,
                     row.get("parent") or "",
                     str(row.get("topic") or "")[:1024],
+                    1 if row.get("nsfw") else 0,
                 )
             )
         self.conn.execute("DELETE FROM selection")
         self.conn.executemany(
-            "INSERT INTO selection (channel_id, guild_id, guild_name, channel_name, webhook_url, enabled, parent, topic) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO selection "
+            "(channel_id, guild_id, guild_name, channel_name, webhook_url, enabled, parent, topic, nsfw) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             packed,
         )
         for item in packed:

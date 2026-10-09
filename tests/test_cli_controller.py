@@ -664,6 +664,14 @@ class ServersScreenTests(unittest.IsolatedAsyncioTestCase):
         await keys(ui, "Enter")
         self.assertEqual(engine.calls[-1][1]["channels"], [])
 
+    async def test_a_ticked_channel_keeps_its_age_restriction(self) -> None:
+        # the fill creates the copy of an age-restricted channel with the age gate from the saved row alone
+        ui, engine = await self.open_servers()
+        engine.channel_lists["g1"][0]["nsfw"] = True
+        await keys(ui, "Enter")
+        saved = {row["channel_id"]: row["nsfw"] for row in engine.calls[-1][1]["channels"]}
+        self.assertEqual(saved, {"c1": True, "c2": False})
+
     async def test_right_opens_channels_and_a_ticks_all(self) -> None:
         ui, engine = await self.open_servers()
         await keys(ui, "ArrowRight")
@@ -1236,7 +1244,7 @@ class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
         ui, engine = make()
         self.stale(ui, engine, [
             {"channel_id": "c7", "guild_id": "g7", "guild_name": "Old", "channel_name": "news",
-             "parent": "Info", "topic": "t", "webhook_url": ""},
+             "parent": "Info", "topic": "t", "nsfw": 1, "webhook_url": ""},
         ])
         await keys(ui, "Enter", "1")
         # the server is not in the account's server list, so its channels are not asked for
@@ -1245,14 +1253,15 @@ class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ui.error, "#news has no webhook (not listed)")
         self.assertEqual((ui.flow["screen"], ui.depth), ("servers", "channels"))
         self.assertEqual((ui.active_guild["id"], ui.active_guild["name"]), ("g7", "Old"))
-        self.assertEqual(ui.channel_rows, [{"id": "c7", "name": "news", "parent": "Info", "topic": "t"}])
+        self.assertEqual(ui.channel_rows, [{"id": "c7", "name": "news", "parent": "Info", "topic": "t", "nsfw": True}])
         self.assertEqual(ui.local_index, 0)
         await keys(ui, "Enter")
         await ui.paste(HOOK)
         await keys(ui, "Enter")
-        # the URL row of the shown row keeps the stored server, parent and topic
+        # the URL row of the shown row keeps the stored server, parent, topic and age restriction
         self.assertEqual(engine.selection[0]["webhook_url"], HOOK)
         self.assertEqual((engine.selection[0]["guild_id"], engine.selection[0]["parent"]), ("g7", "Info"))
+        self.assertEqual((engine.selection[0]["topic"], bool(engine.selection[0]["nsfw"])), ("t", True))
         await keys(ui, "Escape")
         self.assertEqual((ui.depth, ui.local_index), ("guilds", 0))
 

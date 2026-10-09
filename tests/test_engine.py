@@ -256,6 +256,39 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(again.selection()[0]["webhook_url"], HOOK)
             again.close()
 
+    def test_store_without_the_age_restriction_column_opens(self) -> None:
+        # a row stored before the column has no age gate until the owner ticks the channel again
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = sqlite3.connect(Path(tmp) / "state.db")
+            conn.executescript(OLD_SCHEMA)
+            conn.execute("INSERT INTO selection (channel_id, guild_id, channel_name) VALUES ('10', '5', 'general')")
+            conn.commit()
+            conn.close()
+            store = Store(tmp)
+            self.assertEqual([(r["channel_id"], r["nsfw"]) for r in store.selection()], [("10", 0)])
+            store.replace_selection([row("10") | {"nsfw": True}, row("11", name="news")])
+            store.close()
+            again = Store(tmp)
+            self.assertEqual([(r["channel_id"], r["nsfw"]) for r in again.selection()], [("10", 1), ("11", 0)])
+            again.close()
+
+    async def test_channel_list_and_saved_rows_carry_the_age_restriction(self) -> None:
+        # Engine.channels gives each channel its age restriction, and the save of PUT /api/setup keeps it on the row
+        http = FakeHTTP()
+        http.listed = [{"id": "5", "name": "Desk", "owner": True}]
+        http.sources["5"] = [
+            {"id": "10", "type": 0, "name": "general", "nsfw": True},
+            {"id": "11", "type": 0, "name": "news"},
+        ]
+        self.engine.http = http
+        self.engine.user = {"id": "1", "username": "ada"}
+        listed = await self.engine.channels("5")
+        self.assertEqual([(c["id"], c["nsfw"]) for c in listed], [("10", True), ("11", False)])
+        self.engine.save_setup(
+            {"channels": [row(c["id"], name=c["name"]) | {"nsfw": c["nsfw"]} for c in listed]}
+        )
+        self.assertEqual([(r["channel_id"], r["nsfw"]) for r in self.store.selection()], [("10", 1), ("11", 0)])
+
     async def test_close_closes_store(self) -> None:
         await self.engine.open()
         await self.engine.close()
@@ -686,18 +719,15 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.delays, [0.3, 0.25, 0.25, 0.25, 0.25])
 
     async def test_fill_creates_the_copy_of_an_age_restricted_channel_with_the_age_gate(self) -> None:
-        # the store rows hold no age restriction; the fill reads it from the source server's channel listing, once,
-        # and sets it only on a channel it creates: "rules", found again in the target, is never altered
+        # the age restriction travels on the stored row, as the parent and the topic do; the fill reads no listing of
+        # the source and sets the gate only on a channel it creates: "rules", found again in the target, is never altered
         http = FakeHTTP()
         http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
-        http.sources["5"] = [
-            {"id": "10", "type": 0, "name": "general", "nsfw": True},
-            {"id": "11", "type": 0, "name": "news", "nsfw": False},
-            {"id": "12", "type": 0, "name": "rules", "nsfw": True},
-        ]
         http.sources["900"] = [{"id": "t1", "type": 0, "name": "rules", "parent_id": None}]
         self.engine.http = http
-        self.store.replace_selection([row("10", name="general"), row("11", name="news"), row("12", name="rules")])
+        self.store.replace_selection(
+            [row("10", name="general") | {"nsfw": True}, row("11", name="news"), row("12", name="rules") | {"nsfw": True}]
+        )
         listed: list[str] = []
         listing = http.channels
 
@@ -708,7 +738,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         http.channels = counted
         report = await self.engine.fill_copy("5", "900")
         self.assertEqual(report["filled"], 3)
-        self.assertEqual(listed.count("5"), 1)
+        self.assertEqual(listed, ["900"])
         texts = {b["name"]: b for b in self.posts(http, "/guilds/900/channels")}
         self.assertEqual(sorted(texts), ["general", "news"])
         self.assertIs(texts["general"]["nsfw"], True)

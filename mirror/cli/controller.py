@@ -266,6 +266,7 @@ class Controller:
                 "name": row.get("channel_name") or str(row.get("channel_id") or ""),
                 "parent": row.get("parent") or "",
                 "topic": row.get("topic") or "",
+                "nsfw": bool(row.get("nsfw")),
             })
             at = len(listed) - 1
             self.error = f"{name} has no webhook (not listed)"
@@ -563,6 +564,7 @@ class Controller:
             "channel_name": channel.get("name") or "",
             "parent": channel.get("parent") or "",
             "topic": channel.get("topic") or "",
+            "nsfw": bool(channel.get("nsfw")),
             "webhook_url": previous.get("webhook_url") or "",
             "enabled": True,
         }

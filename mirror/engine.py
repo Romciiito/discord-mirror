@@ -241,6 +241,7 @@ class Engine:
                 "type": item.get("type"),
                 "parent": parent_name,
                 "topic": item.get("topic") or "",
+                "nsfw": bool(item.get("nsfw")),
             }
 
         def take(item: dict[str, Any], parent_name: str) -> None:
@@ -299,14 +300,6 @@ class Engine:
         if target is None:
             raise ApiError(400, "pick a server you own")
         existing = await http.channels(target_id)
-        # the store rows hold no age restriction: the source's own listing, read once before any write, says which
-        # ticked channel has it, so its copy is created with the age gate
-        gated = {
-            str(item.get("id"))
-            for item in await http.channels(source_id)
-            if isinstance(item, dict) and item.get("nsfw")
-        }
-        rows = [row | {"nsfw": True} if str(row["channel_id"]) in gated else row for row in rows]
         # what the target holds, not where the links point now: a source moved to another target, or whose first
         # fill failed halfway, still has its channels here (decisions 9i, 9o); a refill keeps its first layout
         shared = self.store.record_fill(source_id, target_id)
@@ -590,6 +583,7 @@ class Engine:
                     "enabled": bool(row.get("enabled", True)),
                     "parent": str(row.get("parent") or "")[:80],
                     "topic": str(row.get("topic") or "")[:1024],
+                    "nsfw": bool(row.get("nsfw")),
                 }
             )
         self.store.set_options(backfill, include_threads, mirror)
