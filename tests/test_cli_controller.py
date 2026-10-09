@@ -144,6 +144,19 @@ class NavigationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ui.flow["screen"], "menu")
         self.assertTrue(ui.snap["running"])
 
+    async def test_a_new_run_clears_the_engine_error_after_start_refreshed(self) -> None:
+        # engine events reach the controller through a queue (Engine._emit), so the "connecting" status
+        # of a new run arrives after _begin has already refreshed the snapshot to running
+        ui, _ = make()
+        ui.on_event({"kind": "log", "text": "token was rejected"})
+        ui.on_event({"kind": "status", "running": False, "status": "error"})
+        self.assertEqual(ui.engine_error, "token was rejected")
+        await keys(ui, "Enter", "1")
+        self.assertTrue(ui.snap["running"])
+        self.assertEqual(ui.engine_error, "token was rejected")
+        ui.on_event({"kind": "status", "running": True, "status": "connecting"})
+        self.assertEqual(ui.engine_error, "")
+
     async def test_start_failure_shows_the_error_on_the_menu(self) -> None:
         ui, engine = make()
         engine.fail["start"] = ApiError(400, "select servers first")

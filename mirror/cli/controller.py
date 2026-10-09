@@ -37,7 +37,7 @@ class Controller:
         self.error = ""
         # the engine's last error: why its last run failed (the log text it noted just before the status
         # event "error", Engine._fatal) or which webhook post failed (the "error" event, plan Task 7);
-        # kept after Exit, cleared when the engine reports running again
+        # kept after Exit, cleared when a new run begins (the status "connecting" of Engine._start)
         self.engine_error = ""
         self.busy = False
         self.typing: str | None = None
@@ -80,7 +80,9 @@ class Controller:
             self.snap["status"] = item.get("status") or self.snap.get("status")
             if self.snap["status"] == "error":
                 self.engine_error = str((self.snap.get("log") or ["error"])[0])
-            elif self.snap["running"]:
+            elif item.get("status") == "connecting":
+                # only Engine._start reports "connecting"; the gateway's READY also reports running
+                # ("live"), within the same run, and must not hide a webhook post that already failed
                 self.engine_error = ""
             if "mirrored" in item:
                 self.snap["mirrored"] = item["mirrored"]

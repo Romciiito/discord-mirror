@@ -186,6 +186,24 @@ class RenderTests(unittest.TestCase):
         ui.on_event({"kind": "status", "running": True, "status": "connecting"})
         self.assertEqual(status_line(ui), "signed out · running · 0 mirrored · -")
 
+    def test_status_line_keeps_the_error_when_the_gateway_is_ready(self) -> None:
+        # the engine reports running twice per run: engine.start() with status "connecting" (Engine._start)
+        # and the gateway's READY with status "live" (Engine.on_dispatch, again after every new session);
+        # backfill posts run while the gateway connects, so a post can fail before READY
+        ui = ui_on("running")
+        ui.on_event({"kind": "status", "running": True, "status": "connecting"})
+        ui.on_event({"kind": "log", "text": "#general: webhook post failed"})
+        ui.on_event({"kind": "error", "text": "#general: webhook post failed"})
+        ui.on_event({"kind": "log", "text": "live"})
+        ui.on_event({"kind": "status", "running": True, "status": "live"})
+        self.assertEqual(status_line(ui), "signed out · running · 0 mirrored · #general: webhook post failed")
+        # READY of a new gateway session in the same run does not hide it either
+        ui.on_event({"kind": "status", "running": True, "status": "live"})
+        self.assertEqual(status_line(ui), "signed out · running · 0 mirrored · #general: webhook post failed")
+        # only the next run's "connecting" clears it
+        ui.on_event({"kind": "status", "running": True, "status": "connecting"})
+        self.assertEqual(status_line(ui), "signed out · running · 0 mirrored · -")
+
     def test_long_list_keeps_the_cursor_row_in_view(self) -> None:
         ui = ui_on("servers")
         ui.guilds = [{"id": f"g{n}", "name": f"Server {n}"} for n in range(40)]
