@@ -281,8 +281,8 @@ git commit -m "Store one target server per source server and drop the shared-ser
 - Test: `tests/test_provision.py`
 
 **Interfaces:**
-- Produces: `copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict` with `{"categories": [{"key": str, "name": str}], "channels": [{"source_id": str, "name": str, "category_key": str, "topic": str}]}`; `same_name(a: str, b: str) -> bool` (two channel names Discord would show the same way: lower case, runs of non-word characters as one dash); `webhook_name` unchanged. `destination_layout` and its tests are removed.
-- Rules (decisions 9b', 9n, 9o): rows with `enabled` false or a non-numeric `channel_id` are skipped; a row's `parent` is the source category name (`""` for a loose channel); when `shared` is false the category name is the parent as is and a loose channel has `category_key == ""`; when `shared` is true the category name is `"<source> / <parent>"` and a loose channel goes under a category named `"<source>"`; categories are deduplicated case-insensitively, in order of first appearance, `key` is the folded name; channel `name` is the stored `channel_name` with collapsed whitespace, 100 characters at most, `"channel"` when empty; `topic` collapsed, 1024 at most.
+- Produces: `copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict` with `{"categories": [{"key": str, "name": str}], "channels": [{"source_id": str, "name": str, "category_key": str, "topic": str}]}`; `same_name(a: str, b: str) -> bool` (two channel names Discord would show the same way: lower case, runs of non-word characters as one dash); `webhook_name` unchanged. The `destination_layout` tests are removed here; the function itself goes in Task 3.
+- Rules (decisions 9b', 9n, 9o): rows with `enabled` false (`False`, or the `0` that `Store.selection()` returns for an unticked row) or a non-numeric `channel_id` are skipped; a row's `parent` is the source category name (`""` for a loose channel); when `shared` is false the category name is the parent as is and a loose channel has `category_key == ""`; when `shared` is true the category name is `"<source> / <parent>"` and a loose channel goes under a category named `"<source>"`; categories are deduplicated case-insensitively, in order of first appearance, `key` is the folded name; channel `name` is the stored `channel_name` with collapsed whitespace, 100 characters at most, `"channel"` when empty; `topic` collapsed, 1024 at most. `same_name` is true for two names with the same non-empty shown form, so a channel named `channel` (also the name an empty source name gets) is reused on the next fill (decision 9i); a name with no letter or digit matches nothing.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -324,6 +324,8 @@ class CopyLayoutTests(unittest.TestCase):
         self.assertEqual(copy_layout("", [row("1", "a")], True)["categories"], [{"key": "server", "name": "server"}])
         self.assertEqual(len(copy_layout("x" * 200, [row("1", "y" * 200, "z" * 200)], True)["categories"][0]["name"]), 100)
         self.assertEqual(len(copy_layout("x", [row("1", "y" * 200)], False)["channels"][0]["name"]), 100)
+        # Store.selection() keeps the tick as the integer 0 or 1
+        self.assertEqual(copy_layout("Desk", [row("15", "e") | {"enabled": 0}], False)["channels"], [])
 
     def test_same_name_follows_what_discord_shows(self) -> None:
         self.assertTrue(same_name("General Chat", "general-chat"))
@@ -331,6 +333,9 @@ class CopyLayoutTests(unittest.TestCase):
         self.assertTrue(same_name("a  b", "a-b"))
         self.assertFalse(same_name("general", "general-2"))
         self.assertFalse(same_name("", "channel"))
+        # a channel named "channel" (also the name an empty source name gets) is reused on the next fill (decision 9i)
+        self.assertTrue(same_name("Channel", "channel"))
+        self.assertFalse(same_name("!!!", "channel"))
 ```
 
 Check the file's existing imports (`unittest`) and keep the `webhook_name` test class.
@@ -342,7 +347,7 @@ Expected: FAIL — `ImportError: cannot import name 'copy_layout'`.
 
 - [ ] **Step 3: Implement**
 
-In `mirror/provision.py`, replace `destination_layout` with:
+In `mirror/provision.py`, add next to `destination_layout` (which stays until Task 3, see Step 4):
 
 ```python
 def copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict[str, Any]:
@@ -355,7 +360,7 @@ def copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict[str, A
     seen: set[str] = set()
     channels: list[dict[str, str]] = []
     for row in rows:
-        if row.get("enabled") is False:
+        if not row.get("enabled", True):
             continue
         channel_id = str(row.get("channel_id") or "")
         if not channel_id.isdigit():
@@ -378,12 +383,20 @@ def copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict[str, A
 
 def same_name(a: str, b: str) -> bool:
     """Whether Discord shows two text channel names the same way: it lowers the case and turns runs of
-    spaces and punctuation into one dash, so a reused channel is found by that form (decision 9i)."""
-    first, second = _slug(a), _slug(b)
-    return first == second and first != "channel"
+    spaces and punctuation into one dash, so a reused channel is found by that form (decision 9i). A name
+    with no letter or digit matches nothing."""
+    first = _slug(a, "")
+    return bool(first) and first == _slug(b, "")
+
+
+def _slug(value: str, blank: str = "channel") -> str:
+    slug = _SLUG.sub("-", value.casefold()).strip("-")
+    if not slug:
+        slug = blank
+    return slug[:100]
 ```
 
-Keep `_slug`, `webhook_name` and `_fold`; `_slug` returns `"channel"` for an empty name, which `same_name` treats as no match.
+Keep `webhook_name` and `_fold`; `_slug` gains the `blank` parameter (default `"channel"`, so `destination_layout` is unchanged) and `same_name` passes `""`, so an empty shown form matches nothing while a channel really named `channel` is still found.
 
 - [ ] **Step 4: Run the full suite**
 
