@@ -18,6 +18,7 @@ Dispatch = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 RECONNECT = 4000
 HELLO_WAIT = 20.0
+STOP_WAIT = 8.0
 FORGET = frozenset({4007, 4009})
 REFUSED = frozenset({4010, 4011, 4012, 4013, 4014})
 
@@ -74,12 +75,22 @@ class Gateway:
         ws = self._ws
         if ws is not None and not ws.closed:
             await ws.close(code=1000)
-        if self._task is not None:
+        task, self._task = self._task, None
+        if task is None:
+            return
+        # waited on, never its result(): an error the task already ended with is logged here instead of aborting
+        # Engine.stop before Engine.close closes the session and the store
+        if not task.done():
             try:
-                await asyncio.wait_for(self._task, timeout=8)
-            except asyncio.TimeoutError:
-                self._task.cancel()
-            self._task = None
+                await asyncio.wait({task}, timeout=STOP_WAIT)
+            except asyncio.CancelledError:
+                task.cancel()
+                raise
+        if not task.done():
+            task.cancel()
+            await asyncio.wait({task})
+        if not task.cancelled() and task.exception() is not None:
+            log.warning("gateway task ended with an error", exc_info=task.exception())
 
     async def resubscribe(self) -> None:
         async with self._sub_lock:

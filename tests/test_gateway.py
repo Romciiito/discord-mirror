@@ -208,6 +208,51 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(gate._task)
         self.assertEqual(len(self.http.session.calls), 1)
 
+    async def test_stop_after_the_task_died_returns_and_logs_its_error(self) -> None:
+        # Engine.stop awaits Gateway.stop before Engine.close closes the session and the store: a task that
+        # already ended with an error, even a KeyboardInterrupt delivered inside its step, must not abort that
+        async def boom() -> None:
+            raise RuntimeError("boom")
+
+        crashed = asyncio.create_task(boom())
+        await asyncio.wait({crashed})
+        interrupted = asyncio.get_running_loop().create_future()
+        interrupted.set_exception(KeyboardInterrupt())
+        for task, kind in ((crashed, "RuntimeError"), (interrupted, "KeyboardInterrupt")):
+            with self.subTest(kind):
+                gate = self.build([])
+                gate._task = task  # type: ignore[assignment]
+                with self.assertLogs("mirror.gateway", logging.WARNING) as logs:
+                    try:
+                        # awaited here, not in a wait_for task, so a re-raised KeyboardInterrupt fails this test
+                        # instead of ending the test run
+                        await gate.stop()
+                    except BaseException as exc:
+                        self.fail(f"stop re-raised the dead task's {exc!r}")
+                self.assertIsNone(gate._task)
+                self.assertIn(kind, "\n".join(logs.output))
+
+    async def test_stop_cancels_a_task_that_outlives_the_wait_and_awaits_its_end(self) -> None:
+        ended = asyncio.Event()
+
+        async def stubborn() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.01)
+                ended.set()
+                raise
+
+        gate = self.build([])
+        gate._task = asyncio.create_task(stubborn())
+        task = gate._task
+        await asyncio.sleep(0)
+        with mock.patch.object(gw, "STOP_WAIT", 0.05):
+            await asyncio.wait_for(gate.stop(), 1.0)
+        self.assertTrue(ended.is_set())
+        self.assertTrue(task.cancelled())
+        self.assertIsNone(gate._task)
+
     async def test_missing_ack_closes_resumable(self) -> None:
         first = FakeWS([hello(40), ready(2)], ack=False)
         second = FakeWS([hello(40), resumed(6)])
