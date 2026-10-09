@@ -23,6 +23,10 @@ def _menu_state(screen: str = "menu", index: int = 0) -> dict[str, Any]:
     return {"screen": screen, "index": index, "action": None, "locked": False}
 
 
+def _display(user: dict[str, Any]) -> str:
+    return str(user.get("global_name") or user.get("username") or user.get("id") or "")
+
+
 class Controller:
     def __init__(self, engine: Any, read_keychain: Callable[[str, str], Awaitable[str]] = read_keychain) -> None:
         self.engine = engine
@@ -187,10 +191,127 @@ class Controller:
     # ---- token, webhooks and servers screens: Tasks 3, 4 and 6 -------------
 
     async def _token_key(self, key: str, plain: bool) -> None:
-        raise NotImplementedError
+        if self.typing in TEXT_FIELDS:
+            if key == "Enter" or key == "Escape":
+                if self.typing == "token" or key == "Enter":
+                    await self._commit_field()
+                else:
+                    self._cancel_edit()
+            elif plain:
+                self.draft += key
+            return
+        if key == "ArrowDown":
+            self.token_index = (self.token_index + 1) % len(TOKEN_ROWS)
+        elif key == "ArrowUp":
+            self.token_index = (self.token_index - 1 + len(TOKEN_ROWS)) % len(TOKEN_ROWS)
+        elif key == "Enter":
+            await self._token_action()
+        elif key == "Escape":
+            self.flow = reduce(self.flow, {"key": "Escape"}, self.ctx())
+            self.typing = None
+        elif len(key) == 1 and "1" <= key <= str(len(TOKEN_ROWS)):
+            self.token_index = int(key) - 1
+            await self._token_action()
+        elif plain and TOKEN_ROWS[self.token_index] == "token":
+            self._type_token(key)
 
     def _type_token(self, text: str) -> None:
-        raise NotImplementedError
+        self.typing = "token"
+        self.draft = text
+        self.error = ""
+
+    async def _commit_field(self) -> None:
+        field = self.typing
+        if field in TEXT_FIELDS:
+            self.fields[field] = self.draft
+        self.typing = None
+        self.draft = ""
+        if field == "token":
+            await self._check_token(self.fields["token"])
+
+    def _cancel_edit(self) -> None:
+        self.typing = None
+        self.draft = ""
+
+    async def _check_token(self, raw: str) -> None:
+        self.busy = True
+        try:
+            report = await self.engine.check_token(raw)
+        except (ApiError, RuntimeError) as exc:
+            self.token_check = f"✗ {exc}"
+            return
+        except Exception:
+            log.exception("token check failed")
+            self.token_check = ""  # never leave the result of an earlier token next to the new one
+            self.error = UNEXPECTED
+            return
+        finally:
+            self.busy = False
+        result = report.get("result")
+        if result == "works":
+            self.token_check = f"✓ token works – signed in as {_display(report.get('user') or {})}"
+        elif result == "rejected":
+            self.token_check = "✗ token rejected by Discord"
+        else:
+            self.token_check = f"✗ could not reach Discord ({report.get('reason') or 'network error'})"
+
+    async def _token_action(self) -> None:
+        target = TOKEN_ROWS[self.token_index]
+        self.error = ""
+        if self.typing in TEXT_FIELDS and target != self.typing:
+            await self._commit_field()
+        if target in TEXT_FIELDS:
+            if self.typing == target:
+                return
+            self.typing = target
+            self.draft = self.fields[target] or ""
+        elif target == "keep":
+            self.fields["keep"] = not self.fields["keep"]
+        elif target == "back":
+            self.flow = reduce(self.flow, {"key": "Escape"}, self.ctx())
+        elif target == "save":
+            await self._sign_in(self.fields["token"])
+        elif target == "keychain":
+            token = await self._keychain_token()
+            if token is not None:
+                await self._sign_in(token)
+
+    async def _keychain_token(self) -> str | None:
+        """The keychain secret, "" when both fields are empty, None when the lookup failed (error is set)."""
+        if not (self.fields["service"] or self.fields["account"]):
+            return ""
+        self.busy = True
+        try:
+            return await self.read_keychain(self.fields["service"], self.fields["account"])
+        except (ApiError, RuntimeError) as exc:
+            self.error = str(exc)
+        except Exception:
+            log.exception("keychain read failed")
+            self.error = UNEXPECTED
+        finally:
+            self.busy = False
+        return None
+
+    async def _sign_in(self, token: str) -> None:
+        if not token:
+            self.error = "paste a token or use the keychain fields"
+            return
+        self.busy = True
+        try:
+            user = await self.engine.use_token(token, bool(self.fields["keep"]))
+            self.engine.note(f"signed in as {_display(user)}")
+            self.refresh()
+            self.fields["token"] = ""
+            self.token_check = ""
+            self.error = ""
+            self.flow = reduce(self.flow, {"key": "Escape"}, self.ctx())
+        except (ApiError, RuntimeError) as exc:
+            self.error = str(exc)
+        except Exception:
+            log.exception("sign in failed")
+            self.error = UNEXPECTED
+        finally:
+            self.busy = False
 
     async def _hook_key(self, key: str) -> None:
         raise NotImplementedError

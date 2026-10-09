@@ -7,7 +7,7 @@ from typing import Any
 import aiohttp
 
 from mirror.cli.controller import Controller
-from mirror.discord_api import ApiError
+from mirror.discord_api import ApiError, clean_token
 
 
 class FakeEngine:
@@ -63,7 +63,7 @@ class FakeEngine:
     async def check_token(self, raw: str) -> dict:
         self.calls.append(("check_token", raw))
         self._maybe_fail("check_token")
-        return self.checks.get(raw, {"result": "rejected"})
+        return self.checks.get(clean_token(raw), {"result": "rejected"})  # Engine.check_token cleans the raw text
 
     def note(self, text: str) -> None:
         self.log.insert(0, text)
@@ -205,6 +205,186 @@ class NetworkErrorTests(unittest.IsolatedAsyncioTestCase):
             await keys(ui, "Enter", "3")
         self.assertEqual(engine.calls, [("stop",)])
         self.assertEqual(ui.flow["screen"], "exit")
+        self.assertEqual(ui.error, "request failed")
+        self.assertFalse(ui.busy)
+
+
+class TokenScreenTests(unittest.IsolatedAsyncioTestCase):
+    async def open_token(self) -> tuple[Controller, FakeEngine]:
+        ui, engine = make()
+        await keys(ui, "Enter", "2", "1")
+        self.assertEqual(ui.flow["screen"], "token")
+        return ui, engine
+
+    async def test_enter_on_the_token_row_opens_the_field_and_enter_checks(self) -> None:
+        ui, engine = await self.open_token()
+        engine.checks["a" * 40] = {"result": "works", "user": {"id": "1", "username": "sosa", "global_name": "Sosa"}}
+        await keys(ui, "1")
+        self.assertEqual(ui.typing, "token")
+        self.assertEqual(ui.hint(), "enter or esc keeps it")
+        for ch in "a" * 40:
+            await ui.press(ch, plain=True)
+        self.assertEqual(ui.draft, "a" * 40)
+        await keys(ui, "Enter")
+        self.assertIsNone(ui.typing)
+        self.assertEqual(ui.fields["token"], "a" * 40)
+        self.assertEqual(engine.calls[-1], ("check_token", "a" * 40))
+        self.assertEqual(ui.token_check, "✓ token works – signed in as Sosa")
+
+    async def test_escape_keeps_the_token_and_reports_a_rejection(self) -> None:
+        ui, engine = await self.open_token()
+        await keys(ui, "1")
+        for ch in "b" * 40:
+            await ui.press(ch, plain=True)
+        await keys(ui, "Escape")
+        self.assertEqual(ui.fields["token"], "b" * 40)
+        self.assertEqual(ui.token_check, "✗ token rejected by Discord")
+        self.assertEqual(ui.flow["screen"], "token")
+
+    async def test_unreachable_and_short_tokens_are_reported(self) -> None:
+        ui, engine = await self.open_token()
+        engine.checks["c" * 40] = {"result": "unreachable", "reason": "timeout"}
+        await keys(ui, "1")
+        for ch in "c" * 40:
+            await ui.press(ch, plain=True)
+        await keys(ui, "Enter")
+        self.assertEqual(ui.token_check, "✗ could not reach Discord (timeout)")
+        engine.fail["check_token"] = ApiError(400, "token looks too short")
+        await keys(ui, "x", "Enter")
+        self.assertEqual(ui.fields["token"], "x")
+        self.assertEqual(ui.token_check, "✗ token looks too short")
+
+    async def test_reopening_the_token_field_starts_from_the_kept_token(self) -> None:
+        ui, _ = await self.open_token()
+        await ui.paste("j" * 40)
+        await keys(ui, "Enter", "1")
+        self.assertEqual(ui.typing, "token")
+        self.assertEqual(ui.draft, "j" * 40)
+        await keys(ui, "x", "Enter")
+        self.assertEqual(ui.fields["token"], "j" * 40 + "x")
+
+    async def test_typing_on_the_closed_token_row_opens_it_with_the_text(self) -> None:
+        ui, _ = await self.open_token()
+        await ui.press("z", plain=True)
+        self.assertEqual(ui.typing, "token")
+        self.assertEqual(ui.draft, "z")
+
+    async def test_pasted_token_is_checked_after_cleaning(self) -> None:
+        ui, engine = await self.open_token()
+        engine.checks["d" * 40] = {"result": "works", "user": {"id": "9", "username": "u", "global_name": ""}}
+        await ui.paste('  "' + "d" * 40 + '"\n')
+        self.assertEqual(ui.typing, "token")
+        await keys(ui, "Enter")
+        self.assertEqual(engine.calls[-1], ("check_token", '  "' + "d" * 40 + '"\n'))
+        self.assertEqual(ui.token_check, "✓ token works – signed in as u")
+
+    async def test_save_signs_in_and_returns_to_settings(self) -> None:
+        ui, engine = await self.open_token()
+        await keys(ui, "1")
+        for ch in "e" * 40:
+            await ui.press(ch, plain=True)
+        await keys(ui, "Enter", "2", "3")
+        self.assertEqual(engine.calls[-1], ("use_token", "e" * 40, False))
+        self.assertEqual(ui.flow["screen"], "settings")
+        self.assertEqual(ui.fields["token"], "")
+        self.assertEqual(ui.token_check, "")
+        self.assertTrue(ui.ctx()["tokenOk"])
+        self.assertEqual(engine.log[0], "signed in as Sosa")
+
+    async def test_save_without_a_token_shows_the_error(self) -> None:
+        ui, engine = await self.open_token()
+        await keys(ui, "3")
+        self.assertEqual(ui.error, "paste a token or use the keychain fields")
+        self.assertEqual(engine.calls, [])
+
+    async def test_keychain_fields_keep_on_enter_and_cancel_on_escape(self) -> None:
+        ui, engine = await self.open_token()
+        await keys(ui, "4")
+        self.assertEqual(ui.typing, "service")
+        self.assertEqual(ui.hint(), "enter keeps it, esc cancels the edit")
+        for ch in "svc":
+            await ui.press(ch, plain=True)
+        await keys(ui, "Enter")
+        self.assertEqual(ui.fields["service"], "svc")
+        await keys(ui, "5")
+        for ch in "nope":
+            await ui.press(ch, plain=True)
+        await keys(ui, "Escape")
+        self.assertEqual(ui.fields["account"], "")
+        await keys(ui, "5")
+        for ch in "acc":
+            await ui.press(ch, plain=True)
+        await keys(ui, "Enter", "6")
+        self.assertEqual(engine.calls[-1], ("use_token", "k" * 40, True))
+        self.assertEqual(ui.flow["screen"], "settings")
+
+    async def test_keychain_miss_shows_the_error(self) -> None:
+        ui, engine = await self.open_token()
+        await keys(ui, "6")
+        self.assertEqual(ui.error, "paste a token or use the keychain fields")
+        self.assertEqual(engine.calls, [])
+
+    async def test_moving_to_another_row_commits_the_draft(self) -> None:
+        ui, _ = await self.open_token()
+        await keys(ui, "1")
+        for ch in "f" * 40:
+            await ui.press(ch, plain=True)
+        await keys(ui, "ArrowDown")
+        self.assertEqual(ui.typing, "token")
+        self.assertEqual(ui.draft, "f" * 40 + "ArrowDown"[:0])
+        await keys(ui, "Enter")
+        await keys(ui, "4")
+        self.assertEqual(ui.typing, "service")
+        self.assertEqual(ui.fields["token"], "f" * 40)
+
+    async def test_escape_on_a_closed_row_returns_to_settings(self) -> None:
+        ui, _ = await self.open_token()
+        await keys(ui, "Escape")
+        self.assertEqual(ui.flow["screen"], "settings")
+
+    async def test_keychain_lookup_failure_shows_the_error(self) -> None:
+        engine = FakeEngine()
+        seen: list[bool] = []
+
+        async def failing(service: str, account: str) -> str:
+            seen.append(ui.busy)
+            raise RuntimeError("keychain lookup failed")
+
+        ui = Controller(engine, read_keychain=failing)
+        ui.refresh()
+        await keys(ui, "Enter", "2", "1", "4", "s", "Enter", "5", "a", "Enter", "6")
+        self.assertEqual(seen, [True])
+        self.assertEqual(ui.error, "keychain lookup failed")
+        self.assertEqual(engine.calls, [])
+        self.assertEqual(ui.flow["screen"], "token")
+        self.assertFalse(ui.busy)
+
+    async def test_network_error_on_check_is_logged_and_clears_the_old_result(self) -> None:
+        ui, engine = await self.open_token()
+        engine.checks["g" * 40] = {"result": "works", "user": {"id": "1", "username": "sosa", "global_name": "Sosa"}}
+        await ui.paste("g" * 40)
+        await keys(ui, "Enter")
+        self.assertEqual(ui.token_check, "✓ token works – signed in as Sosa")
+        engine.fail["check_token"] = aiohttp.ClientConnectionError("Cannot connect to host discord.com:443")
+        with self.assertLogs("mirror.cli", level="ERROR") as logs:
+            await keys(ui, "1", "h", "Enter")
+        self.assertNotIn("g" * 40, "\n".join(logs.output))
+        self.assertEqual(ui.fields["token"], "g" * 40 + "h")
+        self.assertEqual(ui.token_check, "")
+        self.assertEqual(ui.error, "request failed")
+        self.assertFalse(ui.busy)
+
+    async def test_network_error_on_sign_in_stays_on_the_token_screen(self) -> None:
+        ui, engine = await self.open_token()
+        engine.fail["use_token"] = asyncio.TimeoutError()
+        await ui.paste("i" * 40)
+        await keys(ui, "Enter")
+        with self.assertLogs("mirror.cli", level="ERROR") as logs:
+            await keys(ui, "3")
+        self.assertNotIn("i" * 40, "\n".join(logs.output))
+        self.assertEqual(engine.calls[-1], ("use_token", "i" * 40, True))
+        self.assertEqual(ui.flow["screen"], "token")
+        self.assertEqual(ui.fields["token"], "i" * 40)
         self.assertEqual(ui.error, "request failed")
         self.assertFalse(ui.busy)
 
