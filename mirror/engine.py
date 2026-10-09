@@ -338,7 +338,7 @@ class Engine:
             1 for source, url in pairs if before.get(source) and webhook_parts(before[source]) != webhook_parts(url)
         )
         self.store.fill_webhooks(pairs)
-        self.store.set_target(source_id, target_id, target["name"], shared)
+        self.store.set_target(source_id, target_id, target["name"])
         text = f"webhooks on {len(pairs)} channel(s) in {target['name']}"
         if reused:
             text += f", {reused} reused"

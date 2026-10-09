@@ -49,8 +49,7 @@ CREATE TABLE IF NOT EXISTS hooks (
 CREATE TABLE IF NOT EXISTS targets (
     source_guild_id TEXT PRIMARY KEY,
     target_guild_id TEXT NOT NULL,
-    target_name TEXT NOT NULL DEFAULT '',
-    shared INTEGER NOT NULL DEFAULT 0
+    target_name TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS fills (
     target_guild_id TEXT NOT NULL,
@@ -157,13 +156,13 @@ class Store:
             self.conn.execute("ALTER TABLE selection ADD COLUMN parent TEXT NOT NULL DEFAULT ''")
         if "topic" not in picked_cols:
             self.conn.execute("ALTER TABLE selection ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
+        # a link stored before the fills record existed: its target holds that source. A file whose targets table
+        # has the shared column gives the flag from it here; nothing else reads that column, as with the options above
         target_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(targets)")}
-        if "shared" not in target_cols:
-            self.conn.execute("ALTER TABLE targets ADD COLUMN shared INTEGER NOT NULL DEFAULT 0")
-        # a link stored before the fills record existed: its target holds that source
+        flag = "shared" if "shared" in target_cols else "0"
         self.conn.execute(
             "INSERT OR IGNORE INTO fills (target_guild_id, source_guild_id, shared) "
-            "SELECT target_guild_id, source_guild_id, shared FROM targets"
+            f"SELECT target_guild_id, source_guild_id, {flag} FROM targets"
         )
         self.conn.execute(
             "INSERT OR IGNORE INTO hooks (channel_id, webhook_url) "
@@ -209,21 +208,18 @@ class Store:
         )
         self.conn.commit()
 
-    def set_target(self, source_guild_id: str, target_guild_id: str, target_name: str, shared: bool = False) -> None:
+    def set_target(self, source_guild_id: str, target_guild_id: str, target_name: str) -> None:
         """The server the owner picked as the copy of one source server (decision 9b'); a later pick replaces it.
-        `shared` is the flag `record_fill` gave this source in that target (decision 9o). The target keeps holding
-        the source in the fills record when a later pick moves the link away."""
+        The fills record holds the pair from then on, as `record_fill` records it, and keeps it when a later pick
+        moves the link away; the link's `shared` flag is the record's (decision 9o)."""
         source, target = str(source_guild_id), str(target_guild_id)
         self.conn.execute(
-            "INSERT INTO targets (source_guild_id, target_guild_id, target_name, shared) VALUES (?, ?, ?, ?) "
+            "INSERT INTO targets (source_guild_id, target_guild_id, target_name) VALUES (?, ?, ?) "
             "ON CONFLICT(source_guild_id) DO UPDATE SET "
-            "target_guild_id = excluded.target_guild_id, target_name = excluded.target_name, shared = excluded.shared",
-            (source, target, str(target_name or "")[:100], int(bool(shared))),
+            "target_guild_id = excluded.target_guild_id, target_name = excluded.target_name",
+            (source, target, str(target_name or "")[:100]),
         )
-        self.conn.execute(
-            "INSERT OR IGNORE INTO fills (target_guild_id, source_guild_id, shared) VALUES (?, ?, ?)",
-            (target, source, int(bool(shared))),
-        )
+        self.record_fill(source, target)
         self.conn.commit()
 
     def record_fill(self, source_guild_id: str, target_guild_id: str) -> bool:
@@ -272,7 +268,11 @@ class Store:
         return {str(row["category_id"]): str(row["source_guild_id"]) for row in rows}
 
     def targets(self) -> dict[str, dict[str, Any]]:
-        rows = self.conn.execute("SELECT source_guild_id, target_guild_id, target_name, shared FROM targets").fetchall()
+        rows = self.conn.execute(
+            "SELECT t.source_guild_id, t.target_guild_id, t.target_name, COALESCE(f.shared, 0) AS shared "
+            "FROM targets t LEFT JOIN fills f "
+            "ON f.target_guild_id = t.target_guild_id AND f.source_guild_id = t.source_guild_id"
+        ).fetchall()
         return {
             str(row["source_guild_id"]): {
                 "target_id": str(row["target_guild_id"]),

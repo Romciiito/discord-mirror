@@ -858,8 +858,8 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         http.hooks["t3"] = [{"id": "88", "name": "general", "token": "other"}]
         http.hooks["t1"] = [{"id": "77", "name": "general", "token": "old"}]
         self.engine.http = http
-        self.store.set_target("5", "900", "Desk copy", False)
-        self.store.set_target("6", "900", "Desk copy", True)
+        self.store.set_target("5", "900", "Desk copy")
+        self.store.set_target("6", "900", "Desk copy")
         self.store.replace_selection(
             [
                 row("10", "https://discord.com/api/webhooks/77/old", name="general"),
@@ -943,8 +943,8 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         ]
         http.hooks["t1"] = [{"id": "77", "name": "general", "token": "old"}]
         self.engine.http = http
-        self.store.set_target("5", "900", "Desk copy", False)
-        self.store.set_target("6", "900", "Desk copy", True)
+        self.store.set_target("5", "900", "Desk copy")
+        self.store.set_target("6", "900", "Desk copy")
         # the row holds the URL of Desk's first fill: found again, so nothing counts as replaced
         self.store.replace_selection([row("10", "https://discord.com/api/webhooks/77/old", name="general") | {"parent": "Talk"}])
         report = await self.engine.fill_copy("5", "900")

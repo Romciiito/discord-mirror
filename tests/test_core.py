@@ -133,10 +133,11 @@ class CoreTests(unittest.TestCase):
             store = Store(tmp)
             self.assertEqual(store.targets(), {})
             store.set_target("5", "900", "Desk copy")
-            store.set_target("6", "900", "Desk copy", True)
-            store.set_target("7", "900", "Desk copy", True)
+            store.set_target("6", "900", "Desk copy")
+            store.set_target("7", "900", "Desk copy")
             store.set_target("5", "901", "Other")
-            store.set_target("7", "902", "Third", False)
+            store.set_target("7", "902", "Third")
+            # the flag is the fills record's (decision 9o): 900 held 5 first, so 6 came second there
             self.assertEqual(
                 store.targets(),
                 {
@@ -166,12 +167,88 @@ class CoreTests(unittest.TestCase):
             conn.close()
             store = Store(tmp)
             self.assertEqual(store.targets(), {"5": {"target_id": "900", "target_name": "Desk copy", "shared": False}})
-            store.set_target("6", "900", "Desk copy", True)
+            store.set_target("6", "900", "Desk copy")
             self.assertTrue(store.targets()["6"]["shared"])
             # the link stored before the record of fills existed still says that 900 holds 5
             self.assertFalse(store.record_fill("5", "900"))
             self.assertTrue(store.record_fill("8", "900"))
             self.assertEqual(store.category_sources("900"), {})
+            store.close()
+
+    def test_a_new_targets_table_has_no_shared_column(self) -> None:
+        # the fills record alone holds the flag, so a snapshot and a fill never read two answers
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            columns = [row[1] for row in store.conn.execute("PRAGMA table_info(targets)")]
+            self.assertEqual(columns, ["source_guild_id", "target_guild_id", "target_name"])
+            store.close()
+
+    def test_targets_table_with_shared_column_and_no_fills_opens(self) -> None:
+        # a file from before the fills record: the flag sat in the targets column only
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = sqlite3.connect(Path(tmp) / "state.db")
+            conn.executescript(
+                """
+                CREATE TABLE targets (
+                    source_guild_id TEXT PRIMARY KEY,
+                    target_guild_id TEXT NOT NULL,
+                    target_name TEXT NOT NULL DEFAULT '',
+                    shared INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO targets VALUES ('5', '900', 'Desk copy', 0), ('6', '900', 'Desk copy', 1);
+                """
+            )
+            conn.commit()
+            conn.close()
+            store = Store(tmp)
+            self.assertEqual(
+                store.targets(),
+                {
+                    "5": {"target_id": "900", "target_name": "Desk copy", "shared": False},
+                    "6": {"target_id": "900", "target_name": "Desk copy", "shared": True},
+                },
+            )
+            self.assertFalse(store.record_fill("5", "900"))
+            self.assertTrue(store.record_fill("6", "900"))
+            store.close()
+
+    def test_targets_table_with_shared_column_reads_the_fills_record(self) -> None:
+        # a file whose targets column and fills record both hold the flag: the column stays in place unread, as the
+        # old option columns do (9h), so a column that says another answer than the record changes nothing
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = sqlite3.connect(Path(tmp) / "state.db")
+            conn.executescript(
+                """
+                CREATE TABLE targets (
+                    source_guild_id TEXT PRIMARY KEY,
+                    target_guild_id TEXT NOT NULL,
+                    target_name TEXT NOT NULL DEFAULT '',
+                    shared INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE fills (
+                    target_guild_id TEXT NOT NULL,
+                    source_guild_id TEXT NOT NULL,
+                    shared INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (target_guild_id, source_guild_id)
+                );
+                INSERT INTO targets VALUES ('5', '900', 'Desk copy', 0), ('6', '900', 'Desk copy', 0);
+                INSERT INTO fills VALUES ('900', '5', 0), ('900', '6', 1);
+                """
+            )
+            conn.commit()
+            conn.close()
+            store = Store(tmp)
+            self.assertEqual(
+                store.targets(),
+                {
+                    "5": {"target_id": "900", "target_name": "Desk copy", "shared": False},
+                    "6": {"target_id": "900", "target_name": "Desk copy", "shared": True},
+                },
+            )
+            store.set_target("6", "900", "Desk copy")
+            self.assertTrue(store.targets()["6"]["shared"])
+            columns = [row[1] for row in store.conn.execute("PRAGMA table_info(targets)")]
+            self.assertIn("shared", columns)
             store.close()
 
     def test_a_target_remembers_every_source_filled_into_it(self) -> None:
@@ -182,7 +259,8 @@ class CoreTests(unittest.TestCase):
             self.assertFalse(store.record_fill("5", "900"))
             self.assertTrue(store.record_fill("6", "900"))
             self.assertFalse(store.record_fill("5", "900"))
-            store.set_target("5", "901", "Spare", store.record_fill("5", "901"))
+            self.assertFalse(store.record_fill("5", "901"))
+            store.set_target("5", "901", "Spare")
             self.assertEqual(store.targets()["5"], {"target_id": "901", "target_name": "Spare", "shared": False})
             self.assertTrue(store.record_fill("7", "900"))
             self.assertTrue(store.record_fill("6", "900"))
