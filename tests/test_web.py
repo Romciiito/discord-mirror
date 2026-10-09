@@ -260,6 +260,39 @@ class MainTests(unittest.TestCase):
             self.assertEqual(logs.records[0].getMessage(), "could not listen on 127.0.0.1:9000: address already in use")
             self.tearDown()
 
+    def test_an_unbindable_address_without_a_tty_ends_with_one_line_and_code_1(self) -> None:
+        # Python 3.12+ asyncio skips EADDRNOTAVAIL and raises an OSError without an errno (measured on 3.14)
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"HOST": "10.255.255.1", "PORT": "9000", "DATA_DIR": tmp}
+            missing = OSError("could not bind on any address out of [('10.255.255.1', 9000)]")
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, env), mock.patch.object(entry, "wants_cli", return_value=False), mock.patch.object(
+                entry, "create_app"
+            ), mock.patch.object(entry.web, "run_app", side_effect=missing), contextlib.redirect_stderr(err), self.assertLogs(
+                "mirror", "ERROR"
+            ):
+                with self.assertRaises(SystemExit) as ended:
+                    entry.main()
+            self.assertEqual(ended.exception.code, 1)
+            self.assertEqual(
+                err.getvalue(),
+                "could not listen on 10.255.255.1:9000: could not bind on any address out of [('10.255.255.1', 9000)]\n",
+            )
+            self.tearDown()
+
+    def test_another_os_error_without_a_tty_is_not_reported_as_a_port_in_use(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"HOST": "127.0.0.1", "PORT": "9000", "DATA_DIR": tmp}
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, env), mock.patch.object(entry, "wants_cli", return_value=False), mock.patch.object(
+                entry, "create_app"
+            ), mock.patch.object(entry.web, "run_app", side_effect=OSError(errno.EIO, "boom")), contextlib.redirect_stderr(err):
+                with self.assertRaises(OSError) as raised:
+                    entry.main()
+            self.assertEqual(raised.exception.errno, errno.EIO)
+            self.assertNotIn("could not listen", err.getvalue())
+            self.tearDown()
+
     def test_wants_cli_needs_both_ttys(self) -> None:
         with mock.patch("sys.stdin") as stdin, mock.patch("sys.stdout") as stdout, mock.patch.object(
             entry, "has_console", return_value=True
@@ -518,6 +551,51 @@ class ServeAndCliTests(unittest.TestCase):
         self.assertIn(f"could not listen on 127.0.0.1:{port}", lines[0])
         self.assertNotIn("Traceback", err.getvalue())
         cli.assert_not_called()
+        made["close"].assert_awaited_once()
+
+    def test_an_os_error_from_the_cli_is_not_reported_as_a_port_in_use(self) -> None:
+        # a terminal detached mid-session or a console write error ends the CLI with an OSError after the
+        # server listened: it is not a bind failure, so its traceback stays and the engine still closes
+        root = logging.getLogger()
+        before, level = list(root.handlers), root.level
+
+        def restore_logging() -> None:
+            for handler in list(root.handlers):
+                if handler not in before:
+                    root.removeHandler(handler)
+                    handler.close()
+            root.setLevel(level)
+
+        self.addCleanup(restore_logging)
+        made: dict[str, Any] = {}
+        err = io.StringIO()
+        port = _free_port()
+
+        async def cli(_engine: Any) -> None:
+            raise OSError(errno.EIO, "boom")
+
+        with contextlib.ExitStack() as stack:
+
+            def make(*args: Any) -> Any:
+                app = create_app(*args)
+                made["close"] = stack.enter_context(
+                    mock.patch.object(app["engine"], "close", wraps=app["engine"].close)
+                )
+                return app
+
+            env = {"HOST": "127.0.0.1", "PORT": str(port), "DATA_DIR": self.tmp.name}
+            stack.enter_context(mock.patch.dict(os.environ, env))
+            stack.enter_context(mock.patch.object(entry, "wants_cli", return_value=True))
+            stack.enter_context(mock.patch.object(entry, "create_app", side_effect=make))
+            stack.enter_context(mock.patch("mirror.cli.app.run_cli", cli))
+            stack.enter_context(contextlib.redirect_stderr(err))
+            stack.enter_context(warnings.catch_warnings())
+            warnings.simplefilter("ignore")
+            with self.assertRaises(OSError) as raised:
+                entry.main()
+            restore_logging()
+        self.assertEqual(raised.exception.errno, errno.EIO)
+        self.assertNotIn("could not listen", err.getvalue())
         made["close"].assert_awaited_once()
 
     def test_ctrl_c_before_the_cli_took_the_terminal_ends_quietly(self) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import logging.handlers
 import os
@@ -10,6 +11,15 @@ from pathlib import Path
 from aiohttp import web
 
 from .web import create_app
+
+# the errnos of a bind that failed: a port in use, a port the OS refuses (Winsock reports WSAEACCES, not EACCES),
+# an address not on this machine; None because Python 3.12+ asyncio drops EADDRNOTAVAIL and raises
+# "could not bind on any address" without an errno
+LISTEN_ERRNOS = (None, errno.EADDRINUSE, errno.EACCES, getattr(errno, "WSAEACCES", errno.EACCES), errno.EADDRNOTAVAIL)
+
+
+class ListenError(OSError):
+    """The API server could not listen on host:port; any other OSError is not reported as one."""
 
 
 class FileOnlyHandler(logging.handlers.RotatingFileHandler):
@@ -79,7 +89,10 @@ def serve_and_cli(app: web.Application, host: str, port: int) -> None:
         await runner.setup()
         try:
             # inside the try as in web.run_app: a port in use still closes the engine
-            await web.TCPSite(runner, host, port).start()
+            try:
+                await web.TCPSite(runner, host, port).start()
+            except OSError as exc:
+                raise ListenError(exc.errno, exc.strerror or str(exc)) from exc
             await run_cli(app["engine"])
         finally:
             await runner.cleanup()
@@ -102,8 +115,13 @@ def main() -> None:
         if wants_cli():
             serve_and_cli(app, host, port)
         else:
-            web.run_app(app, host=host, port=port, print=None, access_log=None)
-    except OSError as exc:
+            try:
+                web.run_app(app, host=host, port=port, print=None, access_log=None)
+            except OSError as exc:
+                if exc.errno not in LISTEN_ERRNOS:
+                    raise
+                raise ListenError(exc.errno, exc.strerror or str(exc)) from exc
+    except ListenError as exc:
         # a port in use: one line instead of a traceback, after the engine was closed
         message = f"could not listen on {host}:{port}: {exc.strerror or exc}"
         logging.getLogger("mirror").error(message)
