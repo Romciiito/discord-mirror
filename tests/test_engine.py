@@ -11,8 +11,8 @@ from unittest import mock
 
 import aiohttp
 
-from mirror import access, engine as engine_mod
-from mirror.discord_api import ApiError
+from mirror import access, discord_api, engine as engine_mod
+from mirror.discord_api import ApiError, DiscordHTTP, build_properties
 from mirror.engine import Engine
 from mirror.store import Store
 
@@ -481,7 +481,21 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
     async def test_checked_token_on_discord_5xx_is_unreachable(self) -> None:
         self.engine.session = FakeDiscord(FakeResp("bad gateway", 502))
         report = await self.engine.check_token(TOKEN)
-        self.assertEqual(report, {"result": "unreachable", "reason": "GET /users/@me failed"})
+        self.assertEqual(report, {"result": "unreachable", "reason": "GET /users/@me failed (HTTP 502)"})
+
+    async def test_a_request_that_stays_rate_limited_names_the_cloudflare_code(self) -> None:
+        for body, detail in (
+            ("error code: 1015", "GET /users/@me stayed rate limited (Cloudflare error code 1015)"),
+            ('{"retry_after": 0.5}', "GET /users/@me stayed rate limited"),
+        ):
+            with self.subTest(body=body):
+                discord = FakeDiscord(FakeResp(body, 429))
+                http = DiscordHTTP(discord, TOKEN, build_properties(1, 131))
+                with mock.patch.object(discord_api.asyncio, "sleep", mock.AsyncMock()):
+                    with self.assertRaises(ApiError) as caught:
+                        await http.call("GET", "/users/@me")
+                self.assertEqual((caught.exception.status, str(caught.exception)), (429, detail))
+                self.assertEqual(len(discord.sent), 5)
 
     async def test_checked_token_on_network_error_is_unreachable(self) -> None:
         for error, reason in (

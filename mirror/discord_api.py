@@ -15,6 +15,7 @@ log = logging.getLogger("mirror.api")
 API = "https://discord.com/api/v9"
 CAPABILITIES = 22525
 BUILD_RE = re.compile(r'"BUILD_NUMBER"\s*:\s*"(\d+)"')
+CLOUDFLARE_RE = re.compile(r"error code:\s*(\d+)", re.IGNORECASE)  # Cloudflare's block and rate-limit pages
 WEBHOOK_RE = re.compile(
     r"^https://(?:(?:canary|ptb)\.)?discord(?:app)?\.com/api/webhooks/(\d+)/([\w-]+)/?$"
 )
@@ -125,26 +126,29 @@ class DiscordHTTP:
         extra = kwargs.pop("headers", None)
         if extra:
             headers.update(extra)
+        last = ""  # the body of the last 429, named when the request stays rate limited
         for _ in range(5):
             async with self.session.request(method, url, headers=headers, **kwargs) as resp:
                 if resp.status == 429:
+                    last = ""
                     try:
-                        body = await resp.json(content_type=None)
-                        delay = float(body.get("retry_after", 1))
+                        last = await resp.text()
+                        delay = float(json.loads(last).get("retry_after", 1))
                     except Exception:
                         delay = 1.0
                     await asyncio.sleep(min(delay, 30))
                     continue
                 text = await resp.text()
                 if resp.status >= 400:
-                    raise ApiError(resp.status, _fail_detail(method, path, text))
+                    raise ApiError(resp.status, _fail_detail(method, path, resp.status, text))
                 if not text:
                     return None
                 try:
                     return json.loads(text)
                 except json.JSONDecodeError:
                     return text
-        raise ApiError(429, f"{method} {path} stayed rate limited")
+        code = cloudflare_code(last)
+        raise ApiError(429, f"{method} {path} stayed rate limited" + (f" (Cloudflare error code {code})" if code else ""))
 
     async def me(self) -> dict[str, Any]:
         data = await self.call("GET", "/users/@me")
@@ -211,14 +215,27 @@ class DiscordHTTP:
         return str(data["url"])
 
 
-def _fail_detail(method: str, path: str, text: str) -> str:
-    fallback = f"{method} {path} failed"
+def cloudflare_code(text: str) -> str:
+    """The Cloudflare error code in a page that is not Discord's answer (`error code: 1020`), or ""."""
+    match = CLOUDFLARE_RE.search(text or "")
+    return match.group(1) if match else ""
+
+
+def _discord_error(text: str) -> dict[str, Any] | None:
+    """Discord's JSON error object in a response body, or None when the body is not one (Cloudflare pages are not)."""
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
-        return fallback
-    if not isinstance(payload, dict):
-        return fallback
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _fail_detail(method: str, path: str, status: int, text: str) -> str:
+    fallback = f"{method} {path} failed (HTTP {status})"
+    payload = _discord_error(text)
+    if payload is None:
+        code = cloudflare_code(text)
+        return f"{method} {path} failed (HTTP {status}, Cloudflare error code {code})" if code else fallback
     if payload.get("captcha_sitekey") or payload.get("captcha_key"):
         return "Discord asked for a captcha before it would create the server"
     message = payload.get("message")
