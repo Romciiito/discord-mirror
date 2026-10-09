@@ -618,14 +618,17 @@ class Controller:
             return
         finally:
             self.busy = False
-        if not listed:
-            self.error = "nothing in that server can be read"
-            return
-        chosen = any(channel["id"] in self.picked for channel in listed)
-        for channel in listed:
-            if chosen:
-                self.picked.pop(channel["id"], None)
-            else:
+        # ticked as the servers screen marks it: any picked row of the server, listed or not; a stored row the
+        # account cannot list now (deleted, hidden, a failed member call) is unticked with the listed ones
+        ours = [cid for cid, row in self.picked.items() if row.get("guild_id") == guild["id"]]
+        if ours:
+            for cid in ours:
+                del self.picked[cid]
+        else:
+            if not listed:
+                self.error = "nothing in that server can be read"
+                return
+            for channel in listed:
                 self._remember(guild, channel)
         # _save_options sets busy for its own duration, so ours is released before it runs
         await self._save_options()

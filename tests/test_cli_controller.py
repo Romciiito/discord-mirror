@@ -9,6 +9,7 @@ from typing import Any
 import aiohttp
 
 from mirror.cli.controller import Controller
+from mirror.cli.render import render
 from mirror.discord_api import ApiError, clean_token
 from mirror.engine import Engine
 from mirror.store import Store
@@ -699,6 +700,46 @@ class ServersScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("save_setup", [call[0] for call in engine.calls])
         self.assertEqual(ui.flow["screen"], "servers")
         self.assertFalse(ui.busy)
+
+    def unlisted(self, ui: Controller, engine: FakeEngine, picked: list[str]) -> None:
+        # #gone (13) is stored but the account cannot list it now (deleted, hidden, or a failed member call)
+        engine.user = {"id": "1", "username": "sosa", "global_name": "Sosa"}
+        engine.http = object()
+        engine.guild_list = [{"id": "900", "name": "Qwen", "icon": ""}]
+        engine.channel_lists["900"] = [{"id": "12", "name": "dev", "parent": "", "topic": ""}]
+        names = {"12": "dev", "13": "gone"}
+        engine.selection = [{"channel_id": cid, "guild_id": "900", "guild_name": "Qwen", "channel_name": names[cid],
+                             "parent": "", "topic": "", "webhook_url": "", "enabled": True} for cid in picked]
+        ui.refresh()
+
+    async def test_enter_on_a_ticked_server_unticks_its_unlisted_channels_too(self) -> None:
+        ui, engine = make()
+        self.unlisted(ui, engine, ["12", "13"])
+        await keys(ui, "Enter", "2", "2", "Enter")
+        self.assertEqual(ui.picked, {})
+        self.assertEqual(engine.calls[-1][0], "save_setup")
+        self.assertEqual([row for row in engine.calls[-1][1]["channels"] if row["guild_id"] == "900"], [])
+
+    async def test_a_server_whose_only_tick_is_unlisted_shows_ticked_and_enter_unticks_it(self) -> None:
+        ui, engine = make()
+        self.unlisted(ui, engine, ["13"])
+        await keys(ui, "Enter", "2", "2")
+        self.assertIn("> [x] Qwen", render(ui, 80, 24))
+        await keys(ui, "Enter")
+        self.assertEqual(ui.picked, {})
+        self.assertEqual(engine.calls[-1][0], "save_setup")
+        self.assertEqual(engine.calls[-1][1]["channels"], [])
+        self.assertIn("> [ ] Qwen", render(ui, 80, 24))
+
+    async def test_a_ticked_server_that_lists_nothing_now_still_unticks(self) -> None:
+        ui, engine = make()
+        self.unlisted(ui, engine, ["13"])
+        engine.channel_lists["900"] = []
+        await keys(ui, "Enter", "2", "2", "Enter")
+        self.assertEqual(ui.picked, {})
+        self.assertEqual(engine.calls[-1][0], "save_setup")
+        self.assertEqual(engine.calls[-1][1]["channels"], [])
+        self.assertEqual(ui.error, "")
 
     async def test_keys_are_dropped_while_a_server_is_listed(self) -> None:
         ui, engine = await self.open_servers()
