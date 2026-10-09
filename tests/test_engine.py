@@ -660,6 +660,108 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(engine_mod.TEXT_TYPES, access.TEXT_TYPES)
         self.assertNotIn(15, engine_mod.TEXT_TYPES)
 
+    async def test_mirrored_counter_follows_created_messages(self) -> None:
+        relay = FakeRelay()
+        self.engine.relay = relay
+        self.engine.store.replace_selection([row("c1", "https://discord.com/api/webhooks/1/t")])
+        self.engine.store.set_options(0, False, "", True)
+        self.assertEqual(self.engine.snapshot()["mirrored"], 0)
+        await self.engine._relay_create({"id": "m1", "channel_id": "c1", "content": "hi"})
+        await self.engine._relay_create({"id": "m1", "channel_id": "c1", "content": "hi"})
+        await self.engine._relay_create({"id": "m2", "channel_id": "c1", "content": "yo"})
+        self.assertEqual(self.engine.snapshot()["mirrored"], 2)
+        self.assertEqual(len(relay.creates), 2)
+
+    async def test_failed_webhook_post_reaches_the_status_line(self) -> None:
+        # relay.create returns None when Discord refuses the post or never answers (relay.py logs the
+        # status to the log file); the engine notes it and emits an "error" event (story 5)
+        from mirror.cli.controller import Controller
+        from mirror.cli.render import status_line
+
+        class RefusingRelay(FakeRelay):
+            async def create(self, webhook_url: str, view: dict, prefix: bool) -> str | None:
+                self.creates.append(view)
+                return None
+
+        self.engine.relay = RefusingRelay()
+        self.engine.store.replace_selection([row("c1", "https://discord.com/api/webhooks/1/t")])
+        self.engine.store.set_options(0, False, "", True)
+        queue: asyncio.Queue = asyncio.Queue()
+        self.engine.listeners.add(queue)
+        await self.engine._relay_create({"id": "m1", "channel_id": "c1", "channel_name": "general", "content": "hi"})
+        events = [queue.get_nowait() for _ in range(queue.qsize())]
+        self.assertEqual(
+            events,
+            [
+                {"kind": "log", "text": "#general: webhook post failed"},
+                {"kind": "error", "text": "#general: webhook post failed"},
+            ],
+        )
+        self.assertEqual(self.engine.snapshot()["mirrored"], 0)
+        self.assertIsNone(self.engine.store.relay_row("m1"))
+        ui = Controller(self.engine)
+        ui.refresh()
+        for event in events:
+            ui.on_event(event)
+        self.assertEqual(status_line(ui), "signed out · stopped · 0 mirrored · #general: webhook post failed")
+
+    async def test_status_events_carry_the_mirrored_count(self) -> None:
+        # every status emit (start, READY, stop, the gateway's fatal error) carries the counter,
+        # which the controller copies into its snapshot for the status line
+        self.engine.http = FakeHTTP()
+        self.engine.relay = FakeRelay()
+        self.store.replace_selection([row("10", HOOK)])
+        self.store.set_options(0, False, "", True)
+        queue: asyncio.Queue = asyncio.Queue()
+        self.engine.listeners.add(queue)
+        with mock.patch.object(engine_mod, "Gateway", FakeGateway):
+            await self.engine.start()
+            await self.engine._relay_create({"id": "m1", "channel_id": "10", "content": "hi"})
+            await self.engine.on_dispatch("READY", {})
+            await self.engine._fatal("gateway closed (4004)")
+            await self.engine.stop()
+        events = [queue.get_nowait() for _ in range(queue.qsize())]
+        status = [(item["status"], item.get("mirrored")) for item in events if item["kind"] == "status"]
+        self.assertEqual(status, [("connecting", 0), ("live", 1), ("error", 1), ("stopped", 1)])
+        self.engine.http = None
+
+    async def test_each_mirrored_message_moves_the_status_line_count(self) -> None:
+        # a live run reports no status between READY and Stop, so each created mirrored message emits
+        # the count on its own "mirrored" event; a failed post keeps its error next to the count
+        from mirror.cli.controller import Controller
+        from mirror.cli.render import status_line
+
+        class PickyRelay(FakeRelay):
+            async def create(self, webhook_url: str, view: dict, prefix: bool) -> str | None:
+                self.creates.append(view)
+                return None if view["id"] == "m1" else "1"
+
+        self.engine.http = FakeHTTP()
+        self.engine.relay = PickyRelay()
+        self.store.replace_selection([row("10", HOOK)])
+        self.store.set_options(0, False, "", True)
+        ui = Controller(self.engine)
+        ui.refresh()
+        queue: asyncio.Queue = asyncio.Queue()
+        self.engine.listeners.add(queue)
+        with mock.patch.object(engine_mod, "Gateway", FakeGateway):
+            await self.engine.start()
+            await self.engine.on_dispatch("READY", {})
+            for at in range(3):
+                message = {"id": f"m{at}", "channel_id": "10", "author": {"id": "1", "username": "ann"}, "content": "hi"}
+                await self.engine.on_dispatch("MESSAGE_CREATE", message)
+            events = [queue.get_nowait() for _ in range(queue.qsize())]
+            for event in events:
+                ui.on_event(event)
+            self.assertEqual(
+                [item for item in events if item["kind"] == "mirrored"],
+                [{"kind": "mirrored", "mirrored": 1}, {"kind": "mirrored", "mirrored": 2}],
+            )
+            self.assertEqual(self.engine.snapshot()["mirrored"], 2)
+            self.assertEqual(status_line(ui), "signed out · running · 2 mirrored · #general: webhook post failed")
+            await self.engine.stop()
+        self.engine.http = None
+
 
 if __name__ == "__main__":
     unittest.main()

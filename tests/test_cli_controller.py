@@ -197,6 +197,18 @@ class NavigationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ui.snap["mirrored"], 7)
         self.assertEqual(ui.snap["log"][0], "connected")
 
+    async def test_mirrored_event_moves_the_count_and_keeps_the_engine_error(self) -> None:
+        # Engine._relay_create emits "mirrored" after each created mirrored message; a status event cannot
+        # carry the count mid-run, because a backfill post lands while the status is still "connecting"
+        ui, _ = make()
+        ui.on_event({"kind": "status", "running": True, "status": "connecting", "mirrored": 0})
+        ui.on_event({"kind": "error", "text": "#general: webhook post failed"})
+        ui.on_event({"kind": "mirrored", "mirrored": 3})
+        self.assertEqual(ui.snap["mirrored"], 3)
+        self.assertEqual(ui.snap["status"], "connecting")
+        self.assertTrue(ui.snap["running"])
+        self.assertEqual(ui.engine_error, "#general: webhook post failed")
+
     async def test_load_reads_snapshot_and_feed(self) -> None:
         ui, engine = make()
         engine.feed = [{"id": "a", "content": "old"}]

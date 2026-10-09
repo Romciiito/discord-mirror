@@ -47,6 +47,10 @@ facts carry the file and line they were measured at (base `main` @ `0416376`).
      (measured in the plan A Task 5 review, 2026-10-09). Plan A Task 7 adds an
      engine note and an `error` event for it, so the status line can show the most
      common mirroring error. The reason itself stays in the log file.
+   - The count needs its own event too. The engine emits no status between READY
+     and Stop, so a count carried only by the status event stayed at 0 while the
+     mirror ran (measured in plan A Task 7, 2026-10-09). The engine emits a
+     `mirrored` event with the count after each created mirrored message.
 7. **Everything user-facing and in the repo is English.**
 8. **The token fix ships first, separately.** It is done: the plan is in
    `docs/superpowers/plans/2026-10-08-token-input.md` and the commits run from

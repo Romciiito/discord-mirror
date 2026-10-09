@@ -168,7 +168,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         resp = await client.get("/api/state")
         self.assertEqual(resp.status, 200)
         body = await resp.json()
-        self.assertEqual(set(body), {"user", "running", "status", "has_token", "options", "selection", "log"})
+        self.assertEqual(set(body), {"user", "running", "status", "has_token", "options", "selection", "log", "mirrored"})
         self.assertFalse(body["has_token"])
         self.assertEqual(app["engine"].store.path, Path(data) / "state.db")
         self.assertTrue(os.path.isfile(os.path.join(data, "state.db")))

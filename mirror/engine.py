@@ -31,6 +31,7 @@ class Engine:
         self.user: dict[str, Any] | None = None
         self.running = False
         self.status = "idle"
+        self.mirrored = 0  # mirrored messages created since this engine started (the status line count)
         self.lines: deque[str] = deque(maxlen=60)
         self.feed: dict[str, dict[str, Any]] = {}
         self.order: deque[str] = deque()
@@ -74,6 +75,7 @@ class Engine:
             "options": self.store.options(),
             "selection": self.store.selection(),
             "log": list(self.lines),
+            "mirrored": self.mirrored,
         }
 
     def feed_items(self) -> list[dict[str, Any]]:
@@ -507,7 +509,7 @@ class Engine:
             stale.cancel()
         if options["backfill"] > 0:
             self._backfill_task = asyncio.create_task(self._backfill(rows, options["backfill"]))
-        self._emit({"kind": "status", "running": True, "status": self.status})
+        self._emit({"kind": "status", "running": True, "status": self.status, "mirrored": self.mirrored})
 
     async def _provision(self, rows: list[dict[str, Any]]) -> None:
         http = self._require_http()
@@ -663,20 +665,20 @@ class Engine:
             await gateway.stop()
         self.status = "stopped"
         self.note("stopped")
-        self._emit({"kind": "status", "running": False, "status": self.status})
+        self._emit({"kind": "status", "running": False, "status": self.status, "mirrored": self.mirrored})
 
     async def _fatal(self, text: str) -> None:
         self.running = False
         self.backfilling = False
         self.status = "error"
         self.note(text)
-        self._emit({"kind": "status", "running": False, "status": self.status})
+        self._emit({"kind": "status", "running": False, "status": self.status, "mirrored": self.mirrored})
 
     async def on_dispatch(self, event: str, data: dict[str, Any]) -> None:
         if event == "READY":
             self.status = "live"
             self.note("live")
-            self._emit({"kind": "status", "running": True, "status": self.status})
+            self._emit({"kind": "status", "running": True, "status": self.status, "mirrored": self.mirrored})
             return
         if event == "RESUMED":
             self.status = "live"
@@ -856,7 +858,16 @@ class Engine:
             return
         sent = await self.relay.create(url, view, self._prefix(url))
         if sent:
+            self.mirrored += 1
             self.store.remember_relay(view["id"], view["channel_id"], url, sent)
+            # a separate event: no status is emitted between READY and Stop, and a status event during
+            # backfill would repeat "connecting", the status that marks a new run
+            self._emit({"kind": "mirrored", "mirrored": self.mirrored})
+        else:
+            # relay.py logs why (the status, or the attempts it gave up after) to the log file
+            text = f"#{view.get('channel_name') or view['channel_id']}: webhook post failed"
+            self.note(text)
+            self._emit({"kind": "error", "text": text})
 
     def _webhook_for(self, channel_id: str) -> str:
         parent = self.threads.get(channel_id, channel_id)

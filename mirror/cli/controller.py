@@ -90,6 +90,9 @@ class Controller:
                 self.snap["mirrored"] = item["mirrored"]
         elif kind == "error" and item.get("text"):
             self.engine_error = str(item["text"])
+        elif kind == "mirrored" and "mirrored" in item:
+            # Engine._relay_create emits the count after each created mirrored message
+            self.snap["mirrored"] = item["mirrored"]
         elif kind == "message" and item.get("message"):
             self._place(item["message"])
 
