@@ -796,6 +796,27 @@ class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
         await keys(ui, "Enter")
         self.assertEqual((ui.typing, ui.draft), ("webhook", ""))
 
+    async def assert_escape_keeps_a_channel_ticked_by_a(self, typed: str) -> None:
+        ui, engine = await self.open_channels()
+        await keys(ui, "a", "Enter")
+        self.assertEqual((ui.typing, ui.webhook_channel["id"]), ("webhook", "c1"))
+        for ch in typed:
+            await ui.press(ch, plain=True)
+        await keys(ui, "Escape")
+        self.assertIsNone(ui.typing)
+        self.assertIn("c1", ui.picked)
+        self.assertEqual(ui.picked["c1"]["webhook_url"], "")
+        saved = engine.calls[-1]
+        self.assertEqual(saved[0], "save_setup")
+        self.assertEqual([(row["channel_id"], row["webhook_url"]) for row in saved[1]["channels"]], [("c1", ""), ("c2", "")])
+
+    async def test_escape_without_text_keeps_a_channel_that_a_ticked(self) -> None:
+        # Esc puts the channel back as it was before Enter: only the Enter that ticked it unticks it again
+        await self.assert_escape_keeps_a_channel_ticked_by_a("")
+
+    async def test_escape_after_one_character_keeps_a_channel_that_a_ticked(self) -> None:
+        await self.assert_escape_keeps_a_channel_ticked_by_a("h")
+
     async def test_backspace_edits_the_url_row(self) -> None:
         ui, engine = await self.open_channels()
         await keys(ui, "Enter")

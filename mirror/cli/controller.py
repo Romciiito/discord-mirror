@@ -585,9 +585,9 @@ class Controller:
                 self.picked[channel["id"]]["webhook_url"] = cleaned
             await self._close_webhook_row(untick=False)
         elif key == "Escape":
-            # cancel puts the channel back as it was before Enter; a channel this Enter ticked must not be saved
-            # without a URL, because Store.replace_selection fills such a row from the URL the channel had
-            await self._close_webhook_row(untick=self.webhook_new or not self.draft.strip())
+            # cancel puts the channel back as it was before Enter, typed or not; a channel this Enter ticked must
+            # not be saved without a URL, because Store.replace_selection fills such a row from the URL it had
+            await self._close_webhook_row(untick=self.webhook_new)
         elif key == "Backspace":
             self.draft = self.draft[:-1]
         elif len(key) == 1:
