@@ -711,6 +711,52 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.targets()["5"], {"target_id": "900", "target_name": "Desk copy", "shared": False})
         self.assertEqual(self.store.targets()["6"], {"target_id": "900", "target_name": "Desk copy", "shared": True})
 
+    async def test_a_target_keeps_holding_a_source_that_moved_to_another_target(self) -> None:
+        # Desk (5) is filled into 900 and then into 901; nothing is deleted in 900 (decision 9i), so 900 still holds
+        # Desk's "Talk", "#general" and its webhook. Other (6) filled into 900 next is the second source there
+        # (decision 9o): its own category and webhook, never Desk's. Desk filled into 900 again finds its own channel.
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}, {"id": "901", "name": "Spare", "owner": True}]
+        http.sources["900"] = []
+        http.sources["901"] = []
+        self.engine.http = http
+        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}, row("20", name="general", guild_id="6") | {"guild_name": "Other", "parent": "Talk"}])
+        await self.engine.fill_copy("5", "900")
+        await self.engine.fill_copy("5", "901")
+        http.sources["900"] = [{"id": "c1", "type": 4, "name": "Talk"}, {"id": "t1", "type": 0, "name": "general", "parent_id": "c1"}]
+        http.hooks["t1"] = [{"id": "77", "name": "general", "token": "old"}]
+        http.calls.clear()
+        report = await self.engine.fill_copy("6", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0})
+        self.assertEqual([b["name"] for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 4], ["Other / Talk"])
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertNotEqual(urls["20"], "https://discord.com/api/webhooks/77/old")
+        self.assertEqual(self.store.targets()["6"], {"target_id": "900", "target_name": "Desk copy", "shared": True})
+        http.calls.clear()
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1})
+        self.assertEqual([path for method, path, body in http.calls if method == "POST"], [])
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertEqual(urls["10"], "https://discord.com/api/webhooks/77/old")
+        self.assertEqual(self.store.targets()["5"], {"target_id": "900", "target_name": "Desk copy", "shared": False})
+
+    async def test_a_target_holds_a_source_whose_first_fill_failed(self) -> None:
+        # Desk's first fill into 900 made the category "Talk" and then failed on its channel, so no link was stored;
+        # 900 holds Desk's category all the same, and Other filled into 900 next is the second source there (decision 9o)
+        http = FakeHTTP(fail=("general",))
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}, row("20", name="news", guild_id="6") | {"guild_name": "Other", "parent": "Talk"}])
+        with self.assertRaises(ApiError):
+            await self.engine.fill_copy("5", "900")
+        self.assertEqual(self.store.targets(), {})
+        http.sources["900"] = [{"id": "c1", "type": 4, "name": "Talk"}]
+        http.calls.clear()
+        await self.engine.fill_copy("6", "900")
+        self.assertEqual([b["name"] for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 4], ["Other / Talk"])
+        self.assertTrue(self.store.targets()["6"]["shared"])
+
     async def test_fill_refuses_bad_servers(self) -> None:
         # 7 is a server the account is in but does not own (decision 9b'), 8 is not listed at all: neither is written to
         http = FakeHTTP()

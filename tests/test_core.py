@@ -168,7 +168,32 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(store.targets(), {"5": {"target_id": "900", "target_name": "Desk copy", "shared": False}})
             store.set_target("6", "900", "Desk copy", True)
             self.assertTrue(store.targets()["6"]["shared"])
+            # the link stored before the record of fills existed still says that 900 holds 5
+            self.assertFalse(store.record_fill("5", "900"))
+            self.assertTrue(store.record_fill("8", "900"))
             store.close()
+
+    def test_a_target_remembers_every_source_filled_into_it(self) -> None:
+        # decision 9o: the first source in a target keeps its names; nothing is deleted there (9i), so a source moved
+        # to another target is still held by the first one, and a later source there is not the first
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            self.assertFalse(store.record_fill("5", "900"))
+            self.assertTrue(store.record_fill("6", "900"))
+            self.assertFalse(store.record_fill("5", "900"))
+            store.set_target("5", "901", "Spare", store.record_fill("5", "901"))
+            self.assertEqual(store.targets()["5"], {"target_id": "901", "target_name": "Spare", "shared": False})
+            self.assertTrue(store.record_fill("7", "900"))
+            self.assertTrue(store.record_fill("6", "900"))
+            self.assertFalse(store.record_fill("5", "900"))
+            self.assertTrue(store.record_fill("7", "901"))
+            store.set_target("8", "902", "Third")
+            self.assertTrue(store.record_fill("9", "902"))
+            store.close()
+            again = Store(tmp)
+            self.assertFalse(again.record_fill("5", "900"))
+            self.assertTrue(again.record_fill("7", "900"))
+            again.close()
 
     def test_old_database_opens_and_ignores_the_shared_server_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

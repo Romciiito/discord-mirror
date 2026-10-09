@@ -52,6 +52,12 @@ CREATE TABLE IF NOT EXISTS targets (
     target_name TEXT NOT NULL DEFAULT '',
     shared INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS fills (
+    target_guild_id TEXT NOT NULL,
+    source_guild_id TEXT NOT NULL,
+    shared INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (target_guild_id, source_guild_id)
+);
 """
 
 
@@ -148,6 +154,11 @@ class Store:
         target_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(targets)")}
         if "shared" not in target_cols:
             self.conn.execute("ALTER TABLE targets ADD COLUMN shared INTEGER NOT NULL DEFAULT 0")
+        # a link stored before the fills record existed: its target holds that source
+        self.conn.execute(
+            "INSERT OR IGNORE INTO fills (target_guild_id, source_guild_id, shared) "
+            "SELECT target_guild_id, source_guild_id, shared FROM targets"
+        )
         self.conn.execute(
             "INSERT OR IGNORE INTO hooks (channel_id, webhook_url) "
             "SELECT channel_id, webhook_url FROM selection WHERE webhook_url != ''"
@@ -194,15 +205,42 @@ class Store:
 
     def set_target(self, source_guild_id: str, target_guild_id: str, target_name: str, shared: bool = False) -> None:
         """The server the owner picked as the copy of one source server (decision 9b'); a later pick replaces it.
-        `shared` records whether another source was filled into that target first (decision 9o), so a refill
-        gets the categories of the first fill."""
+        `shared` is the flag `record_fill` gave this source in that target (decision 9o). The target keeps holding
+        the source in the fills record when a later pick moves the link away."""
+        source, target = str(source_guild_id), str(target_guild_id)
         self.conn.execute(
             "INSERT INTO targets (source_guild_id, target_guild_id, target_name, shared) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(source_guild_id) DO UPDATE SET "
             "target_guild_id = excluded.target_guild_id, target_name = excluded.target_name, shared = excluded.shared",
-            (str(source_guild_id), str(target_guild_id), str(target_name or "")[:100], int(bool(shared))),
+            (source, target, str(target_name or "")[:100], int(bool(shared))),
+        )
+        self.conn.execute(
+            "INSERT OR IGNORE INTO fills (target_guild_id, source_guild_id, shared) VALUES (?, ?, ?)",
+            (target, source, int(bool(shared))),
         )
         self.conn.commit()
+
+    def record_fill(self, source_guild_id: str, target_guild_id: str) -> bool:
+        """Record, before a fill writes to the target, that the target holds this source from now on (Mando never
+        deletes there, decision 9i), and return whether another source was in that target first (decision 9o).
+        A source already recorded there gets its first answer again, so a refill keeps the categories of its
+        first fill, also after a second source arrived or after the source was filled into another target."""
+        source, target = str(source_guild_id), str(target_guild_id)
+        found = self.conn.execute(
+            "SELECT shared FROM fills WHERE target_guild_id = ? AND source_guild_id = ?", (target, source)
+        ).fetchone()
+        if found is not None:
+            return bool(found["shared"])
+        other = self.conn.execute(
+            "SELECT 1 FROM fills WHERE target_guild_id = ? AND source_guild_id != ? LIMIT 1", (target, source)
+        ).fetchone()
+        shared = other is not None
+        self.conn.execute(
+            "INSERT INTO fills (target_guild_id, source_guild_id, shared) VALUES (?, ?, ?)",
+            (target, source, int(shared)),
+        )
+        self.conn.commit()
+        return shared
 
     def targets(self) -> dict[str, dict[str, Any]]:
         rows = self.conn.execute("SELECT source_guild_id, target_guild_id, target_name, shared FROM targets").fetchall()

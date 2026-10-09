@@ -291,16 +291,12 @@ class Engine:
         target = next((guild for guild in await self.owned_guilds() if guild["id"] == target_id), None)
         if target is None:
             raise ApiError(400, "pick a server you own")
-        links = self.store.targets()
-        own = links.get(source_id)
-        if own is not None and own["target_id"] == target_id:
-            # a refill keeps the layout of the first fill into this target (decision 9o)
-            shared = own["shared"]
-        else:
-            shared = any(source != source_id and link["target_id"] == target_id for source, link in links.items())
+        existing = await http.channels(target_id)
+        # what the target holds, not where the links point now: a source moved to another target, or whose first
+        # fill failed halfway, still has its channels here (decisions 9i, 9o); a refill keeps its first layout
+        shared = self.store.record_fill(source_id, target_id)
         source_name = rows[0].get("guild_name") or "server"
         layout = copy_layout(source_name, rows, shared)
-        existing = await http.channels(target_id)
         self.note(f"filling {target['name']} from {source_name}")
         pairs, reused = await self._fill(http, target_id, layout, existing)
         self.store.fill_webhooks(pairs)

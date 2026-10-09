@@ -11,8 +11,9 @@ def copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict[str, A
     (decisions 9b', 9n, 9o). `shared` is false for the first source filled into a target, which keeps the
     source's own category names, and true for a source filled into a target another source was filled into
     first, which gets "<source> / <category>" and a "<source>" category for its loose channels, so two
-    sources never mix in one category. The caller keeps the flag with the source's link to the target, so a
-    refill gets the layout of the first fill even after a second source arrived."""
+    sources never mix in one category. The caller keeps the flag in the store's record of the sources a target
+    holds (`Store.record_fill`), so a refill gets the layout of the first fill even after a second source
+    arrived."""
     source = " ".join(str(source_name or "").split())[:100] or "server"
     categories: list[dict[str, str]] = []
     seen: set[str] = set()
