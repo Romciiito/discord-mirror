@@ -16,7 +16,8 @@ BLOCKED_WORDS = ("discord", "clyde")
 BLOCKED_NAMES = {"everyone", "here"}
 CDN_HOSTS = {"cdn.discordapp.com", "media.discordapp.net"}
 UPLOAD_FILES = 10
-UPLOAD_LIMIT = 10_000_000
+UPLOAD_LIMIT = 20 * 1024 * 1024  # per file, the documented default (decision 10b)
+OVER_LIMIT = "This message has a file over the upload limit"
 ATTEMPTS = 5
 RETRY_CAP = 60.0
 PACE = 0.5
@@ -137,7 +138,9 @@ def sticker_names(message: dict[str, Any]) -> list[str]:
     return names
 
 
-def view_from_message(message: dict[str, Any], channel_name: str, guild_name: str) -> dict[str, Any]:
+def view_from_message(
+    message: dict[str, Any], channel_name: str, guild_name: str, guild_id: str = ""
+) -> dict[str, Any]:
     attachments = []
     for item in message.get("attachments") or []:
         if not isinstance(item, dict):
@@ -169,6 +172,7 @@ def view_from_message(message: dict[str, Any], channel_name: str, guild_name: st
         "deleted": False,
         "reactions": {},
         "reply": reply_line(message),
+        "guild_id": str(message.get("guild_id") or guild_id or ""),
     }
 
 
@@ -189,7 +193,6 @@ def size_of(item: dict[str, Any]) -> int:
 def plan_uploads(attachments: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     upload: list[dict[str, Any]] = []
     linked: list[dict[str, Any]] = []
-    total = 0
     for item in attachments or []:
         if not isinstance(item, dict):
             continue
@@ -198,19 +201,38 @@ def plan_uploads(attachments: list[dict[str, Any]]) -> tuple[list[dict[str, Any]
             host_of(str(item.get("url") or "")) in CDN_HOSTS
             and 0 < size <= UPLOAD_LIMIT
             and len(upload) < UPLOAD_FILES
-            and total + size <= UPLOAD_LIMIT
         ):
             upload.append(item)
-            total += size
         else:
             linked.append(item)
     return upload, linked
 
 
+def oversize(item: dict[str, Any]) -> bool:
+    return size_of(item) > UPLOAD_LIMIT
+
+
+def message_link(view: dict[str, Any]) -> str:
+    guild = str(view.get("guild_id") or "") or "@me"
+    return f"https://discord.com/channels/{guild}/{view.get('channel_id')}/{view.get('id')}"
+
+
+def oversize_lines(view: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for item in view.get("attachments") or []:
+        if isinstance(item, dict) and oversize(item):
+            size = f"{size_of(item) / 1048576:.1f} MiB"
+            lines.append(f"{OVER_LIMIT}: {item.get('name') or 'file'} ({size})")
+            lines.append(message_link(view))
+            if item.get("url"):
+                lines.append(str(item["url"]))
+    return lines
+
+
 def link_urls(view: dict[str, Any]) -> list[str]:
     links = view.get("links")
     if not isinstance(links, list):
-        links = [item.get("url") for item in plan_uploads(view.get("attachments") or [])[1]]
+        links = [item.get("url") for item in plan_uploads(view.get("attachments") or [])[1] if not oversize(item)]
     return [str(url) for url in links if url]
 
 
@@ -242,7 +264,8 @@ def payload_for(view: dict[str, Any], prefix: bool) -> dict[str, Any]:
     if view.get("deleted"):
         lines.append("(deleted)")
     text = "\n".join(line for line in lines if line).strip()
-    content = fit_content(text, link_urls(view))
+    # the over-limit lines lead the block fit_content keeps, so a long message cannot clip a file away
+    content = fit_content(text, oversize_lines(view) + link_urls(view))
     body: dict[str, Any] = {
         "content": content or None,
         "username": safe_name(str(view.get("author") or "")),
@@ -392,7 +415,11 @@ class Relay:
         upload, _ = plan_uploads(attachments)
         files, failed = await self._files(upload)
         sent = {id(item) for item in upload} - {id(item) for item in failed}
-        links = [str(item.get("url")) for item in attachments if id(item) not in sent and item.get("url")]
+        links = [
+            str(item.get("url"))
+            for item in attachments
+            if id(item) not in sent and item.get("url") and not oversize(item)
+        ]
         url = webhook_url.rstrip("/") + "?wait=true"
         body = payload_for({**view, "links": links}, prefix)
         plain = not files
@@ -415,7 +442,7 @@ class Relay:
             status, data = await self._send(webhook_url, "post", url, make, 120)
             if too_large(status, data):
                 log.info("webhook upload too large, sending links")
-                links = [str(item.get("url")) for item in attachments if item.get("url")]
+                links = [str(item.get("url")) for item in attachments if item.get("url") and not oversize(item)]
                 body = payload_for({**view, "links": links}, prefix)
                 plain = True
         if plain:
@@ -434,15 +461,13 @@ class Relay:
     ) -> tuple[list[tuple[str, bytes, str]], list[dict[str, Any]]]:
         files: list[tuple[str, bytes, str]] = []
         failed: list[dict[str, Any]] = []
-        total = 0
         for item in attachments:
             data = None
             if len(files) < UPLOAD_FILES:
                 data = await self._fetch(str(item.get("url") or ""), size_of(item))
-            if data is None or total + len(data) > UPLOAD_LIMIT:
+            if data is None:
                 failed.append(item)
                 continue
-            total += len(data)
             files.append((str(item.get("name") or "file")[:80], data, str(item.get("content_type") or "")))
         return files, failed
 

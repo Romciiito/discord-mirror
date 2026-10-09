@@ -38,6 +38,7 @@ class Engine:
         self.holding: list[tuple[str, dict[str, Any]]] = []
         self.lock = asyncio.Lock()
         self.names: dict[str, tuple[str, str]] = {}
+        self.guild_of: dict[str, str] = {}  # channel or thread id -> its source server id (message links)
         self.selected: set[str] = set()
         self.threads: dict[str, str] = {}
         self.include_threads = False
@@ -712,6 +713,7 @@ class Engine:
                 guild_name = self.names.get(parent, ("", ""))[0]
                 self.threads[thread_id] = parent
                 self.names[thread_id] = (guild_name, str(data.get("name") or "thread"))
+                self.guild_of[thread_id] = self.guild_of.get(parent, "")
             return
         if event == "MESSAGE_CREATE":
             await self._create(data)
@@ -738,7 +740,7 @@ class Engine:
         if not _worth_showing(message):
             return
         guild_name, channel_name = self.names.get(channel_id, ("", channel_id))
-        view = view_from_message(message, channel_name, guild_name)
+        view = view_from_message(message, channel_name, guild_name, self.guild_of.get(channel_id, ""))
         self._push(view)
         await self._relay_create(view)
 
@@ -774,7 +776,7 @@ class Engine:
         if self._own_webhook(message):
             return
         guild_name, channel_name = self.names.get(channel_id, ("", channel_id))
-        view = view_from_message(message, channel_name, guild_name)
+        view = view_from_message(message, channel_name, guild_name, self.guild_of.get(channel_id, ""))
         self._push(view)
         if self.store.options()["mirror"] and self.relay is not None:
             await self.relay.edit(row["webhook_url"], row["webhook_message_id"], view, self._prefix(row["webhook_url"]))
@@ -864,11 +866,13 @@ class Engine:
     def _index(self, rows: list[dict], include_threads: bool) -> None:
         self.include_threads = include_threads
         self.names = {}
+        self.guild_of = {}
         self.selected = set()
         self.threads = {}
         for row in rows:
             self.selected.add(row["channel_id"])
             self.names[row["channel_id"]] = (row.get("guild_name") or "", row.get("channel_name") or row["channel_id"])
+            self.guild_of[row["channel_id"]] = str(row.get("guild_id") or "")
 
     async def _load_threads(self, http: DiscordHTTP, rows: list[dict]) -> None:
         guilds = {row["guild_id"] for row in rows}
@@ -881,6 +885,7 @@ class Engine:
                 guild_name = self.names.get(parent, ("", ""))[0]
                 self.threads[thread_id] = parent
                 self.names[thread_id] = (guild_name, str(thread.get("name") or "thread"))
+                self.guild_of[thread_id] = self.guild_of.get(parent, "")
 
     def _guild_map(self, rows: list[dict]) -> dict[str, list[str]]:
         grouped: dict[str, list[str]] = defaultdict(list)

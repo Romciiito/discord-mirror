@@ -496,6 +496,36 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("12", self.engine.feed)
         self.assertEqual(len(relay.creates), 1)
 
+    def test_views_carry_the_guild_id(self) -> None:
+        self.engine._index([row("10", HOOK)], False)
+        view = engine_mod.view_from_message({"id": "1", "channel_id": "10", "author": {"username": "a"}}, "general", "Desk", self.engine.guild_of.get("10", ""))
+        self.assertEqual(view["guild_id"], "5")
+        view = engine_mod.view_from_message({"id": "1", "channel_id": "10", "guild_id": "77", "author": {"username": "a"}}, "general", "Desk", "5")
+        self.assertEqual(view["guild_id"], "77")
+
+    async def test_relayed_views_carry_the_guild_id_of_their_row(self) -> None:
+        self.store.set_options(0, True, True)
+        self.store.replace_selection([row("10", HOOK)])
+        self.engine._index(self.store.selection(), True)
+
+        class Threads:
+            async def active_threads(self, guild_id: str) -> list[dict]:
+                return [{"id": "30", "parent_id": "10", "name": "old"}] if guild_id == "5" else []
+
+        await self.engine._load_threads(Threads(), self.store.selection())
+        await self.engine._handle("THREAD_CREATE", {"id": "31", "parent_id": "10", "name": "new"})
+        relay = FakeRelay()
+        self.engine.relay = relay
+        for message_id, channel_id in (("1", "10"), ("2", "30"), ("3", "31")):
+            await self.engine._create(
+                {"id": message_id, "channel_id": channel_id, "author": {"id": "1", "username": "amy"}, "content": "hi"}
+            )
+        self.assertEqual([view["guild_id"] for view in relay.creates], ["5", "5", "5"])
+        self.store.remember_relay("4", "10", HOOK, "77")
+        await self.engine._update({"id": "4", "channel_id": "10", "author": {"id": "1", "username": "amy"}, "content": "new"})
+        self.assertEqual(len(relay.edits), 1)
+        self.assertEqual(relay.edits[0][2]["guild_id"], "5")
+
     async def test_drain_keeps_order(self) -> None:
         handled: list[tuple[str, str]] = []
         m1 = {"id": "1", "channel_id": "8"}

@@ -113,6 +113,7 @@ def make_view(attachments: list[dict[str, Any]], content: str = "hello") -> dict
         "deleted": False,
         "reactions": {},
         "reply": "",
+        "guild_id": "9",
     }
 
 
@@ -186,6 +187,15 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([name for name, _, _ in files], ["a.png"])
         self.assertEqual(failed, [empty, missing, huge])
 
+    async def test_files_have_no_total_cap(self) -> None:
+        half = UPLOAD_LIMIT // 2 + 1
+        items = [attachment("a.bin", half), attachment("b.bin", half)]
+        for item in items:
+            self.session.downloads[item["url"]] = FakeResp(200, body=b"1" * half)
+        files, failed = await self.relay._files(items)
+        self.assertEqual(failed, [])
+        self.assertEqual([name for name, _, _ in files], ["a.bin", "b.bin"])
+
     def test_plan_uploads_limits(self) -> None:
         many = [attachment(f"f{i}.png", 1_000) for i in range(12)]
         upload, linked = plan_uploads(many)
@@ -197,11 +207,51 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         upload, linked = plan_uploads([big, off, zero])
         self.assertEqual(upload, [])
         self.assertEqual(linked, [big, off, zero])
-        six = [attachment(f"s{i}.bin", 2_000_000) for i in range(6)]
+        six = [attachment(f"s{i}.bin", UPLOAD_LIMIT) for i in range(6)]
         upload, linked = plan_uploads(six)
-        self.assertEqual(upload, six[:5])
-        self.assertLessEqual(sum(item["size"] for item in upload), UPLOAD_LIMIT)
-        self.assertEqual(linked, six[5:])
+        self.assertEqual(upload, six)
+        self.assertEqual(linked, [])
+        self.assertEqual(UPLOAD_LIMIT, 20 * 1024 * 1024)
+
+    def test_oversize_file_becomes_a_line_with_two_links(self) -> None:
+        big = attachment("movie.mp4", 25 * 1024 * 1024 + 1)
+        off = attachment("x.png", 10, "https://example.com/x.png")
+        view = make_view([big, off])
+        body = payload_for(view, False)
+        lines = body["content"].split("\n")
+        self.assertEqual(lines[0], "hello")
+        self.assertEqual(lines[1], "This message has a file over the upload limit: movie.mp4 (25.0 MiB)")
+        self.assertEqual(lines[2], "https://discord.com/channels/9/2/1")
+        self.assertEqual(lines[3], big["url"])
+        self.assertEqual(lines[4], off["url"])
+        self.assertEqual(len(lines), 5)
+        view["guild_id"] = ""
+        self.assertIn("https://discord.com/channels/@me/2/1", payload_for(view, False)["content"])
+
+    def test_oversize_line_survives_a_long_message(self) -> None:
+        big = attachment("movie.mp4", UPLOAD_LIMIT + 1)
+        view = make_view([big], content="x" * 3000)
+        content = payload_for(view, True)["content"]
+        self.assertLessEqual(len(content), 2000)
+        self.assertTrue(content.startswith("Desk / #general\nxxx"))
+        self.assertEqual(
+            content.splitlines()[-3:],
+            [
+                "This message has a file over the upload limit: movie.mp4 (20.0 MiB)",
+                "https://discord.com/channels/9/2/1",
+                big["url"],
+            ],
+        )
+
+    async def test_oversize_file_is_never_downloaded(self) -> None:
+        big = attachment("movie.mp4", UPLOAD_LIMIT + 1)
+        self.session.queue.append(FakeResp(200, {"id": "5"}))
+        sent = await self.relay.create(HOOK, make_view([big]), False)
+        self.assertEqual(sent, "5")
+        self.assertEqual([c for c in self.session.calls if c[0] == "get"], [])
+        method, url, kwargs = self.sends()[0]
+        self.assertIn("json", kwargs)
+        self.assertIn("over the upload limit: movie.mp4", kwargs["json"]["content"])
 
     async def create_with_link(self) -> tuple[dict[str, Any], str, str | None]:
         small = attachment("a.png", 10)
@@ -264,6 +314,28 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(item["url"], content)
             self.assertTrue(content.startswith("Desk / #general"))
             self.assertEqual(view["links"], [item["url"] for item in items])
+
+    async def test_too_large_fallback_keeps_the_oversize_file_out_of_the_links(self) -> None:
+        small = attachment("a.png", 10)
+        big = attachment("movie.mp4", UPLOAD_LIMIT + 1)
+        self.session.downloads[small["url"]] = FakeResp(200, body=b"1" * 10)
+        view = make_view([small, big])
+        self.session.queue.extend([FakeResp(413), FakeResp(200, {"id": "7"})])
+        self.assertEqual(await self.relay.create(HOOK, view, False), "7")
+        sends = self.sends()
+        self.assertEqual(len(sends), 2)
+        lines = sends[1][2]["json"]["content"].split("\n")
+        self.assertEqual(
+            lines,
+            [
+                "hello",
+                "This message has a file over the upload limit: movie.mp4 (20.0 MiB)",
+                "https://discord.com/channels/9/2/1",
+                big["url"],
+                small["url"],
+            ],
+        )
+        self.assertEqual(view["links"], [small["url"]])
 
     async def test_429_retries_with_fresh_formdata(self) -> None:
         item = attachment("a.png", 10)

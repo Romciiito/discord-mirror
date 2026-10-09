@@ -2063,7 +2063,7 @@ git commit -m "Pick the copy of a source server with c and fill it from the CLI.
 - Test: `tests/test_relay.py`, `tests/test_engine.py`
 
 **Interfaces:**
-- Produces: `UPLOAD_LIMIT = 20 * 1024 * 1024` (per file, decision 10b); `UPLOAD_FILES = 10` kept; `plan_uploads(attachments) -> (upload, linked)` takes a file when its host is a CDN host, `0 < size <= UPLOAD_LIMIT` and fewer than `UPLOAD_FILES` are taken — no total cap (a 413 still falls back to links as today); `Relay._files` drops its total cap too. `oversize_lines(view) -> list[str]`: for each attachment with `size > UPLOAD_LIMIT`, three lines: `"This message has a file over the upload limit: <name> (<size>)"`, `"https://discord.com/channels/<guild_id or @me>/<channel_id>/<id>"`, `<url>`; `<size>` is `f"{size / 1048576:.1f} MiB"`. `payload_for` puts those lines after the content and before the links block, and the links block (`link_urls`) leaves the oversize files out. `view_from_message(message, channel_name, guild_name, guild_id="")` adds `"guild_id": str(message.get("guild_id") or guild_id)` to the view; the engine passes the row's guild id (`self.guild_of[channel_id]`, filled in `_index` from `row["guild_id"]`, threads mapped to their parent's).
+- Produces: `UPLOAD_LIMIT = 20 * 1024 * 1024` (per file, decision 10b); `UPLOAD_FILES = 10` kept; `plan_uploads(attachments) -> (upload, linked)` takes a file when its host is a CDN host, `0 < size <= UPLOAD_LIMIT` and fewer than `UPLOAD_FILES` are taken — no total cap (a 413 still falls back to links as today); `Relay._files` drops its total cap too. `oversize_lines(view) -> list[str]`: for each attachment with `size > UPLOAD_LIMIT`, three lines: `"This message has a file over the upload limit: <name> (<size>)"`, `"https://discord.com/channels/<guild_id or @me>/<channel_id>/<id>"`, `<url>`; `<size>` is `f"{size / 1048576:.1f} MiB"`. `payload_for` puts those lines at the head of the block `fit_content` keeps (after the content, the stickers line and "(deleted)", before the links), so a long message is clipped instead of the file, and the links block (`link_urls`) leaves the oversize files out. `view_from_message(message, channel_name, guild_name, guild_id="")` adds `"guild_id": str(message.get("guild_id") or guild_id)` to the view; the engine passes the row's guild id (`self.guild_of[channel_id]`, filled in `_index` from `row["guild_id"]`, threads mapped to their parent's).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2124,6 +2124,8 @@ In `tests/test_engine.py` add:
         self.assertEqual(view["guild_id"], "77")
 ```
 
+The implementation added four more tests: in `tests/test_relay.py` `test_oversize_line_survives_a_long_message` (a 3000-character message with a file over the limit keeps the over-limit line and both links, measured lost when the lines sat in the clipped text), `test_files_have_no_total_cap` (two files of `UPLOAD_LIMIT // 2 + 1` bytes both upload) and `test_too_large_fallback_keeps_the_oversize_file_out_of_the_links` (after a 413 the over-limit file is one line and two links, never a third link); in `tests/test_engine.py` `test_relayed_views_carry_the_guild_id_of_their_row` (`_create` in a channel, in a thread from `_load_threads` and in one from `THREAD_CREATE`, and `_restore_view` all carry the row's guild id when the message has none, as REST history messages do).
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `PYTHONUTF8=1 python -X utf8 -m unittest tests.test_relay tests.test_engine -q`
@@ -2182,9 +2184,9 @@ def link_urls(view: dict[str, Any]) -> list[str]:
     return [str(url) for url in links if url]
 ```
 
-In `payload_for`, after the content line and before the stickers line: `lines.extend(oversize_lines(view))`. In `Relay._post`, the fallback link lists must leave oversize items out: `links = [str(item.get("url")) for item in attachments if id(item) not in sent and item.get("url") and not oversize(item)]` and the same filter in the `too_large` branch. In `_files`, drop `total` and its check. In `view_from_message(message, channel_name, guild_name, guild_id="")` add `"guild_id": str(message.get("guild_id") or guild_id or "")`.
+In `payload_for`: `content = fit_content(text, oversize_lines(view) + link_urls(view))`. (The first version of this plan put the lines into the text after the content line; measured with a 3000-character message, `fit_content` clipped the text to 2000 and the over-limit line and both links were gone, while a linked file kept its link. In the kept block `fit_content` drops from the end, so the expiring download link goes before the message link and the line.) In `Relay._post`, the fallback link lists must leave oversize items out: `links = [str(item.get("url")) for item in attachments if id(item) not in sent and item.get("url") and not oversize(item)]` and the same filter in the `too_large` branch. In `_files`, drop `total` and its check. In `view_from_message(message, channel_name, guild_name, guild_id="")` add `"guild_id": str(message.get("guild_id") or guild_id or "")`.
 
-`mirror/engine.py`: `self.guild_of: dict[str, str] = {}` in `__init__`; in `_index`: `self.guild_of[row["channel_id"]] = str(row.get("guild_id") or "")`; in `_load_threads` and the `THREAD_CREATE` branch: `self.guild_of[thread_id] = self.guild_of.get(parent, "")`; the two `view_from_message(...)` calls in `_create` and `_restore_view` pass `self.guild_of.get(channel_id, "")`.
+`mirror/engine.py`: `self.guild_of: dict[str, str] = {}` in `__init__`; in `_index`: `self.guild_of = {}` beside `self.names = {}` and `self.guild_of[row["channel_id"]] = str(row.get("guild_id") or "")`; in `_load_threads` and the `THREAD_CREATE` branch: `self.guild_of[thread_id] = self.guild_of.get(parent, "")`; the two `view_from_message(...)` calls in `_create` and `_restore_view` pass `self.guild_of.get(channel_id, "")`.
 
 - [ ] **Step 4: Run the full suite**
 
