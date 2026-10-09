@@ -127,6 +127,16 @@ class KeepingHTTP(FakeHTTP):
         return [dict(item) for item in await super().channels(guild_id)]
 
 
+class OnceRefusingHTTP(KeepingHTTP):
+    """A KeepingHTTP that refuses each request in `refused` once, then answers it, as a passing 5xx does."""
+
+    async def call(self, method: str, path: str, **kw: Any) -> Any:
+        try:
+            return await super().call(method, path, **kw)
+        finally:
+            self.refused.discard((method, path))
+
+
 class FakeResp:
     def __init__(self, body: str, status: int = 200) -> None:
         self.status = status
@@ -1039,6 +1049,59 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([b["name"] for b in self.posts(http, "/guilds/900/channels")], ["news"])
         self.assertEqual(self.posts(http, "/channels/t9/webhooks"), [])
         self.assertEqual(self.store.selection()[0]["webhook_url"], "https://discord.com/api/webhooks/1/a")
+
+    async def test_a_passing_listing_failure_gives_no_row_another_rows_webhook(self) -> None:
+        # the listing of t10's webhooks fails once and then works: 12, without a URL and first in the store, never
+        # walks off with 10's webhook from t10, and 10 and 11 stay on their own webhooks
+        http = OnceRefusingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [
+            {"id": "c1", "type": 4, "name": "Talk"},
+            {"id": "t10", "type": 0, "name": "general", "parent_id": "c1"},
+            {"id": "t11", "type": 0, "name": "general", "parent_id": "c1"},
+        ]
+        http.hooks["t10"] = [{"id": "1", "name": "general", "token": "a"}]
+        http.hooks["t11"] = [{"id": "2", "name": "general", "token": "b"}]
+        http.refused.add(("GET", "/channels/t10/webhooks"))
+        self.engine.http = http
+        urls = {"10": "https://discord.com/api/webhooks/1/a", "11": "https://discord.com/api/webhooks/2/b"}
+        self.store.replace_selection(
+            [
+                row("12", name="general") | {"parent": "Talk"},
+                row("10", urls["10"], name="general") | {"parent": "Talk"},
+                row("11", urls["11"], name="general") | {"parent": "Talk"},
+            ]
+        )
+        await self.engine.fill_copy("5", "900")
+        after = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertEqual((after["10"], after["11"]), (urls["10"], urls["11"]))
+        self.assertNotEqual(after["12"], urls["10"])
+        self.assertEqual(self.posts(http, "/webhooks"), [])
+        self.assertFalse(any("replaced" in line for line in self.notes()))
+
+    async def test_a_channel_found_by_name_that_carries_another_rows_webhook_is_not_wired(self) -> None:
+        # Other (6) was never filled; the owner gave its "general" an own webhook (decision 9g), 5/x, made on the loose
+        # "general" t1 of 900 and named "general". Desk (5) is alone in 900 and its loose "general" finds t1 by name:
+        # t1 is 20's target, so 10 neither adopts 20's webhook nor gets a webhook of its own there
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [{"id": "t1", "type": 0, "name": "general", "parent_id": None}]
+        http.hooks["t1"] = [{"id": "5", "name": "general", "token": "x"}]
+        self.engine.http = http
+        own = "https://discord.com/api/webhooks/5/x"
+        self.store.replace_selection(
+            [
+                row("10", name="general"),
+                row("11", name="news"),
+                row("20", own, name="general", guild_id="6") | {"guild_name": "Other"},
+            ]
+        )
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0, "replaced": 0})
+        self.assertIn("#general was not wired (it carries the webhook of another ticked channel)", self.notes())
+        self.assertEqual(self.posts(http, "/channels/t1/webhooks"), [])
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertEqual((urls["10"], urls["20"]), ("", own))
 
     async def test_a_second_source_whose_category_fails_takes_no_loose_channel(self) -> None:
         # Desk (5) holds a loose "general" with its webhook in 900. Other (6) comes second and Discord refuses its

@@ -371,6 +371,12 @@ class Engine:
                 categories.setdefault(str(item.get("name") or "").casefold(), str(item["id"]))
             elif item.get("type") in TEXT_TYPES:
                 texts.append(item)
+        # the webhook id of every ticked row, of any source: a channel that carries one is that row's target
+        held: dict[str, set[str]] = {}
+        for row in self.store.selection():
+            parts = webhook_parts(str(row.get("webhook_url") or ""))
+            if parts:
+                held.setdefault(parts[0], set()).add(str(row["channel_id"]))
         parents = {
             category["key"]: categories[category["name"].casefold()]
             for category in layout["categories"]
@@ -517,8 +523,10 @@ class Engine:
             if source in carried:
                 url, kept = carried[source], True
             else:
+                mine = webhook_parts(before.get(source, "")) or ("", "")
+                others = {hook for hook, rows in held.items() if rows - {source}} - {mine[0]}
                 url, kept = await self._webhook_on(
-                    http, dest, channel["name"], look=source in found, listed=listed.get(dest)
+                    http, dest, channel["name"], look=source in found, listed=listed.get(dest), others=others
                 )
                 await self._wait(0.25)
             if url:
@@ -538,17 +546,28 @@ class Engine:
         return [hook for hook in listed if isinstance(hook, dict)] if isinstance(listed, list) else []
 
     async def _webhook_on(
-        self, http: DiscordHTTP, channel_id: str, name: str, look: bool, listed: list[dict[str, Any]] | None = None
+        self,
+        http: DiscordHTTP,
+        channel_id: str,
+        name: str,
+        look: bool,
+        listed: list[dict[str, Any]] | None = None,
+        others: set[str] | None = None,
     ) -> tuple[str, bool]:
         """The URL of a webhook on the channel: one this fill made before, when `look` and it is still there
         (same name, token visible; `listed` when the fill already fetched the channel's webhooks, None when it did
-        not or its listing failed), otherwise a new one. ("", False) when Discord refuses, and when the webhooks of
-        a found channel cannot be listed: it may carry one already, and Mando never deletes the second."""
+        not or its listing failed), otherwise a new one. ("", False) when Discord refuses, when the webhooks of
+        a found channel cannot be listed: it may carry one already, and Mando never deletes the second, and when a
+        found channel carries a webhook in `others`, the webhook ids of the other ticked rows: the channel is that
+        row's target, so the row gets neither that webhook nor a second one beside it."""
         wanted = webhook_name(name)
         if look:
             hooks = listed if listed is not None else await self._hooks_on(http, channel_id)
             if hooks is None:
                 self.note(f"webhooks of #{name} could not be listed")
+                return "", False
+            if any(str(hook.get("id") or "") in (others or set()) for hook in hooks):
+                self.note(f"#{name} was not wired (it carries the webhook of another ticked channel)")
                 return "", False
             for hook in hooks:
                 if hook.get("token") and hook.get("name") == wanted:
