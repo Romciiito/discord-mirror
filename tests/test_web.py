@@ -999,13 +999,53 @@ class GracefulExitTests(unittest.TestCase):
         # it must cancel the server task instead of raising KeyboardInterrupt into that task, so Gateway.stop
         # ends the gateway task normally. On POSIX the runner's loop handler takes SIGINT and the exit is the
         # graceful one; both end the same way here.
-        seen = self._ends_with_the_engine_fully_closed(
-            None, handle_signals=True, in_gateway=lambda: signal.raise_signal(signal.SIGINT)
-        )
+        with self._installed_sigint_handlers() as handlers:
+            seen = self._ends_with_the_engine_fully_closed(
+                None, handle_signals=True, in_gateway=lambda: signal.raise_signal(signal.SIGINT)
+            )
         task = seen["task"]
         self.assertFalse(task.cancelled())
         self.assertIsNone(task.exception(), "the SIGINT landed in the gateway task")
         self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)
+        self.assertEqual(len(handlers), 1)
+        # on POSIX the runner's loop handler replaced the installed one while the server ran
+        self.assertEqual(handlers[0].count, 1 if os.name == "nt" else 0)
+
+    @unittest.skipUnless(os.name == "nt", "on POSIX the runner's loop handler takes SIGINT while the server runs")
+    def test_a_second_sigint_raises_keyboard_interrupt_through_the_installed_handler_and_still_ends_quietly(
+        self,
+    ) -> None:
+        # the installed handler's second branch: the first SIGINT cancels the server task, the second one raises
+        # KeyboardInterrupt where it lands, here inside the same step of the gateway task; _run still returns
+        # quietly and Engine.close still closes the session and the store
+        def twice() -> None:
+            signal.raise_signal(signal.SIGINT)
+            signal.raise_signal(signal.SIGINT)
+
+        with self._installed_sigint_handlers() as handlers, self.assertLogs("mirror.gateway", "WARNING") as logs:
+            seen = self._ends_with_the_engine_fully_closed(None, handle_signals=True, in_gateway=twice)
+        # Gateway.stop reports the KeyboardInterrupt the gateway task ended with, and goes on
+        self.assertEqual([record.getMessage() for record in logs.records], ["gateway task ended with an error"])
+        self.assertEqual(len(handlers), 1)
+        self.assertEqual(handlers[0].count, 2)
+        task = seen["task"]
+        self.assertFalse(task.cancelled())
+        self.assertIsInstance(task.exception(), KeyboardInterrupt)
+        self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)
+
+    @contextlib.contextmanager
+    def _installed_sigint_handlers(self):
+        """The _SigintCancels handlers _run installs, recorded as _cancel_on_sigint returns them."""
+        handlers: list[Any] = []
+        real = entry._cancel_on_sigint
+
+        def recording(loop: asyncio.AbstractEventLoop, task: asyncio.Task) -> Any:
+            handler = real(loop, task)
+            handlers.append(handler)
+            return handler
+
+        with mock.patch.object(entry, "_cancel_on_sigint", recording):
+            yield handlers
 
     def test_a_graceful_exit_with_a_client_on_the_event_stream_closes_the_engine_without_the_shutdown_wait(
         self,
