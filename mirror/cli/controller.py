@@ -404,8 +404,117 @@ class Controller:
         finally:
             self.busy = False
 
-    async def _server_key(self, key: str) -> None:
-        raise NotImplementedError
-
     async def _load_guilds(self) -> None:
-        raise NotImplementedError
+        self.busy = True
+        self.error = ""
+        self.depth = "guilds"
+        self.local_index = 0
+        try:
+            self.guilds = list(await self.engine.guilds())
+        except (ApiError, RuntimeError) as exc:
+            self.error = str(exc)
+            self.flow = _menu_state("settings", 1)
+        except Exception:
+            log.exception("server list failed")
+            self.error = UNEXPECTED
+            self.flow = _menu_state("settings", 1)
+        finally:
+            self.busy = False
+
+    async def _server_key(self, key: str) -> None:
+        if self.depth == "channels":
+            if key == "Escape":
+                self.depth = "guilds"
+                active = self.active_guild["id"] if self.active_guild else None
+                self.local_index = max(0, next((at for at, g in enumerate(self.guilds) if g["id"] == active), 0))
+                return
+            if not self.channel_rows:
+                return
+            if key == "ArrowDown":
+                self.local_index = min(len(self.channel_rows) - 1, self.local_index + 1)
+            elif key == "ArrowUp":
+                self.local_index = max(0, self.local_index - 1)
+            elif key == "Enter":
+                await self._toggle_channel(self.channel_rows[self.local_index])  # Task 6b replaces this with _channel_enter
+            elif key in ("a", "A"):
+                for channel in self.channel_rows:
+                    self._remember(self.active_guild, channel)
+                await self._save_options()
+            return
+        if key == "Escape":
+            self.flow = reduce(self.flow, {"key": "Escape"}, self.ctx())
+            return
+        if not self.guilds:
+            return
+        if key == "ArrowDown":
+            self.local_index = (self.local_index + 1) % len(self.guilds)
+        elif key == "ArrowUp":
+            self.local_index = (self.local_index - 1 + len(self.guilds)) % len(self.guilds)
+        elif key == "Enter":
+            await self._toggle_guild(self.guilds[self.local_index])
+        elif key == "ArrowRight":
+            await self._open_channels(self.guilds[self.local_index])
+
+    def _remember(self, guild: dict[str, Any], channel: dict[str, Any]) -> None:
+        previous = self.picked.get(channel["id"]) or {}
+        self.picked[channel["id"]] = {
+            "channel_id": channel["id"],
+            "guild_id": guild["id"],
+            "guild_name": guild.get("name") or "",
+            "channel_name": channel.get("name") or "",
+            "parent": channel.get("parent") or "",
+            "topic": channel.get("topic") or "",
+            "webhook_url": previous.get("webhook_url") or "",
+            "enabled": True,
+        }
+
+    async def _toggle_channel(self, channel: dict[str, Any]) -> None:
+        if not self.active_guild:
+            return
+        if channel["id"] in self.picked:
+            del self.picked[channel["id"]]
+        else:
+            self._remember(self.active_guild, channel)
+        await self._save_options()
+
+    async def _toggle_guild(self, guild: dict[str, Any]) -> None:
+        self.busy = True
+        self.error = ""
+        try:
+            listed = list(await self.engine.channels(guild["id"]))
+        except (ApiError, RuntimeError) as exc:
+            self.error = str(exc)
+            return
+        except Exception:
+            log.exception("channel list failed")
+            self.error = UNEXPECTED
+            return
+        finally:
+            self.busy = False
+        if not listed:
+            self.error = "nothing in that server can be read"
+            return
+        chosen = any(channel["id"] in self.picked for channel in listed)
+        for channel in listed:
+            if chosen:
+                self.picked.pop(channel["id"], None)
+            else:
+                self._remember(guild, channel)
+        # _save_options sets busy for its own duration, so ours is released before it runs
+        await self._save_options()
+
+    async def _open_channels(self, guild: dict[str, Any]) -> None:
+        self.busy = True
+        self.error = ""
+        try:
+            self.channel_rows = list(await self.engine.channels(guild["id"]))
+            self.active_guild = guild
+            self.depth = "channels"
+            self.local_index = 0
+        except (ApiError, RuntimeError) as exc:
+            self.error = str(exc)
+        except Exception:
+            log.exception("channel list failed")
+            self.error = UNEXPECTED
+        finally:
+            self.busy = False

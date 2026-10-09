@@ -558,5 +558,154 @@ class WebhookScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ui.busy)
 
 
+class ServersScreenTests(unittest.IsolatedAsyncioTestCase):
+    async def open_servers(self) -> tuple[Controller, FakeEngine]:
+        ui, engine = make()
+        engine.user = {"id": "1", "username": "sosa", "global_name": "Sosa"}
+        engine.http = object()
+        engine.guild_list = [{"id": "g1", "name": "Qwen", "icon": ""}, {"id": "g2", "name": "Moody", "icon": ""}]
+        engine.channel_lists["g1"] = [
+            {"id": "c1", "name": "general", "parent": "text", "topic": ""},
+            {"id": "c2", "name": "dev", "parent": "", "topic": "t"},
+        ]
+        ui.refresh()
+        await keys(ui, "Enter", "2", "2")
+        self.assertEqual(ui.flow["screen"], "servers")
+        self.assertEqual([g["id"] for g in ui.guilds], ["g1", "g2"])
+        return ui, engine
+
+    async def test_enter_ticks_a_whole_server_and_again_unticks_it(self) -> None:
+        ui, engine = await self.open_servers()
+        await keys(ui, "Enter")
+        body = engine.calls[-1][1]
+        self.assertEqual(sorted(row["channel_id"] for row in body["channels"]), ["c1", "c2"])
+        self.assertEqual(body["channels"][0]["guild_name"], "Qwen")
+        self.assertEqual(body["channels"][0]["webhook_url"], "")
+        self.assertEqual(set(ui.picked), {"c1", "c2"})
+        await keys(ui, "Enter")
+        self.assertEqual(engine.calls[-1][1]["channels"], [])
+
+    async def test_right_opens_channels_and_a_ticks_all(self) -> None:
+        ui, engine = await self.open_servers()
+        await keys(ui, "ArrowRight")
+        self.assertEqual(ui.depth, "channels")
+        self.assertEqual(ui.active_guild["id"], "g1")
+        self.assertEqual(ui.hint(), "enter toggles, a selects all, esc back")
+        await keys(ui, "ArrowDown")
+        self.assertEqual(ui.local_index, 1)
+        await keys(ui, "a")
+        self.assertEqual(set(ui.picked), {"c1", "c2"})
+        self.assertEqual(engine.calls[-1][1]["channels"][0]["webhook_url"], "")
+        await keys(ui, "Escape")
+        self.assertEqual(ui.depth, "guilds")
+        self.assertEqual(ui.local_index, 0)
+        await keys(ui, "Escape")
+        self.assertEqual(ui.flow["screen"], "settings")
+
+    async def test_unreadable_server_shows_the_error(self) -> None:
+        ui, engine = await self.open_servers()
+        await keys(ui, "ArrowDown", "Enter")
+        self.assertEqual(ui.error, "nothing in that server can be read")
+        self.assertEqual(ui.picked, {})
+
+    async def test_guild_list_failure_returns_to_settings(self) -> None:
+        ui, engine = make()
+        engine.user = {"id": "1", "username": "sosa", "global_name": "Sosa"}
+        engine.fail["guilds"] = ApiError(401, "add a token first")
+        ui.refresh()
+        await keys(ui, "Enter", "2", "2")
+        self.assertEqual(ui.flow["screen"], "settings")
+        self.assertEqual(ui.flow["index"], 1)
+        self.assertEqual(ui.error, "add a token first")
+
+    async def test_channels_stop_at_the_list_ends_and_escape_returns_to_their_server(self) -> None:
+        # no Enter on a channel here: Task 6b changes what it does (the own webhook URL row)
+        ui, engine = await self.open_servers()
+        self.assertEqual(ui.hint(), "enter toggles the server, right opens channels, esc back")
+        await keys(ui, "ArrowDown", "ArrowRight")
+        self.assertEqual(ui.depth, "channels")
+        self.assertEqual(ui.active_guild["id"], "g2")
+        self.assertEqual(ui.channel_rows, [])
+        await keys(ui, "a", "ArrowDown", "ArrowUp")
+        self.assertEqual([call[0] for call in engine.calls], ["guilds", "channels"])
+        await keys(ui, "Escape")
+        self.assertEqual((ui.depth, ui.local_index), ("guilds", 1))
+        await keys(ui, "ArrowUp", "ArrowRight", "ArrowUp")
+        self.assertEqual((ui.depth, ui.local_index), ("channels", 0))
+        await keys(ui, "ArrowDown", "ArrowDown")
+        self.assertEqual(ui.local_index, 1)
+        await keys(ui, "Escape")
+        self.assertEqual((ui.depth, ui.local_index), ("guilds", 0))
+        await keys(ui, "ArrowUp")
+        self.assertEqual(ui.local_index, 1)
+        await keys(ui, "ArrowDown")
+        self.assertEqual(ui.local_index, 0)
+        self.assertNotIn("save_setup", [call[0] for call in engine.calls])
+
+    async def test_ticking_keeps_an_own_webhook_already_saved(self) -> None:
+        hook = "https://discord.com/api/webhooks/1/abc"
+        ui, engine = await self.open_servers()
+        engine.selection = [{"channel_id": "c1", "guild_id": "g1", "guild_name": "Qwen", "channel_name": "general",
+                             "parent": "text", "topic": "", "webhook_url": hook, "enabled": True}]
+        ui.refresh()
+        await keys(ui, "ArrowRight", "a")
+        rows = {row["channel_id"]: row for row in engine.calls[-1][1]["channels"]}
+        self.assertEqual(rows["c1"]["webhook_url"], hook)
+        self.assertEqual(rows["c2"]["webhook_url"], "")
+
+    async def test_network_error_on_the_guild_list_returns_to_settings(self) -> None:
+        ui, engine = make()
+        engine.user = {"id": "1", "username": "sosa", "global_name": "Sosa"}
+        engine.fail["guilds"] = asyncio.TimeoutError()
+        ui.refresh()
+        with self.assertLogs("mirror.cli", level="ERROR"):
+            await keys(ui, "Enter", "2", "2")
+        self.assertEqual(ui.flow["screen"], "settings")
+        self.assertEqual(ui.flow["index"], 1)
+        self.assertEqual(ui.error, "request failed")
+        self.assertFalse(ui.busy)
+
+    async def test_channel_list_errors_keep_the_server_list(self) -> None:
+        ui, engine = await self.open_servers()
+        engine.fail["channels"] = ApiError(400, "unknown server")
+        await keys(ui, "ArrowRight")
+        self.assertEqual((ui.depth, ui.active_guild, ui.error), ("guilds", None, "unknown server"))
+        await keys(ui, "Enter")
+        self.assertEqual(ui.error, "unknown server")
+        engine.fail["channels"] = aiohttp.ClientConnectionError("Cannot connect to host discord.com:443")
+        with self.assertLogs("mirror.cli", level="ERROR"):
+            await keys(ui, "ArrowRight")
+        self.assertEqual((ui.depth, ui.active_guild, ui.error), ("guilds", None, "request failed"))
+        with self.assertLogs("mirror.cli", level="ERROR"):
+            await keys(ui, "Enter")
+        self.assertEqual(ui.error, "request failed")
+        self.assertEqual(ui.picked, {})
+        self.assertNotIn("save_setup", [call[0] for call in engine.calls])
+        self.assertEqual(ui.flow["screen"], "servers")
+        self.assertFalse(ui.busy)
+
+    async def test_keys_are_dropped_while_a_server_is_listed(self) -> None:
+        ui, engine = await self.open_servers()
+        entered, gate = asyncio.Event(), asyncio.Event()
+
+        async def held(guild_id: str) -> list[dict]:
+            engine.calls.append(("channels", guild_id))
+            entered.set()
+            await gate.wait()
+            return list(engine.channel_lists.get(guild_id, []))
+
+        engine.channels = held
+        task = asyncio.create_task(keys(ui, "Enter"))
+        await asyncio.wait_for(entered.wait(), 1)
+        self.assertTrue(ui.busy)
+        await keys(ui, "Enter", "ArrowDown", "ArrowRight", "Escape")
+        gate.set()
+        await asyncio.wait_for(task, 1)
+        self.assertEqual([call[0] for call in engine.calls], ["guilds", "channels", "save_setup"])
+        self.assertEqual(set(ui.picked), {"c1", "c2"})
+        self.assertEqual((ui.flow["screen"], ui.depth, ui.local_index), ("servers", "guilds", 0))
+        self.assertFalse(ui.busy)
+
+
 if __name__ == "__main__":
     unittest.main()
