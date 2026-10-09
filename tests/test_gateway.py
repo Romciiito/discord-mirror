@@ -232,8 +232,8 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         ws = FakeWS([hello(40), ready()])
         gate = self.build([ws])
         task = asyncio.create_task(gate._once())
-        await asyncio.sleep(0.3)
         try:
+            self.assertTrue(await until(lambda: ws.ops().count(40) >= 3, 5.0))
             self.assertEqual(ws.codes, [])
             self.assertGreaterEqual(ws.ops().count(40), 3)
             self.assertFalse(task.done())
