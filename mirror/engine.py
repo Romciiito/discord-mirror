@@ -279,7 +279,13 @@ class Engine:
 
     async def fill_copy(self, source_id: str, target_id: str) -> dict[str, Any]:
         """Create the ticked channels of one source server, with their categories and one webhook each, inside a
-        server the owner owns, and keep the webhook URLs (decisions 9b', 9i, 9n, 9o). Nothing is ever deleted."""
+        server the owner owns, and keep the webhook URLs (decisions 9b', 9i, 9n, 9o). Nothing is ever deleted, so
+        one fill runs at a time and never beside a Start (`_setup`): a second fill reads the target after the
+        first one wrote to it and creates nothing twice."""
+        async with self._setup:
+            return await self._fill_copy(source_id, target_id)
+
+    async def _fill_copy(self, source_id: str, target_id: str) -> dict[str, Any]:
         if not source_id.isdigit() or not target_id.isdigit():
             raise ApiError(400, "unknown server")
         if source_id == target_id:

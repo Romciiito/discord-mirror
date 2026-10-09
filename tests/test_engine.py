@@ -105,6 +105,25 @@ class FakeHTTP:
         return []
 
 
+class KeepingHTTP(FakeHTTP):
+    """A FakeHTTP that keeps the channels and webhooks a fill creates, and lets other tasks run at every request
+    as a real request does."""
+
+    async def call(self, method: str, path: str, **kw: Any) -> Any:
+        await asyncio.sleep(0)
+        made = await super().call(method, path, **kw)
+        where = path.split("/")[2]
+        if method == "POST" and path.endswith("/channels") and isinstance(made, dict):
+            self.sources.setdefault(where, []).append({"parent_id": None, **made})
+        elif method == "POST" and path.endswith("/webhooks") and isinstance(made, dict):
+            self.hooks.setdefault(where, []).append({"name": (kw.get("json") or {}).get("name"), **made})
+        return made
+
+    async def channels(self, guild_id: str) -> list[dict]:
+        await asyncio.sleep(0)
+        return [dict(item) for item in await super().channels(guild_id)]
+
+
 class FakeResp:
     def __init__(self, body: str, status: int = 200) -> None:
         self.status = status
@@ -659,6 +678,19 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hooks["10"], "https://discord.com/api/webhooks/77/old")
         self.assertTrue(hooks["11"].startswith("https://discord.com/api/webhooks/1001/"))
         self.assertIn("webhooks on 2 channel(s) in Desk copy, 1 reused", self.notes())
+
+    async def test_two_fills_at_once_create_each_channel_and_webhook_once(self) -> None:
+        # a second fill started before the first one ends (the web page, a second client) waits for it and then
+        # finds its category, channels and webhooks again (Review Focus 1); Mando never deletes the duplicates
+        http = KeepingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}, row("11", name="news")])
+        reports = await asyncio.gather(self.engine.fill_copy("5", "900"), self.engine.fill_copy("5", "900"))
+        self.assertEqual([report["reused"] for report in reports], [0, 2])
+        self.assertEqual([(b["type"], b["name"]) for b in self.posts(http, "/guilds/900/channels")], [(4, "Talk"), (0, "general"), (0, "news")])
+        self.assertEqual(len(self.posts(http, "/webhooks")), 2)
 
     async def test_fill_replaces_an_own_webhook_of_a_ticked_channel_and_notes_it(self) -> None:
         # a fill covers every ticked channel of the source (decision 9n), so a channel with an own webhook goes to the
