@@ -58,5 +58,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "starting Mando"
 $env:PYTHONUTF8 = "1"
+# a launch that fails (no exe) leaves $LASTEXITCODE stale; preset it so that failure exits 1
+$LASTEXITCODE = 1
 & $venvPy -m mirror
 exit $LASTEXITCODE
