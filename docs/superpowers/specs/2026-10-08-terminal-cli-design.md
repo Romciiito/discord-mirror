@@ -144,6 +144,13 @@ Decisions (owner):
   server tick channels without a URL row, so a channel with a kept URL comes back
   with it and shows "webhook set"; a new URL entered in the row replaces it. Plan B,
   which owns the store, decides whether unticking forgets the URL.
+- **9k.** (owner, 2026-10-09) The gap in 9f is decided as plan A built it: Start never
+  unticks a ticked channel that the lists do not show. The channel gets its row at the
+  end of its server's channel list, the refusal reads "#x has no webhook (not listed)",
+  and the owner either enters a URL there or unticks it in that row.
+- **9l.** (owner, 2026-10-09) The gap in 9g stays open for plan B: the store keeps the
+  `hooks` memory unchanged in plan A, and plan B, which reshapes the store for targets
+  per source, decides whether unticking forgets a kept webhook URL.
 
 **Measured 2026-10-09: Mando cannot create servers.** The Discord changelog of
 2025-04-15, "Deprecating Guild Creation by Apps", retired `POST /guilds` for
