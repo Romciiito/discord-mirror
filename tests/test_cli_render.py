@@ -165,6 +165,27 @@ class RenderTests(unittest.TestCase):
         ui.on_event({"kind": "status", "running": True, "status": "connecting"})
         self.assertEqual(status_line(ui), "signed out · running · 0 mirrored · -")
 
+    def test_status_line_shows_a_failed_webhook_post(self) -> None:
+        # a webhook post that fails (relay.create returns None) is noted by the engine and reported as
+        # an "error" event (plan Task 7); the run goes on and the status line names the failure (story 5)
+        ui = ui_on("running", running=True, status="live")
+        ui.on_event({"kind": "message", "message": {"id": "m1", "channel_name": "general", "author": "ann", "content": "hi"}})
+        ui.on_event({"kind": "log", "text": "#general: webhook post failed"})
+        ui.on_event({"kind": "error", "text": "#general: webhook post failed"})
+        self.assertEqual(render(ui, 70, 8)[0], "signed out · running · 0 mirrored · #general: webhook post failed")
+        # later notes, messages and an "error" event without text do not hide it
+        ui.on_event({"kind": "log", "text": "history done"})
+        ui.on_event({"kind": "message", "message": {"id": "m2", "channel_name": "general", "author": "bob", "content": "yo"}})
+        ui.on_event({"kind": "error"})
+        self.assertEqual(status_line(ui), "signed out · running · 0 mirrored · #general: webhook post failed")
+        # the controller's own error still comes first
+        ui.error = "pick at least one channel"
+        self.assertEqual(status_line(ui), "signed out · running · 0 mirrored · pick at least one channel")
+        ui.error = ""
+        # a new run starts: the old failure no longer describes the mirror
+        ui.on_event({"kind": "status", "running": True, "status": "connecting"})
+        self.assertEqual(status_line(ui), "signed out · running · 0 mirrored · -")
+
     def test_long_list_keeps_the_cursor_row_in_view(self) -> None:
         ui = ui_on("servers")
         ui.guilds = [{"id": f"g{n}", "name": f"Server {n}"} for n in range(40)]

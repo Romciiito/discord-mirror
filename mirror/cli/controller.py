@@ -35,8 +35,9 @@ class Controller:
         self.snap: dict[str, Any] = {"user": None, "running": False, "status": "idle", "options": {}, "selection": [], "log": [], "mirrored": 0}
         self.messages: list[dict[str, Any]] = []
         self.error = ""
-        # why the engine's last run failed: the log text it noted just before the status event "error"
-        # (Engine._fatal); kept after Exit, cleared when the engine reports running again
+        # the engine's last error: why its last run failed (the log text it noted just before the status
+        # event "error", Engine._fatal) or which webhook post failed (the "error" event, plan Task 7);
+        # kept after Exit, cleared when the engine reports running again
         self.engine_error = ""
         self.busy = False
         self.typing: str | None = None
@@ -83,6 +84,8 @@ class Controller:
                 self.engine_error = ""
             if "mirrored" in item:
                 self.snap["mirrored"] = item["mirrored"]
+        elif kind == "error" and item.get("text"):
+            self.engine_error = str(item["text"])
         elif kind == "message" and item.get("message"):
             self._place(item["message"])
 

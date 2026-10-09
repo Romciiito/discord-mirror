@@ -42,7 +42,11 @@ facts carry the file and line they were measured at (base `main` @ `0416376`).
      last error.
    - The feed shows the last N messages, as `server / #channel · author: text`,
      with edited/deleted marks. N follows the window height.
-   - The engine already emits these events through `_emit`.
+   - The engine already emits these events through `_emit`, except a failed
+     webhook post. `relay.create` returns `None` and `relay.py` only logs the reason
+     (measured in the plan A Task 5 review, 2026-10-09). Plan A Task 7 adds an
+     engine note and an `error` event for it, so the status line can show the most
+     common mirroring error. The reason itself stays in the log file.
 7. **Everything user-facing and in the repo is English.**
 8. **The token fix ships first, separately.** It is done: the plan is in
    `docs/superpowers/plans/2026-10-08-token-input.md` and the commits run from
