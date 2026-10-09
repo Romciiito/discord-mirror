@@ -2415,7 +2415,7 @@ git commit -m "Upload files up to 20 MiB each and replace a larger file with one
 - Test: `tests/test_relay.py`
 
 **Interfaces:**
-- Produces: `sticker_files(message) -> list[dict]`: for each `sticker_items` entry with `format_type` 1 or 2 an attachment `{"name": "<name>.png", "url": "https://cdn.discordapp.com/stickers/<id>.png", "content_type": "image/png", "size": 0, "sticker": True}`, for 4 `{"name": "<name>.gif", "url": "https://media.discordapp.net/stickers/<id>.gif", "content_type": "image/gif", "size": 0, "sticker": True}`; `sticker_names(message)` returns only the names of format 3 (Lottie) stickers (decision 10a). `view_from_message` appends the sticker files to `attachments`. `plan_uploads` takes a sticker item with `size == 0` (its size is unknown; `_fetch` enforces the limit on the body). `Relay.edit` always sends `"embeds"` (`[]` when none, issue #6). `safe_embeds` stops adding embeds once the total of title, description, field names and values, footer text and author name would pass 6000 characters (`EMBED_TOTAL = 6000`). Decision 10c (the dot) and 10d (prefix only on a shared URL, pinned in Task 3) need no change.
+- Produces: `sticker_files(message) -> list[dict]`: for each `sticker_items` entry with `format_type` 1 or 2 an attachment `{"name": "<name>.png", "url": "https://cdn.discordapp.com/stickers/<id>.png", "content_type": "image/png", "size": 0, "sticker": True}`, for 4 `{"name": "<name>.gif", "url": "https://media.discordapp.net/stickers/<id>.gif", "content_type": "image/gif", "size": 0, "sticker": True}`; `sticker_names(message)` returns only the names of format 3 (Lottie) stickers (decision 10a). `view_from_message` appends the sticker files to `attachments`. `plan_uploads` takes a sticker item with `size == 0` (its size is unknown; `_fetch` enforces the limit on the body). `payload_for(view, prefix, keep_embeds: bool = False)` keeps the `embeds` key, `[]` when the message has none, when `keep_embeds` is true, and its content fallback (`(empty)`, `(attachment)`) still follows whether the message has embeds; `Relay.edit` builds its body with `keep_embeds=True`, so an edit always sends `"embeds"` (issue #6). `safe_embeds` stops adding embeds once the total of title, description, field names and values, footer text and author name would pass 6000 characters (`EMBED_TOTAL = 6000`). Decision 10c (the dot) and 10d (prefix only on a shared URL, pinned in Task 3) need no change.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2469,6 +2469,23 @@ git commit -m "Upload files up to 20 MiB each and replace a larger file with one
         self.assertEqual(kwargs["json"]["embeds"], [])
         self.assertNotIn("username", kwargs["json"])
 
+    async def test_edit_that_removes_every_embed_keeps_the_content_fallback(self) -> None:
+        # the body an edit sent before payload_for kept the embeds key itself (issue #6, decision 10e)
+        for files, fallback in (([], "(empty)"), ([attachment("a.png", 10)], "(attachment)")):
+            self.session.queue.append(FakeResp(200, {"id": "5"}))
+            await self.relay.edit(HOOK, "5", make_view(files, content=""), False)
+            self.assertEqual(
+                self.sends()[-1][2]["json"],
+                {"content": fallback, "allowed_mentions": {"parse": []}, "embeds": []},
+            )
+
+    def test_payload_keeps_an_empty_embeds_key_only_when_asked(self) -> None:
+        view = make_view([], content="")
+        self.assertEqual(payload_for(view, False, keep_embeds=True)["embeds"], [])
+        self.assertEqual(payload_for(view, False, keep_embeds=True)["content"], "(empty)")
+        self.assertNotIn("embeds", payload_for(view, False))
+        self.assertIsNone(payload_for(view | {"embeds": [{"title": "t"}]}, False, keep_embeds=True)["content"])
+
     def test_embeds_stay_under_the_total(self) -> None:
         from mirror.relay import safe_embeds
         embeds = [{"title": "t", "description": "d" * 4000}, {"description": "e" * 1990}, {"description": "f" * 20}, {"title": "g"}]
@@ -2486,7 +2503,7 @@ Add `view_from_message` to the `from mirror.relay import (...)` list.
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `PYTHONUTF8=1 python -X utf8 -m unittest tests.test_relay -q`
-Expected: FAIL — `view["stickers"]` lists all four names and `attachments` is empty; the edit body has no `embeds`; `safe_embeds` keeps every embed up to ten.
+Expected: FAIL — `view["stickers"]` lists all four names and `attachments` is empty; the edit body has no `embeds`; `safe_embeds` keeps every embed up to ten. (The two tests after `test_edit_always_sends_the_embeds_key` were added after the gate, when the rule moved into `payload_for`; measured on e519eab, whose `edit` set the key on the body `payload_for` returned: `test_payload_keeps_an_empty_embeds_key_only_when_asked` fails with `TypeError: payload_for() got an unexpected keyword argument 'keep_embeds'`, and `test_edit_that_removes_every_embed_keeps_the_content_fallback` passes, since it pins the body that `edit` sent.)
 
 - [ ] **Step 3: Implement**
 
@@ -2527,7 +2544,7 @@ def sticker_files(message: dict[str, Any]) -> list[dict[str, Any]]:
     return files
 ```
 
-In `view_from_message`, after the attachments loop: `attachments.extend(sticker_files(message))`. In `plan_uploads`, the size condition becomes `(0 < size <= UPLOAD_LIMIT or (size == 0 and item.get("sticker")))`. In `oversize`, a sticker is never oversize (`size_of` is 0). In `Relay.edit`: after `body = payload_for(view, prefix)` add `body["embeds"] = view.get("embeds") or []` (the key is always present on an edit, issue #6). In `safe_embeds`: keep a running `total`; compute `used = embed_chars(item)` before appending and `if total + used > EMBED_TOTAL: break` where
+In `view_from_message`, after the attachments loop: `attachments.extend(sticker_files(message))`. In `plan_uploads`, the size condition becomes `(0 < size <= UPLOAD_LIMIT or (size == 0 and item.get("sticker")))`. In `oversize`, a sticker is never oversize (`size_of` is 0). `payload_for` gets `keep_embeds: bool = False`: it pops an empty `embeds` key only when `keep_embeds` is false, and its content fallback asks whether the body has embeds (`not body.get("embeds")`), not whether it has the key, so a kept empty key leaves the fallback as it was; `Relay.edit` builds its body with `payload_for(view, prefix, keep_embeds=True)` (the key is always present on an edit, issue #6). In `safe_embeds`: keep a running `total`; compute `used = embed_chars(item)` before appending and `if total + used > EMBED_TOTAL: break` where
 
 ```python
 def embed_chars(item: dict[str, Any]) -> int:

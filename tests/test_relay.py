@@ -503,6 +503,23 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["json"]["embeds"], [])
         self.assertNotIn("username", kwargs["json"])
 
+    async def test_edit_that_removes_every_embed_keeps_the_content_fallback(self) -> None:
+        # the body an edit sent before payload_for kept the embeds key itself (issue #6, decision 10e)
+        for files, fallback in (([], "(empty)"), ([attachment("a.png", 10)], "(attachment)")):
+            self.session.queue.append(FakeResp(200, {"id": "5"}))
+            await self.relay.edit(HOOK, "5", make_view(files, content=""), False)
+            self.assertEqual(
+                self.sends()[-1][2]["json"],
+                {"content": fallback, "allowed_mentions": {"parse": []}, "embeds": []},
+            )
+
+    def test_payload_keeps_an_empty_embeds_key_only_when_asked(self) -> None:
+        view = make_view([], content="")
+        self.assertEqual(payload_for(view, False, keep_embeds=True)["embeds"], [])
+        self.assertEqual(payload_for(view, False, keep_embeds=True)["content"], "(empty)")
+        self.assertNotIn("embeds", payload_for(view, False))
+        self.assertIsNone(payload_for(view | {"embeds": [{"title": "t"}]}, False, keep_embeds=True)["content"])
+
     def test_embeds_stay_under_the_total(self) -> None:
         from mirror.relay import safe_embeds
         embeds = [{"title": "t", "description": "d" * 4000}, {"description": "e" * 1990}, {"description": "f" * 20}, {"title": "g"}]

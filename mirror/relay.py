@@ -290,7 +290,9 @@ def fit_content(text: str, urls: list[str]) -> str:
     return clip(text, 2000 - len(block) - 1) + "\n" + block
 
 
-def payload_for(view: dict[str, Any], prefix: bool) -> dict[str, Any]:
+def payload_for(view: dict[str, Any], prefix: bool, keep_embeds: bool = False) -> dict[str, Any]:
+    """The webhook body of a message. `keep_embeds` keeps the embeds key when the message has none, as an edit
+    needs it so that removed embeds go in the copy too (issue #6, decision 10e)."""
     lines: list[str] = []
     if prefix and view.get("channel_name"):
         guild = view.get("guild_name") or ""
@@ -315,9 +317,9 @@ def payload_for(view: dict[str, Any], prefix: bool) -> dict[str, Any]:
     }
     if view.get("avatar"):
         body["avatar_url"] = view["avatar"]
-    if not body["embeds"]:
+    if not body["embeds"] and not keep_embeds:
         body.pop("embeds")
-    if body["content"] is None and "embeds" not in body:
+    if body["content"] is None and not body.get("embeds"):
         body["content"] = "(attachment)" if view.get("attachments") else "(empty)"
     return body
 
@@ -424,8 +426,7 @@ class Relay:
         if webhook_parts(webhook_url) is None:
             return
         try:
-            body = payload_for(view, prefix)
-            body["embeds"] = view.get("embeds") or []  # always on an edit, so removed embeds go too (issue #6)
+            body = payload_for(view, prefix, keep_embeds=True)
             body.pop("username", None)
             body.pop("avatar_url", None)
             url = f"{webhook_url.rstrip('/')}/messages/{webhook_message_id}"
