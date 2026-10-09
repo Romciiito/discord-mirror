@@ -1985,6 +1985,18 @@ Change the assertions at lines 494–495 (the `_save_options` body) to `self.ass
         self.assertEqual(ui.local_index, 0)
         self.assertEqual(ui.error, "")
 
+    async def test_leaving_the_target_picker_returns_to_the_row_of_its_server(self) -> None:
+        ui, engine = await self.open_servers()
+        engine.channel_lists["g2"] = [{"id": "c3", "name": "lobby", "parent": "", "topic": ""}]
+        engine.owned = [{"id": "t1", "name": "Qwen copy"}]
+        await keys(ui, "ArrowDown", "Enter", "c")
+        self.assertEqual((ui.depth, ui.target_source["id"]), ("targets", "g2"))
+        await keys(ui, "Escape")
+        self.assertEqual((ui.depth, ui.local_index, ui.target_source), ("guilds", 1, None))
+        await keys(ui, "c", "Enter")
+        self.assertEqual(engine.calls[-1], ("fill_copy", "g2", "t1"))
+        self.assertEqual((ui.depth, ui.local_index, ui.target_source), ("guilds", 1, None))
+
     async def test_fill_errors_keep_the_picker_open(self) -> None:
         ui, engine = await self.open_servers()
         engine.owned = [{"id": "t1", "name": "Qwen copy"}]
@@ -2132,7 +2144,7 @@ Expected: FAIL — `c` does nothing (`depth` stays `guilds`, `error` empty); the
             return
 ```
 
-and in the guilds branch: `elif key in ("c", "C"): await self._open_targets(self.guilds[self.local_index])`.
+and in the guilds branch: `elif key in ("c", "C"): await self._open_targets(self.guilds[self.local_index])`. The Escape of the `channels` branch becomes `self._back_to_guilds(self.active_guild["id"] if self.active_guild else None)`, the helper `_leave_targets` uses too (added after the gate: both restored the same row with the same lines).
 
 - New methods:
 
@@ -2183,9 +2195,13 @@ and in the guilds branch: `elif key in ("c", "C"): await self._open_targets(self
 
     def _leave_targets(self) -> None:
         source = self.target_source["id"] if self.target_source else None
-        self.depth = "guilds"
         self.target_source = None
-        self.local_index = max(0, next((at for at, g in enumerate(self.guilds) if g["id"] == source), 0))
+        self._back_to_guilds(source)
+
+    def _back_to_guilds(self, guild_id: str | None) -> None:
+        """Back to the server list, on the row of the server just left (the first row when it is not listed)."""
+        self.depth = "guilds"
+        self.local_index = max(0, next((at for at, g in enumerate(self.guilds) if g["id"] == guild_id), 0))
 
     async def _fill(self, target: dict[str, Any]) -> None:
         source = self.target_source or {}

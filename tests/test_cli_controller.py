@@ -873,6 +873,18 @@ class ServersScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ui.local_index, 0)
         self.assertEqual(ui.error, "")
 
+    async def test_leaving_the_target_picker_returns_to_the_row_of_its_server(self) -> None:
+        ui, engine = await self.open_servers()
+        engine.channel_lists["g2"] = [{"id": "c3", "name": "lobby", "parent": "", "topic": ""}]
+        engine.owned = [{"id": "t1", "name": "Qwen copy"}]
+        await keys(ui, "ArrowDown", "Enter", "c")
+        self.assertEqual((ui.depth, ui.target_source["id"]), ("targets", "g2"))
+        await keys(ui, "Escape")
+        self.assertEqual((ui.depth, ui.local_index, ui.target_source), ("guilds", 1, None))
+        await keys(ui, "c", "Enter")
+        self.assertEqual(engine.calls[-1], ("fill_copy", "g2", "t1"))
+        self.assertEqual((ui.depth, ui.local_index, ui.target_source), ("guilds", 1, None))
+
     async def test_fill_errors_keep_the_picker_open(self) -> None:
         ui, engine = await self.open_servers()
         engine.owned = [{"id": "t1", "name": "Qwen copy"}]

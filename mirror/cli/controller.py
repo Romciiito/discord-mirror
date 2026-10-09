@@ -520,9 +520,7 @@ class Controller:
                 await self._webhook_key(key)
                 return
             if key == "Escape":
-                self.depth = "guilds"
-                active = self.active_guild["id"] if self.active_guild else None
-                self.local_index = max(0, next((at for at, g in enumerate(self.guilds) if g["id"] == active), 0))
+                self._back_to_guilds(self.active_guild["id"] if self.active_guild else None)
                 return
             if not self.channel_rows:
                 return
@@ -728,9 +726,13 @@ class Controller:
 
     def _leave_targets(self) -> None:
         source = self.target_source["id"] if self.target_source else None
-        self.depth = "guilds"
         self.target_source = None
-        self.local_index = max(0, next((at for at, g in enumerate(self.guilds) if g["id"] == source), 0))
+        self._back_to_guilds(source)
+
+    def _back_to_guilds(self, guild_id: str | None) -> None:
+        """Back to the server list, on the row of the server just left (the first row when it is not listed)."""
+        self.depth = "guilds"
+        self.local_index = max(0, next((at for at, g in enumerate(self.guilds) if g["id"] == guild_id), 0))
 
     async def _fill(self, target: dict[str, Any]) -> None:
         source = self.target_source or {}
