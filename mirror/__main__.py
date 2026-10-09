@@ -75,10 +75,13 @@ def has_console() -> bool:
     return bool(kernel32.GetConsoleMode(handle, ctypes.byref(wintypes.DWORD())))
 
 
-async def _serve(app: web.Application, host: str, port: int, body: Callable[[], Awaitable[None]]) -> None:
+async def _serve(
+    app: web.Application, host: str, port: int, body: Callable[[], Awaitable[None]], handle_signals: bool
+) -> None:
     """The API server on host:port while body runs. Only a failed listen becomes a ListenError; any other
-    OSError, from the app's startup or from body, keeps its traceback."""
-    runner = web.AppRunner(app, access_log=None)
+    OSError, from the app's startup or from body, keeps its traceback. With handle_signals, SIGINT and SIGTERM
+    raise GracefulExit on POSIX as under web.run_app, and the cancelled body still reaches runner.cleanup."""
+    runner = web.AppRunner(app, access_log=None, handle_signals=handle_signals)
     await runner.setup()
     try:
         # inside the try as in web.run_app: a port in use still closes the engine
@@ -91,11 +94,15 @@ async def _serve(app: web.Application, host: str, port: int, body: Callable[[], 
         await runner.cleanup()
 
 
-def _run(app: web.Application, host: str, port: int, body: Callable[[], Awaitable[None]]) -> None:
+def _run(
+    app: web.Application, host: str, port: int, body: Callable[[], Awaitable[None]], handle_signals: bool = False
+) -> None:
     try:
-        asyncio.run(_serve(app, host, port, body))
-    except KeyboardInterrupt:
-        pass  # Ctrl+C before the CLI took the terminal, or on the server alone; web.run_app ends the same way
+        asyncio.run(_serve(app, host, port, body, handle_signals))
+    except (KeyboardInterrupt, web.GracefulExit):
+        # Ctrl+C before the CLI took the terminal, or SIGINT/SIGTERM on the server alone; web.run_app ends
+        # the same way, with code 0
+        pass
 
 
 async def _forever() -> None:
@@ -104,13 +111,14 @@ async def _forever() -> None:
 
 def serve(app: web.Application, host: str, port: int) -> None:
     """The API server alone, until the process is stopped."""
-    _run(app, host, port, _forever)
+    _run(app, host, port, _forever, handle_signals=True)
 
 
 def serve_and_cli(app: web.Application, host: str, port: int) -> None:
     from .cli.app import run_cli
 
-    _run(app, host, port, lambda: run_cli(app["engine"]))
+    # prompt_toolkit binds SIGINT itself while the CLI runs
+    _run(app, host, port, lambda: run_cli(app["engine"]), handle_signals=False)
 
 
 def main() -> None:

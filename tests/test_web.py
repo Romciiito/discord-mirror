@@ -18,10 +18,11 @@ import time
 import unittest
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 from unittest import mock
 
 import aiohttp
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 import mirror.__main__ as entry
@@ -691,6 +692,77 @@ class ServeAndCliTests(unittest.TestCase):
             except KeyboardInterrupt:
                 self.fail("Ctrl+C while the CLI starts ends in a traceback")
         close.assert_awaited_once()
+
+
+class GracefulExitTests(unittest.TestCase):
+    """SIGINT/SIGTERM on POSIX: the headless server stops gracefully the way web.run_app did; next to the CLI
+    prompt_toolkit keeps SIGINT. Windows has no loop signal handlers, so the signal itself is not sent here."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _runner_kwargs(self, run: Callable[[web.Application, int], None]) -> dict[str, Any]:
+        port = _free_port()
+        app = create_app(self.tmp.name, "127.0.0.1", port)
+        seen: dict[str, Any] = {}
+        real = web.AppRunner
+
+        def recording(*args: Any, **kwargs: Any) -> web.AppRunner:
+            seen.update(kwargs)
+            return real(*args, **kwargs)
+
+        with mock.patch.object(web, "AppRunner", recording):
+            run(app, port)
+        return seen
+
+    def test_the_server_alone_lets_the_runner_handle_the_signals(self) -> None:
+        async def done() -> None:
+            pass
+
+        def run(app: web.Application, port: int) -> None:
+            with mock.patch.object(entry, "_forever", done):
+                entry.serve(app, "127.0.0.1", port)
+
+        self.assertIs(self._runner_kwargs(run).get("handle_signals"), True)
+
+    def test_next_to_the_cli_the_runner_leaves_the_signals_alone(self) -> None:
+        async def cli(_engine: Any) -> None:
+            pass
+
+        def run(app: web.Application, port: int) -> None:
+            with mock.patch("mirror.cli.app.run_cli", cli):
+                entry.serve_and_cli(app, "127.0.0.1", port)
+
+        self.assertIs(self._runner_kwargs(run).get("handle_signals"), False)
+
+    def _ends_quietly(self, body: Callable[[], Awaitable[None]]) -> None:
+        port = _free_port()
+        app = create_app(self.tmp.name, "127.0.0.1", port)
+        engine = app["engine"]
+        with mock.patch.object(engine, "close", wraps=engine.close) as close:
+            try:
+                entry._run(app, "127.0.0.1", port, body)
+            except SystemExit:
+                self.fail("a graceful exit ends in SystemExit instead of code 0")
+        close.assert_awaited_once()
+
+    def test_a_graceful_exit_raised_by_the_body_ends_quietly_and_closes_the_engine(self) -> None:
+        async def body() -> None:
+            raise web.GracefulExit()
+
+        self._ends_quietly(body)
+
+    def test_a_graceful_exit_from_a_loop_callback_ends_quietly_and_closes_the_engine(self) -> None:
+        # what a POSIX loop does with SIGTERM under handle_signals=True: it runs aiohttp's
+        # _raise_graceful_exit as a loop callback while the body still waits
+        from aiohttp.web_runner import _raise_graceful_exit
+
+        async def body() -> None:
+            asyncio.get_running_loop().call_soon(_raise_graceful_exit)
+            await asyncio.Event().wait()
+
+        self._ends_quietly(body)
 
 
 @contextlib.contextmanager
