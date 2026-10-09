@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS hooks (
 CREATE TABLE IF NOT EXISTS targets (
     source_guild_id TEXT PRIMARY KEY,
     target_guild_id TEXT NOT NULL,
-    target_name TEXT NOT NULL DEFAULT ''
+    target_name TEXT NOT NULL DEFAULT '',
+    shared INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -144,6 +145,9 @@ class Store:
             self.conn.execute("ALTER TABLE selection ADD COLUMN parent TEXT NOT NULL DEFAULT ''")
         if "topic" not in picked_cols:
             self.conn.execute("ALTER TABLE selection ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
+        target_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(targets)")}
+        if "shared" not in target_cols:
+            self.conn.execute("ALTER TABLE targets ADD COLUMN shared INTEGER NOT NULL DEFAULT 0")
         self.conn.execute(
             "INSERT OR IGNORE INTO hooks (channel_id, webhook_url) "
             "SELECT channel_id, webhook_url FROM selection WHERE webhook_url != ''"
@@ -188,20 +192,26 @@ class Store:
         )
         self.conn.commit()
 
-    def set_target(self, source_guild_id: str, target_guild_id: str, target_name: str) -> None:
-        """The server the owner picked as the copy of one source server (decision 9b'); a later pick replaces it."""
+    def set_target(self, source_guild_id: str, target_guild_id: str, target_name: str, shared: bool = False) -> None:
+        """The server the owner picked as the copy of one source server (decision 9b'); a later pick replaces it.
+        `shared` records whether another source was filled into that target first (decision 9o), so a refill
+        gets the categories of the first fill."""
         self.conn.execute(
-            "INSERT INTO targets (source_guild_id, target_guild_id, target_name) VALUES (?, ?, ?) "
+            "INSERT INTO targets (source_guild_id, target_guild_id, target_name, shared) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(source_guild_id) DO UPDATE SET "
-            "target_guild_id = excluded.target_guild_id, target_name = excluded.target_name",
-            (str(source_guild_id), str(target_guild_id), str(target_name or "")[:100]),
+            "target_guild_id = excluded.target_guild_id, target_name = excluded.target_name, shared = excluded.shared",
+            (str(source_guild_id), str(target_guild_id), str(target_name or "")[:100], int(bool(shared))),
         )
         self.conn.commit()
 
-    def targets(self) -> dict[str, dict[str, str]]:
-        rows = self.conn.execute("SELECT source_guild_id, target_guild_id, target_name FROM targets").fetchall()
+    def targets(self) -> dict[str, dict[str, Any]]:
+        rows = self.conn.execute("SELECT source_guild_id, target_guild_id, target_name, shared FROM targets").fetchall()
         return {
-            str(row["source_guild_id"]): {"target_id": str(row["target_guild_id"]), "target_name": str(row["target_name"])}
+            str(row["source_guild_id"]): {
+                "target_id": str(row["target_guild_id"]),
+                "target_name": str(row["target_name"]),
+                "shared": bool(row["shared"]),
+            }
             for row in rows
         }
 

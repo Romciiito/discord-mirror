@@ -71,13 +71,14 @@ class FakeHTTP:
         self.fail = set(fail)
         self.sources: dict[str, list[dict]] = {}
         self.listed: list[dict] = []
+        self.hooks: dict[str, list[dict]] = {}
         self.seq = 1000
 
     async def call(self, method: str, path: str, **kw: Any) -> Any:
         body = kw.get("json") or {}
         self.calls.append((method, path, body))
-        if method == "POST" and path == "/guilds":
-            return {"id": "900"}
+        if method == "GET" and path.endswith("/webhooks"):
+            return list(self.hooks.get(path.split("/")[2], []))
         if method == "POST" and path.endswith("/webhooks"):
             self.seq += 1
             return {"id": str(self.seq), "token": "tok"}
@@ -85,7 +86,7 @@ class FakeHTTP:
             if body.get("name") in self.fail:
                 raise ApiError(400, "no")
             self.seq += 1
-            return {"id": str(self.seq)}
+            return {"id": str(self.seq), **body}
         if method == "GET" and path.endswith("/member"):
             return {"roles": []}
         return None
@@ -594,6 +595,167 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             await self.engine.refresh()
             self.assertIn("#lobby has no webhook, not mirrored", self.notes())
             self.assertEqual(sorted(FakeGateway.made[0].subs[-1]["5"]), ["10", "11"])
+            await self.engine.stop()
+
+    def posts(self, http: FakeHTTP, suffix: str) -> list[dict]:
+        return [body for method, path, body in http.calls if method == "POST" and path.endswith(suffix)]
+
+    async def test_owned_guilds_lists_only_servers_the_account_owns(self) -> None:
+        http = FakeHTTP()
+        http.listed = [
+            {"id": "5", "name": "Desk", "owner": False},
+            {"id": "900", "name": "zeta copy", "owner": True},
+            {"id": "901", "name": "Alpha", "owner": True},
+        ]
+        self.engine.http = http
+        self.assertEqual(await self.engine.owned_guilds(), [{"id": "901", "name": "Alpha"}, {"id": "900", "name": "zeta copy"}])
+        self.engine.http = None
+        with self.assertRaises(ApiError):
+            await self.engine.owned_guilds()
+
+    async def test_fill_creates_categories_channels_and_webhooks_in_an_owned_server(self) -> None:
+        http = FakeHTTP()
+        http.listed = [{"id": "5", "name": "Desk", "owner": False}, {"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}, row("11", name="news"), row("20", name="other", guild_id="6")])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 0})
+        categories = [b for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 4]
+        self.assertEqual([c["name"] for c in categories], ["Talk"])
+        texts = [b for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 0]
+        self.assertEqual([(t["name"], "parent_id" in t) for t in texts], [("general", True), ("news", False)])
+        self.assertEqual(len(self.posts(http, "/webhooks")), 2)
+        self.assertFalse(any(method == "DELETE" for method, path, body in http.calls))
+        self.assertFalse(any(method == "GET" and path.endswith("/webhooks") for method, path, body in http.calls))
+        hooks = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertTrue(hooks["10"].startswith("https://discord.com/api/webhooks/"))
+        self.assertTrue(hooks["11"].startswith("https://discord.com/api/webhooks/"))
+        self.assertEqual(hooks["20"], "")
+        self.assertEqual(self.store.targets(), {"5": {"target_id": "900", "target_name": "Desk copy", "shared": False}})
+        self.assertIn("webhooks on 2 channel(s) in Desk copy", self.notes())
+        self.assertEqual(self.delays, [0.3, 0.25, 0.25, 0.25, 0.25])
+
+    async def test_fill_reuses_channels_and_their_webhooks(self) -> None:
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [
+            {"id": "c1", "type": 4, "name": "talk"},
+            {"id": "t1", "type": 0, "name": "General", "parent_id": "c1"},
+            {"id": "t2", "type": 0, "name": "news", "parent_id": None},
+            {"id": "t3", "type": 0, "name": "general", "parent_id": None},
+        ]
+        http.hooks["t1"] = [{"id": "77", "name": "general", "token": "old"}, {"id": "78", "name": "someone else", "token": "x"}]
+        http.hooks["t2"] = [{"id": "79", "name": "news"}]
+        self.engine.http = http
+        # the source channel "general" sits under "Talk": the existing "General" under "talk" is reused (same name as
+        # Discord shows it, same parent), not the loose "general"; its webhook named "general" has a token and is kept
+        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}, row("11", name="news")])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 1})
+        self.assertEqual(self.posts(http, "/guilds/900/channels"), [])
+        self.assertEqual([path for method, path, body in http.calls if method == "POST"], ["/channels/t2/webhooks"])
+        hooks = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertEqual(hooks["10"], "https://discord.com/api/webhooks/77/old")
+        self.assertTrue(hooks["11"].startswith("https://discord.com/api/webhooks/1001/"))
+        self.assertIn("webhooks on 2 channel(s) in Desk copy, 1 reused", self.notes())
+
+    async def test_fill_covers_an_unlisted_ticked_channel(self) -> None:
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection([{"channel_id": "12", "guild_id": "5", "guild_name": "Desk", "channel_name": "gone", "webhook_url": "", "enabled": True}])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report["filled"], 1)
+        self.assertEqual([t["name"] for t in self.posts(http, "/guilds/900/channels")], ["gone"])
+
+    async def test_second_source_into_a_target_gets_prefixed_categories(self) -> None:
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [{"id": "c1", "type": 4, "name": "Talk"}, {"id": "t1", "type": 0, "name": "general", "parent_id": "c1"}]
+        self.engine.http = http
+        self.store.set_target("5", "900", "Desk copy")
+        self.store.replace_selection([row("20", name="general", guild_id="6") | {"guild_name": "Other", "parent": "Talk"}, row("21", name="loose", guild_id="6") | {"guild_name": "Other"}])
+        report = await self.engine.fill_copy("6", "900")
+        self.assertEqual(report["filled"], 2)
+        categories = [b["name"] for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 4]
+        self.assertEqual(categories, ["Other / Talk", "Other"])
+        texts = [b for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 0]
+        self.assertEqual([t["name"] for t in texts], ["general", "loose"])
+        self.assertTrue(all(t.get("parent_id") for t in texts))
+        self.assertEqual(self.store.targets()["6"], {"target_id": "900", "target_name": "Desk copy", "shared": True})
+        self.assertEqual(self.store.targets()["5"], {"target_id": "900", "target_name": "Desk copy", "shared": False})
+
+    async def test_refill_of_the_first_source_keeps_its_names_after_a_second_source(self) -> None:
+        # Desk (5) was filled first into 900 and keeps "Talk"; Other (6) came second and got "Other / Talk" (decision 9o).
+        # Filling Desk again must find its own category, channel and webhook, not build "Desk / Talk" beside them.
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [
+            {"id": "c1", "type": 4, "name": "Talk"},
+            {"id": "t1", "type": 0, "name": "general", "parent_id": "c1"},
+            {"id": "c2", "type": 4, "name": "Other / Talk"},
+            {"id": "t2", "type": 0, "name": "general", "parent_id": "c2"},
+        ]
+        http.hooks["t1"] = [{"id": "77", "name": "general", "token": "old"}]
+        self.engine.http = http
+        self.store.set_target("5", "900", "Desk copy", False)
+        self.store.set_target("6", "900", "Desk copy", True)
+        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1})
+        self.assertEqual([path for method, path, body in http.calls if method == "POST"], [])
+        self.assertEqual([path for method, path, body in http.calls if method == "GET"], ["/channels/t1/webhooks"])
+        self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, {"10": "https://discord.com/api/webhooks/77/old"})
+        self.assertEqual(self.store.targets()["5"], {"target_id": "900", "target_name": "Desk copy", "shared": False})
+        self.assertEqual(self.store.targets()["6"], {"target_id": "900", "target_name": "Desk copy", "shared": True})
+
+    async def test_fill_refuses_bad_servers(self) -> None:
+        http = FakeHTTP()
+        http.listed = [{"id": "5", "name": "Desk", "owner": True}, {"id": "900", "name": "Desk copy", "owner": True}]
+        self.engine.http = http
+        self.store.replace_selection([row("10", name="general")])
+        for source, target, text in (("x", "900", "unknown server"), ("5", "5", "a server cannot be its own copy"), ("6", "900", "tick the server or some of its channels first"), ("5", "7", "pick a server you own")):
+            with self.assertRaises(ApiError) as caught:
+                await self.engine.fill_copy(source, target)
+            self.assertEqual(str(caught.exception), text)
+        self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
+        self.assertEqual(self.store.targets(), {})
+
+    async def test_fill_skips_what_discord_refuses_and_fails_when_nothing_is_wired(self) -> None:
+        http = FakeHTTP(fail=("Talk", "news"))
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}, row("11", name="news")])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report["filled"], 1)
+        self.assertIn("category Talk was not created (no)", self.notes())
+        self.assertIn("#news was not created (no)", self.notes())
+        created = [b for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 0]
+        self.assertNotIn("parent_id", created[0])
+        http = FakeHTTP(fail=("general",))
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection([row("10", name="general")])
+        with self.assertRaises(ApiError) as caught:
+            await self.engine.fill_copy("5", "900")
+        self.assertEqual(str(caught.exception), "no webhook could be created")
+
+    async def test_fill_while_running_refreshes(self) -> None:
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        with mock.patch.object(engine_mod, "Gateway", FakeGateway):
+            self.store.replace_selection([row("10", HOOK)])
+            await self.engine.start()
+            self.store.replace_selection([row("10", HOOK), row("11", name="lobby")])
+            await self.engine.fill_copy("5", "900")
+            self.assertEqual(FakeGateway.made[0].resubscribed, 1)
+            self.assertTrue(self.engine._webhook_for("11").startswith("https://discord.com/api/webhooks/"))
             await self.engine.stop()
 
     def test_save_setup_keeps_only_the_three_options(self) -> None:

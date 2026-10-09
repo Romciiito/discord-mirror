@@ -133,14 +133,41 @@ class CoreTests(unittest.TestCase):
             store = Store(tmp)
             self.assertEqual(store.targets(), {})
             store.set_target("5", "900", "Desk copy")
-            store.set_target("6", "900", "Desk copy")
+            store.set_target("6", "900", "Desk copy", True)
+            store.set_target("7", "900", "Desk copy", True)
             store.set_target("5", "901", "Other")
+            store.set_target("7", "902", "Third", False)
             self.assertEqual(
                 store.targets(),
-                {"5": {"target_id": "901", "target_name": "Other"}, "6": {"target_id": "900", "target_name": "Desk copy"}},
+                {
+                    "5": {"target_id": "901", "target_name": "Other", "shared": False},
+                    "6": {"target_id": "900", "target_name": "Desk copy", "shared": True},
+                    "7": {"target_id": "902", "target_name": "Third", "shared": False},
+                },
             )
             self.assertFalse(hasattr(store, "set_dest_guild"))
             self.assertFalse(hasattr(store, "clear_destination"))
+            store.close()
+
+    def test_targets_table_without_shared_column_opens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = sqlite3.connect(Path(tmp) / "state.db")
+            conn.executescript(
+                """
+                CREATE TABLE targets (
+                    source_guild_id TEXT PRIMARY KEY,
+                    target_guild_id TEXT NOT NULL,
+                    target_name TEXT NOT NULL DEFAULT ''
+                );
+                INSERT INTO targets (source_guild_id, target_guild_id, target_name) VALUES ('5', '900', 'Desk copy');
+                """
+            )
+            conn.commit()
+            conn.close()
+            store = Store(tmp)
+            self.assertEqual(store.targets(), {"5": {"target_id": "900", "target_name": "Desk copy", "shared": False}})
+            store.set_target("6", "900", "Desk copy", True)
+            self.assertTrue(store.targets()["6"]["shared"])
             store.close()
 
     def test_old_database_opens_and_ignores_the_shared_server_columns(self) -> None:
