@@ -171,6 +171,7 @@ class CoreTests(unittest.TestCase):
             # the link stored before the record of fills existed still says that 900 holds 5
             self.assertFalse(store.record_fill("5", "900"))
             self.assertTrue(store.record_fill("8", "900"))
+            self.assertEqual(store.category_sources("900"), {})
             store.close()
 
     def test_a_target_remembers_every_source_filled_into_it(self) -> None:
@@ -208,6 +209,23 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(store.holds_another("900", "5"))
             self.assertFalse(store.holds_another("901", "5"))
             store.close()
+
+    def test_a_target_remembers_the_categories_made_for_each_source(self) -> None:
+        # names do not tell two sources apart (decision 9o), so each category a fill makes is recorded for its source;
+        # the first record of a category stays
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            self.assertEqual(store.category_sources("900"), {})
+            store.record_category("900", "5", "c1")
+            store.record_category("900", "6", "c2")
+            store.record_category("900", "6", "c1")
+            store.record_category("901", "5", "c3")
+            self.assertEqual(store.category_sources("900"), {"c1": "5", "c2": "6"})
+            store.close()
+            again = Store(tmp)
+            self.assertEqual(again.category_sources("900"), {"c1": "5", "c2": "6"})
+            self.assertEqual(again.category_sources("901"), {"c3": "5"})
+            again.close()
 
     def test_old_database_opens_and_ignores_the_shared_server_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

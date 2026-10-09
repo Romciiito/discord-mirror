@@ -898,11 +898,124 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApiError):
             await self.engine.fill_copy("5", "900")
         self.assertEqual(self.store.targets(), {})
+        # the category is recorded for Desk as soon as Discord made it, before the fill failed
+        self.assertEqual(self.store.category_sources("900"), {"1001": "5"})
         http.sources["900"] = [{"id": "c1", "type": 4, "name": "Talk"}]
         http.calls.clear()
         await self.engine.fill_copy("6", "900")
         self.assertEqual([b["name"] for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 4], ["Other / Talk"])
         self.assertTrue(self.store.targets()["6"]["shared"])
+
+    async def test_a_second_source_named_like_a_category_of_the_first_gets_its_own_category(self) -> None:
+        # Desk (5) has "general" under "Trading"; the server "Trading" (6) comes second with a loose "general", so its
+        # category is named "Trading" too. A category belongs to the source a fill made it for, not to its name: 6 gets
+        # its own "Trading", channel and webhook, never Desk's (decision 9o), and each refill finds its own again
+        http = KeepingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection(
+            [row("10", name="general") | {"parent": "Trading"}, row("20", name="general", guild_id="6") | {"guild_name": "Trading"}]
+        )
+        await self.engine.fill_copy("5", "900")
+        http.calls.clear()
+        report = await self.engine.fill_copy("6", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0})
+        made = self.posts(http, "/guilds/900/channels")
+        self.assertEqual([(b["type"], b["name"]) for b in made], [(4, "Trading"), (0, "general")])
+        desk, other = [item["id"] for item in http.sources["900"] if item["type"] == 4]
+        self.assertEqual(made[1]["parent_id"], other)
+        self.assertEqual(self.store.category_sources("900"), {desk: "5", other: "6"})
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertNotEqual(urls["10"], urls["20"])
+        http.calls.clear()
+        self.assertEqual((await self.engine.fill_copy("5", "900"))["reused"], 1)
+        self.assertEqual((await self.engine.fill_copy("6", "900"))["reused"], 1)
+        self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
+        self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, urls)
+
+    async def test_sources_of_the_same_name_get_their_own_categories(self) -> None:
+        # Discord server names are not unique: three servers named "Gaming" with "general" under "Talk" fill one target.
+        # The second and the third both get "Gaming / Talk" (decision 9o), as two categories, each with its own channel
+        # and webhook, and a refill of each finds its own again
+        http = KeepingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection(
+            [row(channel, name="general", guild_id=guild) | {"guild_name": "Gaming", "parent": "Talk"} for channel, guild in (("10", "5"), ("20", "6"), ("30", "7"))]
+        )
+        reports = [await self.engine.fill_copy(guild, "900") for guild in ("5", "6", "7")]
+        self.assertEqual([report["reused"] for report in reports], [0, 0, 0])
+        made = self.posts(http, "/guilds/900/channels")
+        self.assertEqual([b["name"] for b in made if b["type"] == 4], ["Talk", "Gaming / Talk", "Gaming / Talk"])
+        self.assertEqual(len({b["parent_id"] for b in made if b["type"] == 0}), 3)
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertEqual(len(set(urls.values())), 3)
+        http.calls.clear()
+        for guild in ("7", "6", "5"):
+            self.assertEqual((await self.engine.fill_copy(guild, "900"))["reused"], 1)
+        self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
+        self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, urls)
+
+    async def test_a_first_source_never_takes_a_category_made_for_a_later_source(self) -> None:
+        # Desk (5) came first with "general" under "Talk"; the server "Trading" (6) came second and got the category
+        # "Trading" for its loose "general". The owner then ticks Desk's "general" under Desk's own "Trading": Desk's
+        # refill makes its own "Trading", never puts Desk's channel in 6's category or on 6's webhook (decision 9o)
+        http = KeepingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection(
+            [row("10", name="general") | {"parent": "Talk"}, row("20", name="general", guild_id="6") | {"guild_name": "Trading"}]
+        )
+        await self.engine.fill_copy("5", "900")
+        await self.engine.fill_copy("6", "900")
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.store.replace_selection(
+            [
+                row("10", urls["10"], name="general") | {"parent": "Talk"},
+                row("11", name="general") | {"parent": "Trading"},
+                row("20", urls["20"], name="general", guild_id="6") | {"guild_name": "Trading"},
+            ]
+        )
+        http.calls.clear()
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 1})
+        self.assertEqual([(b["type"], b["name"]) for b in self.posts(http, "/guilds/900/channels")], [(4, "Trading"), (0, "general")])
+        after = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertEqual((after["10"], after["20"]), (urls["10"], urls["20"]))
+        self.assertNotIn(after["11"], (urls["10"], urls["20"]))
+
+    async def test_a_later_source_never_takes_a_category_no_fill_made(self) -> None:
+        # a fresh server has "general" under "Text Channels"; Desk (5), alone in 900, reuses it for its loose "general"
+        # (decision 9i). The server "Text Channels" (6) comes second: the server's own category is not 6's, so 6 makes
+        # its own "Text Channels" and never takes the "general" that carries Desk's webhook (decision 9o)
+        http = KeepingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [
+            {"id": "c1", "type": 4, "name": "Text Channels"},
+            {"id": "t1", "type": 0, "name": "general", "parent_id": "c1"},
+        ]
+        self.engine.http = http
+        self.store.replace_selection(
+            [row("10", name="general"), row("20", name="general", guild_id="6") | {"guild_name": "Text Channels"}]
+        )
+        await self.engine.fill_copy("5", "900")
+        http.calls.clear()
+        report = await self.engine.fill_copy("6", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0})
+        made = self.posts(http, "/guilds/900/channels")
+        self.assertEqual([(b["type"], b["name"]) for b in made], [(4, "Text Channels"), (0, "general")])
+        self.assertNotEqual(made[1]["parent_id"], "c1")
+        self.assertFalse(any(path == "/channels/t1/webhooks" for method, path, body in http.calls))
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertNotEqual(urls["10"], urls["20"])
+        http.calls.clear()
+        self.assertEqual((await self.engine.fill_copy("6", "900"))["reused"], 1)
+        self.assertEqual((await self.engine.fill_copy("5", "900"))["reused"], 1)
+        self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
+        self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, urls)
 
     async def test_fill_refuses_bad_servers(self) -> None:
         # 7 is a server the account is in but does not own (decision 9b'), 8 is not listed at all: neither is written to

@@ -10,10 +10,11 @@ def copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict[str, A
     """The categories and channels a fill creates in the target for the ticked rows of one source server
     (decisions 9b', 9n, 9o). `shared` is false for the first source filled into a target, which keeps the
     source's own category names, and true for a source filled into a target another source was filled into
-    first, which gets "<source> / <category>" and a "<source>" category for its loose channels, so two
-    sources never mix in one category. The caller keeps the flag in the store's record of the sources a target
-    holds (`Store.record_fill`), so a refill gets the layout of the first fill even after a second source
-    arrived."""
+    first, which gets "<source> / <category>" and a "<source>" category for its loose channels. The names alone
+    do not keep two sources apart (server names are not unique, and "<source>" can be a category of the first
+    source), so the caller uses a category only for the source a fill made it for (`Store.record_category`).
+    The caller keeps the flag in the store's record of the sources a target holds (`Store.record_fill`), so a
+    refill gets the layout of the first fill even after a second source arrived."""
     source = " ".join(str(source_name or "").split())[:100] or "server"
     categories: list[dict[str, str]] = []
     seen: set[str] = set()

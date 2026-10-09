@@ -187,6 +187,22 @@ Decisions (owner):
   Measured with the engine's fakes: the same-category rule alone made a second
   `general` beside the server's own; "the first of them for the first source" gave the
   first source, refilled after a second source arrived, the second source's webhook.
+- **9o and names, found in the Task 4 review of plan B, round 3 (2026-10-09; plan B's
+  rule, not an owner decision yet).** Names do not tell sources apart: Discord server
+  names are not unique, and a later source's "<source>" or "<source> / <category>" can
+  be a category of the first source or of the server itself. A category therefore
+  belongs to the source a fill made it for: each category a fill creates is recorded for
+  its source as soon as Discord made it, a later source uses only the categories
+  recorded for it, the first source also those no fill made (the server's own, 9i), and
+  no fill uses a category recorded for another source. Two categories of one name can
+  then stand in the target; whether a later source's category should carry a mark that
+  tells the two apart is the owner's open point. Measured with the engine's fakes
+  before the rule: a source named "Trading" with a loose `general`, filled after a source
+  with `general` under "Trading", got the first source's channel and webhook, reported as
+  reused; three sources named "Gaming" gave the third the second's "Gaming / Talk" and
+  webhook; the first source, refilled with a newly ticked category named like a later
+  source's, took that source's channel; a source named "Text Channels" took the server's
+  own `general` that the first source had reused, with its webhook.
 - **10e.** (owner, 2026-10-09, plan C) Issue #6 (an edit that removes every embed sends
   `embeds: []`) and the 6000-character embed total from #8 ship in plan C. The rest of
   #8 and #4, #5, #7 stay separate.

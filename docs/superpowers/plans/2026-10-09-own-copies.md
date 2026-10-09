@@ -30,7 +30,7 @@ Inputs the spec implies but no decision names; each line's test is pinned to the
 
 1. **A second fill into the same target** (after a crash mid-fill, or because the owner ticked two more channels): no second channel of the same name and no second webhook on a reused channel, also when two fills of the same source start before the first one ends (the second waits and finds what the first made). → Task 4 (`test_fill_reuses_channels_and_their_webhooks`, `test_two_fills_at_once_create_each_channel_and_webhook_once`).
 2. **A ticked channel that the lists do not show** (decision 9k's row, stored without `parent`): a fill still creates a channel for it from the stored name. → Task 4 (`test_fill_covers_an_unlisted_ticked_channel`).
-3. **Two sources into one target**: the second gets "<source> / <category>" categories and a "<source>" category for loose channels; the first's channels are untouched, also when the first source is filled again after the second arrived (no new category, channel or webhook). "Holds" is what the target holds, not where the links point now: a source filled into another target later, or whose first fill failed halfway, still has its channels in the first target, so a source filled there afterwards is prefixed too. A channel of the same name outside a source's own category (decision 9i) is taken only when it carries that row's webhook or no other source is in the target, so the first source keeps the server's own `general` it reused after a second source arrived and never takes the second source's `general`; a second source's channel whose category Discord refuses is skipped, never put loose beside the first source's. → Task 2 (`test_copy_layout_prefixes_only_a_shared_target`) and Task 4 (`test_second_source_into_a_target_gets_prefixed_categories`, `test_refill_of_the_first_source_keeps_its_names_after_a_second_source`, `test_a_target_keeps_holding_a_source_that_moved_to_another_target`, `test_a_target_holds_a_source_whose_first_fill_failed`, `test_first_source_reuses_channels_of_the_same_name_in_other_categories`, `test_a_first_source_finds_its_channel_by_its_webhook_after_a_second_source`, `test_a_second_source_whose_category_fails_takes_no_loose_channel`, and in `tests/test_core.py` `test_a_target_remembers_every_source_filled_into_it`, `test_a_target_tells_whether_it_holds_another_source`).
+3. **Two sources into one target**: the second gets "<source> / <category>" categories and a "<source>" category for loose channels; the first's channels are untouched, also when the first source is filled again after the second arrived (no new category, channel or webhook). "Holds" is what the target holds, not where the links point now: a source filled into another target later, or whose first fill failed halfway, still has its channels in the first target, so a source filled there afterwards is prefixed too. A channel of the same name outside a source's own category (decision 9i) is taken only when it carries that row's webhook or no other source is in the target, so the first source keeps the server's own `general` it reused after a second source arrived and never takes the second source's `general`; a second source's channel whose category Discord refuses is skipped, never put loose beside the first source's. Names do not tell sources apart (server names are not unique, a later source's "<source>" can be a category of the first source or of the server itself), so a category is the source's a fill made it for: each category a fill creates is recorded for its source, a later source uses only the categories recorded for it, the first source also those no fill made, and no fill uses a category recorded for another source (two categories of one name can then stand in the target). → Task 2 (`test_copy_layout_prefixes_only_a_shared_target`) and Task 4 (`test_second_source_into_a_target_gets_prefixed_categories`, `test_refill_of_the_first_source_keeps_its_names_after_a_second_source`, `test_a_target_keeps_holding_a_source_that_moved_to_another_target`, `test_a_target_holds_a_source_whose_first_fill_failed`, `test_first_source_reuses_channels_of_the_same_name_in_other_categories`, `test_a_first_source_finds_its_channel_by_its_webhook_after_a_second_source`, `test_a_second_source_whose_category_fails_takes_no_loose_channel`, `test_a_second_source_named_like_a_category_of_the_first_gets_its_own_category`, `test_sources_of_the_same_name_get_their_own_categories`, `test_a_first_source_never_takes_a_category_made_for_a_later_source`, `test_a_later_source_never_takes_a_category_no_fill_made`, and in `tests/test_core.py` `test_a_target_remembers_every_source_filled_into_it`, `test_a_target_tells_whether_it_holds_another_source`, `test_a_target_remembers_the_categories_made_for_each_source`).
 4. **A fill while the mirror runs**: the new webhook URLs are mirrored to without a restart. → Task 4 (`test_fill_while_running_refreshes`).
 5. **A message with a sticker and a file over 20 MiB**: one post, the sticker uploaded, the file as one line with two links, no second attempt. → Task 8 (`test_sticker_and_oversize_file_in_one_post`).
 6. **Names that differ only in an emoji, a separator such as "┃" or an underscore** (`🔥-general` and `💬-general`): two channels in the copy, never one channel with one webhook for both; an emoji-only name is found again on the next fill. The same holds for two source channels with the very same name in one category (Discord allows it): each existing channel serves one row only, so each gets its own channel and webhook, and a refill finds each again. → Task 2 (`test_same_name_keeps_emoji_separators_and_underscores_apart`) and Task 4 (`test_fill_gives_two_channels_of_the_same_name_their_own_copies`).
@@ -42,7 +42,7 @@ Inputs the spec implies but no decision names; each line's test is pinned to the
 
 | File | Responsibility |
 |---|---|
-| `mirror/store.py` | `targets` table (its `shared` column from Task 4); `fills` table, `record_fill` and `holds_another` (Task 4: the sources each target holds); `options()` without `global_webhook`, `dest_name`, `dest_guild_id`; `set_options(backfill, include_threads, mirror)`; `set_target`, `targets`; `set_dest_guild` and `clear_destination` removed |
+| `mirror/store.py` | `targets` table (its `shared` column from Task 4); `fills` table, `record_fill` and `holds_another` (Task 4: the sources each target holds); `fill_categories` table, `record_category` and `category_sources` (Task 4: the source each category a fill made belongs to); `options()` without `global_webhook`, `dest_name`, `dest_guild_id`; `set_options(backfill, include_threads, mirror)`; `set_target`, `targets`; `set_dest_guild` and `clear_destination` removed |
 | `mirror/provision.py` | `copy_layout(source_name, rows, shared)` and `same_name(a, b)` (new, pure); `webhook_name` kept; `destination_layout` removed |
 | `mirror/engine.py` | `owned_guilds()`, `fill_copy()` (under the `_setup` lock), `_fill_copy()`, `_fill()`, `_hooks_on()`, `_webhook_on()`; `_start` with the Start rule; `copy_guild`, `_wire_copy`, `reset_destination`, `_provision`, `_wire_layout`, `GONE` removed; no `global_webhook` anywhere |
 | `mirror/web.py` | `GET /api/targets`, `POST /api/guilds/{guild_id}/fill`; the copy and reset routes removed |
@@ -369,10 +369,11 @@ def copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict[str, A
     """The categories and channels a fill creates in the target for the ticked rows of one source server
     (decisions 9b', 9n, 9o). `shared` is false for the first source filled into a target, which keeps the
     source's own category names, and true for a source filled into a target another source was filled into
-    first, which gets "<source> / <category>" and a "<source>" category for its loose channels, so two
-    sources never mix in one category. The caller keeps the flag in the store's record of the sources a target
-    holds (`Store.record_fill`), so a refill gets the layout of the first fill even after a second source
-    arrived."""
+    first, which gets "<source> / <category>" and a "<source>" category for its loose channels. The names alone
+    do not keep two sources apart (server names are not unique, and "<source>" can be a category of the first
+    source), so the caller uses a category only for the source a fill made it for (`Store.record_category`).
+    The caller keeps the flag in the store's record of the sources a target holds (`Store.record_fill`), so a
+    refill gets the layout of the first fill even after a second source arrived."""
     source = " ".join(str(source_name or "").split())[:100] or "server"
     categories: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -616,13 +617,13 @@ git commit -m "Refuse Start on a ticked channel without a webhook and remove the
 ### Task 4: `owned_guilds` and `fill_copy` — filling a server the owner owns
 
 **Files:**
-- Modify: `mirror/engine.py`, `mirror/store.py` (the `shared` flag of a link, the `fills` record)
-- Test: `tests/test_engine.py`, `tests/test_core.py` (`test_store_targets_per_source`, new `test_targets_table_without_shared_column_opens`, new `test_a_target_remembers_every_source_filled_into_it`, new `test_a_target_tells_whether_it_holds_another_source`)
+- Modify: `mirror/engine.py`, `mirror/store.py` (the `shared` flag of a link, the `fills` record, the `fill_categories` record)
+- Test: `tests/test_engine.py`, `tests/test_core.py` (`test_store_targets_per_source`, new `test_targets_table_without_shared_column_opens`, new `test_a_target_remembers_every_source_filled_into_it`, new `test_a_target_tells_whether_it_holds_another_source`, new `test_a_target_remembers_the_categories_made_for_each_source`)
 
 **Interfaces:**
-- Produces: `Engine.owned_guilds() -> list[{"id", "name"}]` sorted by folded name, the servers whose `/users/@me/guilds` entry has `owner` true; `Engine.fill_copy(source_id: str, target_id: str) -> {"target": str, "filled": int, "reused": int}`, which holds `self._setup` around `Engine._fill_copy(source_id, target_id)` (same result); `Engine._fill(http, target_id, layout, existing, before: dict[source_channel_id, url], alone: bool) -> tuple[pairs, reused]`; `Engine._hooks_on(http, channel_id) -> list[dict]` (the webhooks Discord lists on a channel, `[]` on an `ApiError`); `Engine._webhook_on(http, channel_id, name, look: bool, listed: list[dict] | None = None) -> tuple[str, bool]`. In the store: the `targets` table gains `shared INTEGER NOT NULL DEFAULT 0` (in `SCHEMA`, and in `_migrate` for a file whose `targets` table Task 1 made without it); `Store.set_target(source_guild_id, target_guild_id, target_name, shared: bool = False)` writes the flag on insert and on update, and adds the pair to `fills` when it is not there; `Store.targets()` links are `{"target_id", "target_name", "shared": bool}`. A new table `fills (target_guild_id, source_guild_id, shared, PRIMARY KEY (target_guild_id, source_guild_id))` records every source a target holds and is never emptied (Mando never deletes in the target, decision 9i, so a source moved to another target or whose first fill failed halfway still has its channels there); `_migrate` copies every `targets` link into it (`INSERT OR IGNORE`), so a file from before this table keeps what its links say. `Store.record_fill(source_guild_id, target_guild_id) -> bool` returns the recorded flag when the pair is in `fills`, otherwise records the pair with `shared` = whether another source is recorded for that target, and returns that. `Store.holds_another(target_guild_id, source_guild_id) -> bool` says whether `fills` holds a source other than this one in that target, whichever came first (the first source keeps `shared` false after a second one arrived, so the flag cannot say it).
+- Produces: `Engine.owned_guilds() -> list[{"id", "name"}]` sorted by folded name, the servers whose `/users/@me/guilds` entry has `owner` true; `Engine.fill_copy(source_id: str, target_id: str) -> {"target": str, "filled": int, "reused": int}`, which holds `self._setup` around `Engine._fill_copy(source_id, target_id)` (same result); `Engine._fill(http, target_id, layout, existing, before: dict[source_channel_id, url], alone: bool, source_id: str) -> tuple[pairs, reused]`; `Engine._hooks_on(http, channel_id) -> list[dict]` (the webhooks Discord lists on a channel, `[]` on an `ApiError`); `Engine._webhook_on(http, channel_id, name, look: bool, listed: list[dict] | None = None) -> tuple[str, bool]`. In the store: the `targets` table gains `shared INTEGER NOT NULL DEFAULT 0` (in `SCHEMA`, and in `_migrate` for a file whose `targets` table Task 1 made without it); `Store.set_target(source_guild_id, target_guild_id, target_name, shared: bool = False)` writes the flag on insert and on update, and adds the pair to `fills` when it is not there; `Store.targets()` links are `{"target_id", "target_name", "shared": bool}`. A new table `fills (target_guild_id, source_guild_id, shared, PRIMARY KEY (target_guild_id, source_guild_id))` records every source a target holds and is never emptied (Mando never deletes in the target, decision 9i, so a source moved to another target or whose first fill failed halfway still has its channels there); `_migrate` copies every `targets` link into it (`INSERT OR IGNORE`), so a file from before this table keeps what its links say. `Store.record_fill(source_guild_id, target_guild_id) -> bool` returns the recorded flag when the pair is in `fills`, otherwise records the pair with `shared` = whether another source is recorded for that target, and returns that. `Store.holds_another(target_guild_id, source_guild_id) -> bool` says whether `fills` holds a source other than this one in that target, whichever came first (the first source keeps `shared` false after a second one arrived, so the flag cannot say it). A new table `fill_categories (target_guild_id, category_id, source_guild_id, PRIMARY KEY (target_guild_id, category_id))` records, for each category a fill created, the source it was created for, and is never emptied; `Store.record_category(target_guild_id, source_guild_id, category_id)` adds a category (`INSERT OR IGNORE`: the first record stays) and `Store.category_sources(target_guild_id) -> dict[category_id, source_guild_id]` lists a target's.
 - Errors (`ApiError(400, ...)`): `"unknown server"` (non-numeric id), `"a server cannot be its own copy"`, `"tick the server or some of its channels first"` (no enabled row of the source), `"pick a server you own"` (target not in `owned_guilds()`), `"no webhook could be created"` (no pair at the end). `"add a token first"` (401) comes from `_require_http`.
-- Behaviour: one fill at a time and never beside a Start: `fill_copy` holds `self._setup`, the lock `start` holds, and `_fill_copy` does the work, so a second fill reads the target after the first one wrote to it (two fills at once read the same `existing` and created every category, channel and webhook twice, which Mando never deletes, measured in the Task 4 review, round 2; `refresh` takes no lock, so the refresh at the end does not wait for itself); `rows` are every enabled row of the source, with or without a webhook URL (a second fill finds its own webhooks again and keeps the same URLs; a fill covers every ticked channel of the source, decision 9n, so an own webhook the owner typed, decision 9g, or the URL an earlier fill made in another target is replaced by the copy's webhook, and the hooks memory follows the row; the store keeps no mark of who made a URL, so the two cannot be told apart, and leaving a row with a URL alone would make a fill into a second target create channels and webhooks there while every row keeps the first target's URL, measured in the Task 4 review; the spec records this as a gap for the owner after decision 9o); `existing = await http.channels(target_id)`; then `shared = store.record_fill(source_id, target_id)`, before the first write into the target: `shared` means this source is not the first the target holds (decision 9o, "a target that already holds another source"), which is what the target holds and not where the links point now, because a link moves with a later pick while the channels stay; a refill gets the recorded flag again (the categories of its first fill, so the first source keeps its own category names after a second source arrived, also after it was filled into another target and back, and no channel is created twice); a fill that fails after `record_fill` leaves the pair recorded, so a later source is prefixed (at worst a prefix where none was needed, never two sources in one category); `alone = not store.holds_another(target_id, source_id)` (no other source in the target, first or later); the layout is `copy_layout(rows[0]["guild_name"], rows, shared)`; `before` maps each row's channel id to its URL before the fill; categories are found by folded name; then each channel of the layout gets one existing text channel or none, and an existing channel serves one row only (a `claimed` set: two source channels of the same name in one category get two channels and two webhooks, never one channel with one webhook for both; the review of Task 4, round 2, measured the earlier code matching the second one to the channel just created for the first and reporting it as reused). Two passes, so a name found elsewhere never takes a channel another row has in its own place: first every channel whose category is in the target, or that is loose, takes an unclaimed text channel with `same_name` and the same `parent_id` (empty for a loose channel); then a channel still without one takes an unclaimed text channel with `same_name` under any parent (decision 9i, "a channel with the same name as the source channel is reused": a fresh server's own `general` under "Text Channels" serves a loose source `general`, which the same-parent rule alone missed, measured in round 2): the one that carries the row's webhook (`_hooks_on` lists a hook with the id of the row's URL and a `token`; that hook's URL is kept and counts as reused), or, when none does, the first of them only when `alone`, since with another source in the target it may be that source's channel (decision 9o; measured in round 2: "the first of them for any unshared source" gave the first source, refilled after a second source arrived, the second source's channel and webhook, and "only when alone" made that refill create a new channel). A category is created (type 4) only for a channel created under it, so a channel found elsewhere leaves no empty category; a channel without an existing one is created (type 0, `parent_id`, `topic` when present) unless its category is not in the target because Discord refused it: then it is skipped with the note `"#<name> was not created (its category failed)"` and never put loose, where a second source's channel would take the first source's loose channel of the same name and its webhook (measured in round 2). A found channel's webhooks are listed with `GET /channels/{id}/webhooks` (once per fill: `_webhook_on` takes the listing the second pass made) and one whose `name == webhook_name(channel name)` and that has a `token` is reused, otherwise a webhook is created; a created channel gets a new webhook without the listing; paces: `_wait(0.3)` after each category request, `_wait(0.25)` after each channel request, each listing of the second pass and each channel's webhook step; no `DELETE` ever; a channel or webhook that fails is noted and skipped (`"#<name> was not created (<exc>)"`, `"webhook for #<name> failed (<exc>)"`); then `store.fill_webhooks(pairs)`, `store.set_target(source_id, target_id, target name, shared)`, a note `"webhooks on <n> channel(s) in <target>"` (`", <k> reused"` appended when `k > 0`), a note `"<r> earlier webhook url(s) replaced"` when `r > 0` (`r` counts the pairs whose row had a non-empty URL before the fill that differs from the new one, so a refill that finds its webhooks again counts nothing), and `await self.refresh()` when running. Returns `{"target": name, "filled": len(pairs), "reused": k}` where `k` counts reused webhooks.
+- Behaviour: one fill at a time and never beside a Start: `fill_copy` holds `self._setup`, the lock `start` holds, and `_fill_copy` does the work, so a second fill reads the target after the first one wrote to it (two fills at once read the same `existing` and created every category, channel and webhook twice, which Mando never deletes, measured in the Task 4 review, round 2; `refresh` takes no lock, so the refresh at the end does not wait for itself); `rows` are every enabled row of the source, with or without a webhook URL (a second fill finds its own webhooks again and keeps the same URLs; a fill covers every ticked channel of the source, decision 9n, so an own webhook the owner typed, decision 9g, or the URL an earlier fill made in another target is replaced by the copy's webhook, and the hooks memory follows the row; the store keeps no mark of who made a URL, so the two cannot be told apart, and leaving a row with a URL alone would make a fill into a second target create channels and webhooks there while every row keeps the first target's URL, measured in the Task 4 review; the spec records this as a gap for the owner after decision 9o); `existing = await http.channels(target_id)`; then `shared = store.record_fill(source_id, target_id)`, before the first write into the target: `shared` means this source is not the first the target holds (decision 9o, "a target that already holds another source"), which is what the target holds and not where the links point now, because a link moves with a later pick while the channels stay; a refill gets the recorded flag again (the categories of its first fill, so the first source keeps its own category names after a second source arrived, also after it was filled into another target and back, and no channel is created twice); a fill that fails after `record_fill` leaves the pair recorded, so a later source is prefixed (at worst a prefix where none was needed, never two sources in one category); `alone = not store.holds_another(target_id, source_id)` (no other source in the target, first or later); the layout is `copy_layout(rows[0]["guild_name"], rows, shared)`; `before` maps each row's channel id to its URL before the fill; a category is the source's a fill made it for, not whoever carries its name, so before `_fill` the categories of `existing` are cut to those this source may use: a later source (`shared`) only the categories `category_sources` gives to it, the first source also those no fill made (the server's own, decision 9i), and no source a category made for another source (names do not tell sources apart: Discord server names are not unique, and a later source's "<source>" or "<source> / <category>" can be a category of the first source or of the server itself; measured in the Task 4 review, round 3, with the real engine and `KeepingHTTP`: a source named "Trading" with a loose `general`, filled after a source with `general` under "Trading", found that category and channel and got the first source's webhook, reported as reused; three sources named "Gaming" gave the third the second's "Gaming / Talk" and webhook; the first source refilled with a newly ticked category named like a later source's took the later source's channel; and a source named "Text Channels" took the server's own `general` that the first source had reused, with its webhook); `_fill` records each category it creates for `source_id` with `record_category` right after Discord made it, so a fill that fails later still has it recorded; two categories of one name can then stand in the target; within what is left, categories are found by folded name; then each channel of the layout gets one existing text channel or none, and an existing channel serves one row only (a `claimed` set: two source channels of the same name in one category get two channels and two webhooks, never one channel with one webhook for both; the review of Task 4, round 2, measured the earlier code matching the second one to the channel just created for the first and reporting it as reused). Two passes, so a name found elsewhere never takes a channel another row has in its own place: first every channel whose category is in the target, or that is loose, takes an unclaimed text channel with `same_name` and the same `parent_id` (empty for a loose channel); then a channel still without one takes an unclaimed text channel with `same_name` under any parent (decision 9i, "a channel with the same name as the source channel is reused": a fresh server's own `general` under "Text Channels" serves a loose source `general`, which the same-parent rule alone missed, measured in round 2): the one that carries the row's webhook (`_hooks_on` lists a hook with the id of the row's URL and a `token`; that hook's URL is kept and counts as reused), or, when none does, the first of them only when `alone`, since with another source in the target it may be that source's channel (decision 9o; measured in round 2: "the first of them for any unshared source" gave the first source, refilled after a second source arrived, the second source's channel and webhook, and "only when alone" made that refill create a new channel). A category is created (type 4) only for a channel created under it, so a channel found elsewhere leaves no empty category; a channel without an existing one is created (type 0, `parent_id`, `topic` when present) unless its category is not in the target because Discord refused it: then it is skipped with the note `"#<name> was not created (its category failed)"` and never put loose, where a second source's channel would take the first source's loose channel of the same name and its webhook (measured in round 2). A found channel's webhooks are listed with `GET /channels/{id}/webhooks` (once per fill: `_webhook_on` takes the listing the second pass made) and one whose `name == webhook_name(channel name)` and that has a `token` is reused, otherwise a webhook is created; a created channel gets a new webhook without the listing; paces: `_wait(0.3)` after each category request, `_wait(0.25)` after each channel request, each listing of the second pass and each channel's webhook step; no `DELETE` ever; a channel or webhook that fails is noted and skipped (`"#<name> was not created (<exc>)"`, `"webhook for #<name> failed (<exc>)"`); then `store.fill_webhooks(pairs)`, `store.set_target(source_id, target_id, target name, shared)`, a note `"webhooks on <n> channel(s) in <target>"` (`", <k> reused"` appended when `k > 0`), a note `"<r> earlier webhook url(s) replaced"` when `r > 0` (`r` counts the pairs whose row had a non-empty URL before the fill that differs from the new one, so a refill that finds its webhooks again counts nothing), and `await self.refresh()` when running. Returns `{"target": name, "filled": len(pairs), "reused": k}` where `k` counts reused webhooks.
 - Consumes: Task 1 `set_target`/`targets` (extended here with `shared`), Task 2 `copy_layout`/`same_name`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -966,11 +967,124 @@ Add the tests:
         with self.assertRaises(ApiError):
             await self.engine.fill_copy("5", "900")
         self.assertEqual(self.store.targets(), {})
+        # the category is recorded for Desk as soon as Discord made it, before the fill failed
+        self.assertEqual(self.store.category_sources("900"), {"1001": "5"})
         http.sources["900"] = [{"id": "c1", "type": 4, "name": "Talk"}]
         http.calls.clear()
         await self.engine.fill_copy("6", "900")
         self.assertEqual([b["name"] for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 4], ["Other / Talk"])
         self.assertTrue(self.store.targets()["6"]["shared"])
+
+    async def test_a_second_source_named_like_a_category_of_the_first_gets_its_own_category(self) -> None:
+        # Desk (5) has "general" under "Trading"; the server "Trading" (6) comes second with a loose "general", so its
+        # category is named "Trading" too. A category belongs to the source a fill made it for, not to its name: 6 gets
+        # its own "Trading", channel and webhook, never Desk's (decision 9o), and each refill finds its own again
+        http = KeepingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection(
+            [row("10", name="general") | {"parent": "Trading"}, row("20", name="general", guild_id="6") | {"guild_name": "Trading"}]
+        )
+        await self.engine.fill_copy("5", "900")
+        http.calls.clear()
+        report = await self.engine.fill_copy("6", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0})
+        made = self.posts(http, "/guilds/900/channels")
+        self.assertEqual([(b["type"], b["name"]) for b in made], [(4, "Trading"), (0, "general")])
+        desk, other = [item["id"] for item in http.sources["900"] if item["type"] == 4]
+        self.assertEqual(made[1]["parent_id"], other)
+        self.assertEqual(self.store.category_sources("900"), {desk: "5", other: "6"})
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertNotEqual(urls["10"], urls["20"])
+        http.calls.clear()
+        self.assertEqual((await self.engine.fill_copy("5", "900"))["reused"], 1)
+        self.assertEqual((await self.engine.fill_copy("6", "900"))["reused"], 1)
+        self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
+        self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, urls)
+
+    async def test_sources_of_the_same_name_get_their_own_categories(self) -> None:
+        # Discord server names are not unique: three servers named "Gaming" with "general" under "Talk" fill one target.
+        # The second and the third both get "Gaming / Talk" (decision 9o), as two categories, each with its own channel
+        # and webhook, and a refill of each finds its own again
+        http = KeepingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection(
+            [row(channel, name="general", guild_id=guild) | {"guild_name": "Gaming", "parent": "Talk"} for channel, guild in (("10", "5"), ("20", "6"), ("30", "7"))]
+        )
+        reports = [await self.engine.fill_copy(guild, "900") for guild in ("5", "6", "7")]
+        self.assertEqual([report["reused"] for report in reports], [0, 0, 0])
+        made = self.posts(http, "/guilds/900/channels")
+        self.assertEqual([b["name"] for b in made if b["type"] == 4], ["Talk", "Gaming / Talk", "Gaming / Talk"])
+        self.assertEqual(len({b["parent_id"] for b in made if b["type"] == 0}), 3)
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertEqual(len(set(urls.values())), 3)
+        http.calls.clear()
+        for guild in ("7", "6", "5"):
+            self.assertEqual((await self.engine.fill_copy(guild, "900"))["reused"], 1)
+        self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
+        self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, urls)
+
+    async def test_a_first_source_never_takes_a_category_made_for_a_later_source(self) -> None:
+        # Desk (5) came first with "general" under "Talk"; the server "Trading" (6) came second and got the category
+        # "Trading" for its loose "general". The owner then ticks Desk's "general" under Desk's own "Trading": Desk's
+        # refill makes its own "Trading", never puts Desk's channel in 6's category or on 6's webhook (decision 9o)
+        http = KeepingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection(
+            [row("10", name="general") | {"parent": "Talk"}, row("20", name="general", guild_id="6") | {"guild_name": "Trading"}]
+        )
+        await self.engine.fill_copy("5", "900")
+        await self.engine.fill_copy("6", "900")
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.store.replace_selection(
+            [
+                row("10", urls["10"], name="general") | {"parent": "Talk"},
+                row("11", name="general") | {"parent": "Trading"},
+                row("20", urls["20"], name="general", guild_id="6") | {"guild_name": "Trading"},
+            ]
+        )
+        http.calls.clear()
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 1})
+        self.assertEqual([(b["type"], b["name"]) for b in self.posts(http, "/guilds/900/channels")], [(4, "Trading"), (0, "general")])
+        after = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertEqual((after["10"], after["20"]), (urls["10"], urls["20"]))
+        self.assertNotIn(after["11"], (urls["10"], urls["20"]))
+
+    async def test_a_later_source_never_takes_a_category_no_fill_made(self) -> None:
+        # a fresh server has "general" under "Text Channels"; Desk (5), alone in 900, reuses it for its loose "general"
+        # (decision 9i). The server "Text Channels" (6) comes second: the server's own category is not 6's, so 6 makes
+        # its own "Text Channels" and never takes the "general" that carries Desk's webhook (decision 9o)
+        http = KeepingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [
+            {"id": "c1", "type": 4, "name": "Text Channels"},
+            {"id": "t1", "type": 0, "name": "general", "parent_id": "c1"},
+        ]
+        self.engine.http = http
+        self.store.replace_selection(
+            [row("10", name="general"), row("20", name="general", guild_id="6") | {"guild_name": "Text Channels"}]
+        )
+        await self.engine.fill_copy("5", "900")
+        http.calls.clear()
+        report = await self.engine.fill_copy("6", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0})
+        made = self.posts(http, "/guilds/900/channels")
+        self.assertEqual([(b["type"], b["name"]) for b in made], [(4, "Text Channels"), (0, "general")])
+        self.assertNotEqual(made[1]["parent_id"], "c1")
+        self.assertFalse(any(path == "/channels/t1/webhooks" for method, path, body in http.calls))
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertNotEqual(urls["10"], urls["20"])
+        http.calls.clear()
+        self.assertEqual((await self.engine.fill_copy("6", "900"))["reused"], 1)
+        self.assertEqual((await self.engine.fill_copy("5", "900"))["reused"], 1)
+        self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
+        self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, urls)
 
     async def test_fill_refuses_bad_servers(self) -> None:
         # 7 is a server the account is in but does not own (decision 9b'), 8 is not listed at all: neither is written to
@@ -1027,7 +1141,7 @@ Add the tests:
             await self.engine.stop()
 ```
 
-In `tests/test_core.py`, `test_store_targets_per_source` gets the flag (replace its `set_target` lines and its `targets()` assertion; keep the two `hasattr` checks), a new test opens a file whose `targets` table Task 1 made without the column (and without `fills`), and a new test pins the `fills` record:
+In `tests/test_core.py`, `test_store_targets_per_source` gets the flag (replace its `set_target` lines and its `targets()` assertion; keep the two `hasattr` checks), a new test opens a file whose `targets` table Task 1 made without the column (and without `fills` and `fill_categories`), a new test pins the `fills` record, and a new test pins the `fill_categories` record:
 
 ```python
             store.set_target("5", "900", "Desk copy")
@@ -1068,6 +1182,7 @@ In `tests/test_core.py`, `test_store_targets_per_source` gets the flag (replace 
             # the link stored before the record of fills existed still says that 900 holds 5
             self.assertFalse(store.record_fill("5", "900"))
             self.assertTrue(store.record_fill("8", "900"))
+            self.assertEqual(store.category_sources("900"), {})
             store.close()
 
     def test_a_target_remembers_every_source_filled_into_it(self) -> None:
@@ -1105,16 +1220,33 @@ In `tests/test_core.py`, `test_store_targets_per_source` gets the flag (replace 
             self.assertTrue(store.holds_another("900", "5"))
             self.assertFalse(store.holds_another("901", "5"))
             store.close()
+
+    def test_a_target_remembers_the_categories_made_for_each_source(self) -> None:
+        # names do not tell two sources apart (decision 9o), so each category a fill makes is recorded for its source;
+        # the first record of a category stays
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            self.assertEqual(store.category_sources("900"), {})
+            store.record_category("900", "5", "c1")
+            store.record_category("900", "6", "c2")
+            store.record_category("900", "6", "c1")
+            store.record_category("901", "5", "c3")
+            self.assertEqual(store.category_sources("900"), {"c1": "5", "c2": "6"})
+            store.close()
+            again = Store(tmp)
+            self.assertEqual(again.category_sources("900"), {"c1": "5", "c2": "6"})
+            self.assertEqual(again.category_sources("901"), {"c3": "5"})
+            again.close()
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `PYTHONUTF8=1 python -X utf8 -m unittest tests.test_engine tests.test_core -q`
-Expected: FAIL — `AttributeError: 'Engine' object has no attribute 'owned_guilds'` / `'fill_copy'`, and in `tests.test_core` `test_store_targets_per_source` with `TypeError: Store.set_target() takes 4 positional arguments but 5 were given`, `test_targets_table_without_shared_column_opens` with an `AssertionError` (the link has no `"shared"` key) and `test_a_target_remembers_every_source_filled_into_it` with `AttributeError: 'Store' object has no attribute 'record_fill'`.
+Expected: FAIL — `AttributeError: 'Engine' object has no attribute 'owned_guilds'` / `'fill_copy'`, and in `tests.test_core` `test_store_targets_per_source` with `TypeError: Store.set_target() takes 4 positional arguments but 5 were given`, `test_targets_table_without_shared_column_opens` with an `AssertionError` (the link has no `"shared"` key), `test_a_target_remembers_every_source_filled_into_it` with `AttributeError: 'Store' object has no attribute 'record_fill'` and `test_a_target_remembers_the_categories_made_for_each_source` with `AttributeError: 'Store' object has no attribute 'category_sources'`. (Added in the Task 4 review, round 3, onto the code without the `fill_categories` record, the four tests of a category made for another source failed on the measured mix: `test_a_second_source_named_like_a_category_of_the_first_gets_its_own_category` and `test_a_later_source_never_takes_a_category_no_fill_made` with `{'filled': 1, 'reused': 1} != {'filled': 1, 'reused': 0}`, `test_sources_of_the_same_name_get_their_own_categories` with `[0, 0, 1] != [0, 0, 0]`, `test_a_first_source_never_takes_a_category_made_for_a_later_source` with `'reused': 2 != 'reused': 1`.)
 
 - [ ] **Step 3: Implement**
 
-In `mirror/store.py`, the `targets` table in `SCHEMA` gets `shared INTEGER NOT NULL DEFAULT 0` after `target_name`, and `SCHEMA` gets the `fills` table after it:
+In `mirror/store.py`, the `targets` table in `SCHEMA` gets `shared INTEGER NOT NULL DEFAULT 0` after `target_name`, and `SCHEMA` gets the `fills` and `fill_categories` tables after it (an older file gets them from `CREATE TABLE IF NOT EXISTS`):
 
 ```sql
 CREATE TABLE IF NOT EXISTS fills (
@@ -1122,6 +1254,12 @@ CREATE TABLE IF NOT EXISTS fills (
     source_guild_id TEXT NOT NULL,
     shared INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (target_guild_id, source_guild_id)
+);
+CREATE TABLE IF NOT EXISTS fill_categories (
+    target_guild_id TEXT NOT NULL,
+    category_id TEXT NOT NULL,
+    source_guild_id TEXT NOT NULL,
+    PRIMARY KEY (target_guild_id, category_id)
 );
 ```
 
@@ -1138,7 +1276,7 @@ CREATE TABLE IF NOT EXISTS fills (
         )
 ```
 
-and `set_target` / `record_fill` / `holds_another` / `targets` carry it:
+and `set_target` / `record_fill` / `holds_another` / `record_category` / `category_sources` / `targets` carry it:
 
 ```python
     def set_target(self, source_guild_id: str, target_guild_id: str, target_name: str, shared: bool = False) -> None:
@@ -1185,6 +1323,23 @@ and `set_target` / `record_fill` / `holds_another` / `targets` carry it:
             (str(target_guild_id), str(source_guild_id)),
         ).fetchone()
         return other is not None
+
+    def record_category(self, target_guild_id: str, source_guild_id: str, category_id: str) -> None:
+        """Record that a fill of this source made that category in the target (decision 9o): it is this source's,
+        whatever its name, since two sources can carry the same name. The first record of a category stays."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO fill_categories (target_guild_id, category_id, source_guild_id) VALUES (?, ?, ?)",
+            (str(target_guild_id), str(category_id), str(source_guild_id)),
+        )
+        self.conn.commit()
+
+    def category_sources(self, target_guild_id: str) -> dict[str, str]:
+        """The categories fills made in the target, each with the source it was made for."""
+        rows = self.conn.execute(
+            "SELECT category_id, source_guild_id FROM fill_categories WHERE target_guild_id = ?",
+            (str(target_guild_id),),
+        ).fetchall()
+        return {str(row["category_id"]): str(row["source_guild_id"]) for row in rows}
 
     def targets(self) -> dict[str, dict[str, Any]]:
         rows = self.conn.execute("SELECT source_guild_id, target_guild_id, target_name, shared FROM targets").fetchall()
@@ -1240,11 +1395,23 @@ In `mirror/engine.py` (`from .provision import copy_layout, same_name, webhook_n
         # with another source in the target, first or later, a channel of the same name outside this source's
         # category may be that source's channel (decision 9o)
         alone = not self.store.holds_another(target_id, source_id)
+        # a category is the source's a fill made it for, not whoever carries its name: server names are not unique,
+        # and a later source's "<source>" can be a category of the first (decision 9o). A later source uses only the
+        # categories made for it, the first source also those no fill made (the server's own, decision 9i)
+        made = self.store.category_sources(target_id)
+        existing = [
+            item
+            for item in existing
+            if not isinstance(item, dict)
+            or item.get("type") != 4
+            or made.get(str(item.get("id") or "")) == source_id
+            or (not shared and str(item.get("id") or "") not in made)
+        ]
         source_name = rows[0].get("guild_name") or "server"
         layout = copy_layout(source_name, rows, shared)
         self.note(f"filling {target['name']} from {source_name}")
         before = {str(row["channel_id"]): str(row.get("webhook_url") or "") for row in rows}
-        pairs, reused = await self._fill(http, target_id, layout, existing, before, alone)
+        pairs, reused = await self._fill(http, target_id, layout, existing, before, alone, source_id)
         # a fill covers every ticked channel (decision 9n), an own webhook or an earlier copy's URL included; the
         # store has no mark of who made a URL, so each one this fill changes is counted and noted, never kept
         replaced = sum(1 for source, url in pairs if before.get(source) and before[source] != url)
@@ -1268,13 +1435,15 @@ In `mirror/engine.py` (`from .provision import copy_layout, same_name, webhook_n
         existing: list[dict[str, Any]],
         before: dict[str, str],
         alone: bool,
+        source_id: str,
     ) -> tuple[list[tuple[str, str]], int]:
         """Find or create each channel of the layout in the target and give it a webhook (decisions 9i, 9o). A
-        channel is found again by `same_name` under its own category (loose for a loose one). One of the same name
-        elsewhere is taken when it carries the row's webhook (`before`), or, when none does, if the target holds
-        no other source (`alone`), since it may otherwise be another source's channel. An existing channel serves
-        one row only, a category is created only for a channel created under it, and a channel whose category
-        Discord refuses is skipped, never put loose."""
+        channel is found again by `same_name` under its own category (loose for a loose one; `existing` holds only
+        the categories this source may use). One of the same name elsewhere is taken when it carries the row's
+        webhook (`before`), or, when none does, if the target holds no other source (`alone`), since it may
+        otherwise be another source's channel. An existing channel serves one row only, a category is created only
+        for a channel created under it and recorded for `source_id` as soon as Discord made it, and a channel whose
+        category Discord refuses is skipped, never put loose."""
         categories: dict[str, str] = {}
         texts: list[dict[str, Any]] = []
         for item in existing:
@@ -1350,6 +1519,7 @@ In `mirror/engine.py` (`from .provision import copy_layout, same_name, webhook_n
                 continue
             if isinstance(created, dict) and created.get("id"):
                 parents[category["key"]] = str(created["id"])
+                self.store.record_category(target_id, source_id, str(created["id"]))
             else:
                 self.note(f"category {category['name']} was not created")
             await self._wait(0.3)

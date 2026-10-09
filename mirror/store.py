@@ -58,6 +58,12 @@ CREATE TABLE IF NOT EXISTS fills (
     shared INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (target_guild_id, source_guild_id)
 );
+CREATE TABLE IF NOT EXISTS fill_categories (
+    target_guild_id TEXT NOT NULL,
+    category_id TEXT NOT NULL,
+    source_guild_id TEXT NOT NULL,
+    PRIMARY KEY (target_guild_id, category_id)
+);
 """
 
 
@@ -247,6 +253,23 @@ class Store:
             (str(target_guild_id), str(source_guild_id)),
         ).fetchone()
         return other is not None
+
+    def record_category(self, target_guild_id: str, source_guild_id: str, category_id: str) -> None:
+        """Record that a fill of this source made that category in the target (decision 9o): it is this source's,
+        whatever its name, since two sources can carry the same name. The first record of a category stays."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO fill_categories (target_guild_id, category_id, source_guild_id) VALUES (?, ?, ?)",
+            (str(target_guild_id), str(category_id), str(source_guild_id)),
+        )
+        self.conn.commit()
+
+    def category_sources(self, target_guild_id: str) -> dict[str, str]:
+        """The categories fills made in the target, each with the source it was made for."""
+        rows = self.conn.execute(
+            "SELECT category_id, source_guild_id FROM fill_categories WHERE target_guild_id = ?",
+            (str(target_guild_id),),
+        ).fetchall()
+        return {str(row["category_id"]): str(row["source_guild_id"]) for row in rows}
 
     def targets(self) -> dict[str, dict[str, Any]]:
         rows = self.conn.execute("SELECT source_guild_id, target_guild_id, target_name, shared FROM targets").fetchall()

@@ -304,11 +304,23 @@ class Engine:
         # with another source in the target, first or later, a channel of the same name outside this source's
         # category may be that source's channel (decision 9o)
         alone = not self.store.holds_another(target_id, source_id)
+        # a category is the source's a fill made it for, not whoever carries its name: server names are not unique,
+        # and a later source's "<source>" can be a category of the first (decision 9o). A later source uses only the
+        # categories made for it, the first source also those no fill made (the server's own, decision 9i)
+        made = self.store.category_sources(target_id)
+        existing = [
+            item
+            for item in existing
+            if not isinstance(item, dict)
+            or item.get("type") != 4
+            or made.get(str(item.get("id") or "")) == source_id
+            or (not shared and str(item.get("id") or "") not in made)
+        ]
         source_name = rows[0].get("guild_name") or "server"
         layout = copy_layout(source_name, rows, shared)
         self.note(f"filling {target['name']} from {source_name}")
         before = {str(row["channel_id"]): str(row.get("webhook_url") or "") for row in rows}
-        pairs, reused = await self._fill(http, target_id, layout, existing, before, alone)
+        pairs, reused = await self._fill(http, target_id, layout, existing, before, alone, source_id)
         # a fill covers every ticked channel (decision 9n), an own webhook or an earlier copy's URL included; the
         # store has no mark of who made a URL, so each one this fill changes is counted and noted, never kept
         replaced = sum(1 for source, url in pairs if before.get(source) and before[source] != url)
@@ -332,13 +344,15 @@ class Engine:
         existing: list[dict[str, Any]],
         before: dict[str, str],
         alone: bool,
+        source_id: str,
     ) -> tuple[list[tuple[str, str]], int]:
         """Find or create each channel of the layout in the target and give it a webhook (decisions 9i, 9o). A
-        channel is found again by `same_name` under its own category (loose for a loose one). One of the same name
-        elsewhere is taken when it carries the row's webhook (`before`), or, when none does, if the target holds
-        no other source (`alone`), since it may otherwise be another source's channel. An existing channel serves
-        one row only, a category is created only for a channel created under it, and a channel whose category
-        Discord refuses is skipped, never put loose."""
+        channel is found again by `same_name` under its own category (loose for a loose one; `existing` holds only
+        the categories this source may use). One of the same name elsewhere is taken when it carries the row's
+        webhook (`before`), or, when none does, if the target holds no other source (`alone`), since it may
+        otherwise be another source's channel. An existing channel serves one row only, a category is created only
+        for a channel created under it and recorded for `source_id` as soon as Discord made it, and a channel whose
+        category Discord refuses is skipped, never put loose."""
         categories: dict[str, str] = {}
         texts: list[dict[str, Any]] = []
         for item in existing:
@@ -414,6 +428,7 @@ class Engine:
                 continue
             if isinstance(created, dict) and created.get("id"):
                 parents[category["key"]] = str(created["id"])
+                self.store.record_category(target_id, source_id, str(created["id"]))
             else:
                 self.note(f"category {category['name']} was not created")
             await self._wait(0.3)
