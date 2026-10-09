@@ -1640,6 +1640,20 @@ git commit -m "Fill a server the owner owns with a source's ticked channels, reu
         resp = await client.post("/api/guilds/5/fill", data="x", headers={"Content-Type": "text/plain"})
         self.assertEqual(resp.status, 415)
 
+    async def test_targets_route_lists_the_owned_servers(self) -> None:
+        client = await self.client()
+        engine = client.server.app["engine"]
+
+        async def owned() -> list[dict]:
+            return [{"id": "901", "name": "Alpha"}, {"id": "900", "name": "zeta copy"}]
+
+        engine.owned_guilds = owned
+        resp = await client.get("/api/targets")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(
+            await resp.json(), {"targets": [{"id": "901", "name": "Alpha"}, {"id": "900", "name": "zeta copy"}]}
+        )
+
     async def test_fill_route_calls_the_engine_and_returns_the_report(self) -> None:
         client = await self.client()
         engine = client.server.app["engine"]
