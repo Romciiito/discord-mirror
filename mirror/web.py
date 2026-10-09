@@ -192,9 +192,10 @@ async def _start(app: web.Application) -> None:
 
 
 async def _end_streams(app: web.Application) -> None:
-    """End every /api/events stream before runner.cleanup waits for in-flight handlers: a connected client would
-    otherwise hold the exit for shutdown_timeout, twice over, before Engine.close runs. The CLI's own listener
-    queue is not one of these and is left alone."""
+    """End every idle /api/events stream at once, before runner.cleanup waits for in-flight handlers, so a connected
+    client does not hold the exit for the runner's shutdown_timeout before Engine.close runs. A handler blocked in
+    response.write (a client that stopped reading) does not see the sentinel: runner.cleanup cancels it once its
+    shutdown_timeout ran out twice. The CLI's own listener queue is not one of these and is left alone."""
     for queue in list(app["streams"]):
         app["engine"].listeners.discard(queue)
         try:

@@ -15,6 +15,10 @@ from aiohttp import web
 
 from .web import create_app
 
+# API clients get 5 s to finish, twice over (aiohttp waits twice), then their handlers are cancelled; Engine.close runs
+SHUTDOWN_TIMEOUT = 5.0
+
+
 class ListenError(OSError):
     """The API server could not listen on host:port; any other OSError is not reported as one."""
 
@@ -84,7 +88,7 @@ async def _serve(
     """The API server on host:port while body runs. Only a failed listen becomes a ListenError; any other
     OSError, from the app's startup or from body, keeps its traceback. With handle_signals, SIGINT and SIGTERM
     raise GracefulExit on POSIX as under web.run_app, and the cancelled body still reaches runner.cleanup."""
-    runner = web.AppRunner(app, access_log=None, handle_signals=handle_signals)
+    runner = web.AppRunner(app, access_log=None, handle_signals=handle_signals, shutdown_timeout=SHUTDOWN_TIMEOUT)
     await runner.setup()
     try:
         # inside the try as in web.run_app: a port in use still closes the engine

@@ -759,6 +759,86 @@ class GracefulExitTests(unittest.TestCase):
 
         self.assertIs(self._runner_kwargs(run).get("handle_signals"), False)
 
+    def test_both_paths_give_api_clients_the_short_shutdown_timeout(self) -> None:
+        async def done(*_args: Any) -> None:
+            pass
+
+        def headless(app: web.Application, port: int) -> None:
+            with mock.patch.object(entry, "_forever", done):
+                entry.serve(app, "127.0.0.1", port)
+
+        def with_cli(app: web.Application, port: int) -> None:
+            with mock.patch("mirror.cli.app.run_cli", done):
+                entry.serve_and_cli(app, "127.0.0.1", port)
+
+        for run in (headless, with_cli):
+            with self.subTest(run=run.__name__):
+                self.assertEqual(self._runner_kwargs(run).get("shutdown_timeout"), entry.SHUTDOWN_TIMEOUT)
+
+    def test_an_event_stream_client_that_stopped_reading_holds_the_exit_only_for_the_shutdown_timeout(self) -> None:
+        # a handler blocked in response.write (the client stopped reading, the transport is paused) does not see
+        # _end_streams' sentinel; runner.cleanup waits SHUTDOWN_TIMEOUT for it twice, then cancels it, and only then
+        # Engine.close runs. Here the write after the first line blocks on an event nobody sets
+        from aiohttp.web_runner import _raise_graceful_exit
+
+        shutdown_timeout = 1.0
+        port = _free_port()
+        app = create_app(self.tmp.name, "127.0.0.1", port)
+        engine = app["engine"]
+        seen: dict[str, Any] = {"writes": 0, "cancelled": False}
+
+        class StalledClient(web.StreamResponse):
+            async def write(self, data: bytes) -> None:
+                seen["writes"] += 1
+                if seen["writes"] == 1:
+                    await super().write(data)
+                    return
+                seen["blocked"].set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    seen["cancelled"] = True
+                    raise
+
+        def subscribe() -> None:
+            sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+            seen["sock"] = sock
+            sock.sendall(f"GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+            data = b""
+            while b": ok\n\n" not in data:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError(f"the event stream ended before its first line: {data!r}")
+                data += chunk
+
+        async def body() -> None:
+            loop = asyncio.get_running_loop()
+            seen["blocked"] = asyncio.Event()
+            await loop.run_in_executor(None, subscribe)
+            engine.note("the handler blocks writing this one")
+            await asyncio.wait_for(seen["blocked"].wait(), 5)
+            seen["interrupted"] = time.monotonic()
+            loop.call_soon(_raise_graceful_exit)
+            await asyncio.Event().wait()
+
+        try:
+            with mock.patch.object(entry, "SHUTDOWN_TIMEOUT", shutdown_timeout), mock.patch.object(
+                webmod.web, "StreamResponse", StalledClient
+            ):
+                entry._run(app, "127.0.0.1", port, body, handle_signals=True)
+            elapsed = time.monotonic() - seen["interrupted"]
+        finally:
+            if "sock" in seen:
+                seen["sock"].close()
+        self.assertTrue(seen["cancelled"], "the handler blocked in write was not cancelled")
+        self.assertEqual(len(app["streams"]), 0)
+        self.assertEqual(len(engine.listeners), 0)
+        self.assertIsNone(engine.session)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            engine.store.conn.execute("SELECT 1")
+        # the runner's default would hold this exit for two minutes; a generous guard over twice the patched timeout
+        self.assertLess(elapsed, 2 * shutdown_timeout + 10, f"the exit took {elapsed:.2f} s")
+
     def _ends_quietly(self, body: Callable[[], Awaitable[None]]) -> None:
         port = _free_port()
         app = create_app(self.tmp.name, "127.0.0.1", port)
@@ -938,11 +1018,7 @@ class GracefulExitTests(unittest.TestCase):
         port = _free_port()
         app = create_app(self.tmp.name, "127.0.0.1", port)
         engine = app["engine"]
-        real = web.AppRunner
         seen: dict[str, Any] = {}
-
-        def short_shutdown(*args: Any, **kwargs: Any) -> web.AppRunner:
-            return real(*args, shutdown_timeout=shutdown_timeout, **kwargs)
 
         def subscribe() -> None:
             # a raw socket the test keeps open until _run returned, so only the server can end the stream
@@ -965,7 +1041,7 @@ class GracefulExitTests(unittest.TestCase):
             await asyncio.Event().wait()
 
         try:
-            with mock.patch.object(web, "AppRunner", short_shutdown):
+            with mock.patch.object(entry, "SHUTDOWN_TIMEOUT", shutdown_timeout):
                 entry._run(app, "127.0.0.1", port, body, handle_signals=True)
             elapsed = time.monotonic() - seen["interrupted"]
         finally:
