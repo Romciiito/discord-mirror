@@ -797,7 +797,20 @@ class GracefulExitTests(unittest.TestCase):
 
         port = _free_port()
         app = create_app(self.tmp.name, "127.0.0.1", port)
-        self.addCleanup(app["engine"].store.close)  # the second Ctrl+C may cut Engine.close before it
+        engine = app["engine"]
+
+        def close_what_the_teardown_left() -> None:
+            # the second Ctrl+C may cut Engine.close before the session and the store; an unclosed session
+            # would log from its finalizer into whichever later test runs then
+            if engine.session is not None:
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(engine.session.close())
+                finally:
+                    loop.close()
+            engine.store.close()
+
+        self.addCleanup(close_what_the_teardown_left)
         try:
             entry._run(app, "127.0.0.1", port, body, handle_signals=True)
         except BaseException as exc:
