@@ -38,7 +38,8 @@ _Avoid_: provision, sync, deploy
 A webhook URL the owner supplies for one ticked source channel; messages from that
 channel are posted there. It belongs to whoever created it, not to the account that
 reads the source, so the target can be any server, including one the account is not in.
-A fill of its source server replaces it with the copy's webhook.
+A fill of its source server replaces it with the copy's webhook when the fill fills
+that channel, and leaves it when the fill skips the channel.
 _Avoid_: global webhook, custom webhook
 
 **Target**:
