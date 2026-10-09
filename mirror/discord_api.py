@@ -15,6 +15,7 @@ log = logging.getLogger("mirror.api")
 API = "https://discord.com/api/v9"
 CAPABILITIES = 22525
 BUILD_RE = re.compile(r'"BUILD_NUMBER"\s*:\s*"(\d+)"')
+CLOUDFLARE_RE = re.compile(r"error code:\s*(\d+)", re.IGNORECASE)  # Cloudflare's block and rate-limit pages
 WEBHOOK_RE = re.compile(
     r"^https://(?:(?:canary|ptb)\.)?discord(?:app)?\.com/api/webhooks/(\d+)/([\w-]+)/?$"
 )
@@ -24,9 +25,41 @@ LAUNCH_MASK = (
 
 
 class ApiError(RuntimeError):
-    def __init__(self, status: int, detail: str) -> None:
+    def __init__(self, status: int, detail: str, payload: dict[str, Any] | None = None) -> None:
         super().__init__(detail)
         self.status = status
+        self.payload = payload or {}  # Discord's JSON error object, when Discord sent one
+
+    @property
+    def reason(self) -> str:
+        """Discord's own words for the refusal: `403: <message> (code <n>)`."""
+        message = str(self.payload.get("message") or "").strip()[:160]
+        if not message:
+            reason = f"HTTP {self.status}"
+        elif message.startswith(f"{self.status}:"):
+            reason = message
+        else:
+            reason = f"{self.status}: {message}"
+        code = self.payload.get("code")
+        return f"{reason} (code {code})" if code else reason
+
+
+class NotDiscordAnswer(ApiError):
+    """An answer that is not Discord's JSON, such as a Cloudflare block page: Discord itself was not reached."""
+
+    def __init__(self, status: int, detail: str, cloudflare: str = "") -> None:
+        super().__init__(status, detail)
+        self.cloudflare = cloudflare
+
+    @property
+    def reason(self) -> str:
+        return _foreign_reason(self.status, self.cloudflare)
+
+
+def _foreign_reason(status: int, cloudflare: str) -> str:
+    if cloudflare:
+        return f"HTTP {status}, Cloudflare error code {cloudflare}"
+    return f"HTTP {status}, not a Discord answer"
 
 
 def launch_signature() -> str:
@@ -120,36 +153,45 @@ class DiscordHTTP:
         return headers
 
     async def call(self, method: str, path: str, **kwargs: Any) -> Any:
+        _status, data = await self._answer(method, path, **kwargs)
+        return data
+
+    async def _answer(self, method: str, path: str, **kwargs: Any) -> tuple[int, Any]:
         url = path if path.startswith("https://") else f"{API}{path}"
         headers = self.headers(json_body="json" in kwargs)
         extra = kwargs.pop("headers", None)
         if extra:
             headers.update(extra)
+        last = ""  # the body of the last 429, named when the request stays rate limited
         for _ in range(5):
             async with self.session.request(method, url, headers=headers, **kwargs) as resp:
                 if resp.status == 429:
+                    last = ""
                     try:
-                        body = await resp.json(content_type=None)
-                        delay = float(body.get("retry_after", 1))
+                        last = await resp.text()
+                        delay = float(json.loads(last).get("retry_after", 1))
                     except Exception:
                         delay = 1.0
                     await asyncio.sleep(min(delay, 30))
                     continue
                 text = await resp.text()
                 if resp.status >= 400:
-                    raise ApiError(resp.status, _fail_detail(method, path, text))
+                    raise _refusal(resp.status, _fail_detail(method, path, resp.status, text), text)
                 if not text:
-                    return None
+                    return resp.status, None
                 try:
-                    return json.loads(text)
+                    return resp.status, json.loads(text)
                 except json.JSONDecodeError:
-                    return text
-        raise ApiError(429, f"{method} {path} stayed rate limited")
+                    return resp.status, text
+        code = cloudflare_code(last)
+        raise _refusal(429, f"{method} {path} stayed rate limited" + (f" (Cloudflare error code {code})" if code else ""), last)
 
     async def me(self) -> dict[str, Any]:
-        data = await self.call("GET", "/users/@me")
+        status, data = await self._answer("GET", "/users/@me")
         if not isinstance(data, dict) or "id" not in data:
-            raise ApiError(401, "token was rejected")
+            # a 2xx without the user, such as a block page served as 200: not a refusal of the token
+            code = cloudflare_code(data) if isinstance(data, str) else ""
+            raise NotDiscordAnswer(status, f"GET /users/@me failed ({_foreign_reason(status, code)})", code)
         return data
 
     async def guilds(self) -> list[dict[str, Any]]:
@@ -211,14 +253,34 @@ class DiscordHTTP:
         return str(data["url"])
 
 
-def _fail_detail(method: str, path: str, text: str) -> str:
-    fallback = f"{method} {path} failed"
+def cloudflare_code(text: str) -> str:
+    """The Cloudflare error code in a page that is not Discord's answer (`error code: 1020`), or ""."""
+    match = CLOUDFLARE_RE.search(text or "")
+    return match.group(1) if match else ""
+
+
+def _discord_error(text: str) -> dict[str, Any] | None:
+    """Discord's JSON error object in a response body, or None when the body is not one (Cloudflare pages are not)."""
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
-        return fallback
-    if not isinstance(payload, dict):
-        return fallback
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _refusal(status: int, detail: str, text: str) -> ApiError:
+    payload = _discord_error(text)
+    if payload is None:
+        return NotDiscordAnswer(status, detail, cloudflare_code(text))
+    return ApiError(status, detail, payload)
+
+
+def _fail_detail(method: str, path: str, status: int, text: str) -> str:
+    fallback = f"{method} {path} failed (HTTP {status})"
+    payload = _discord_error(text)
+    if payload is None:
+        code = cloudflare_code(text)
+        return f"{method} {path} failed (HTTP {status}, Cloudflare error code {code})" if code else fallback
     if payload.get("captcha_sitekey") or payload.get("captcha_key"):
         return "Discord asked for a captcha before it would create the server"
     message = payload.get("message")
