@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
+import logging
 import os
+import socket
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import aiohttp
@@ -15,6 +22,8 @@ from aiohttp.test_utils import TestClient, TestServer
 import mirror.__main__ as entry
 import mirror.web as webmod
 from mirror.web import create_app, hostname
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 class HostnameTests(unittest.TestCase):
@@ -175,18 +184,326 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MainTests(unittest.TestCase):
-    def test_main_passes_bind(self) -> None:
+    """configure_logging opens a file under DATA_DIR; every test closes the handlers it added, or
+    TemporaryDirectory cannot delete the open file on Windows."""
+
+    def setUp(self) -> None:
+        self.root = logging.getLogger()
+        self.before = list(self.root.handlers)
+        self.level = self.root.level
+        self.access = logging.getLogger("aiohttp.access").propagate
+
+    def tearDown(self) -> None:
+        for handler in list(self.root.handlers):
+            if handler not in self.before:
+                self.root.removeHandler(handler)
+                handler.close()
+        self.root.setLevel(self.level)
+        logging.getLogger("aiohttp.access").propagate = self.access
+
+    def test_main_runs_server_only_without_tty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env = {"HOST": "0.0.0.0", "PORT": "9000", "DATA_DIR": tmp}
-            with mock.patch.dict(os.environ, env), mock.patch("logging.basicConfig"), mock.patch.object(
+            with mock.patch.dict(os.environ, env), mock.patch.object(entry, "wants_cli", return_value=False), mock.patch.object(
                 entry, "create_app"
-            ) as make, mock.patch.object(entry.web, "run_app") as run:
+            ) as make, mock.patch.object(entry.web, "run_app") as run, mock.patch.object(entry, "serve_and_cli") as both:
                 entry.main()
             make.assert_called_once_with(tmp, "0.0.0.0", 9000)
             run.assert_called_once()
+            both.assert_not_called()
             self.assertIs(run.call_args.args[0], make.return_value)
             self.assertEqual(run.call_args.kwargs["host"], "0.0.0.0")
             self.assertEqual(run.call_args.kwargs["port"], 9000)
+            self.assertIsNone(run.call_args.kwargs["access_log"])
+            self.assertTrue(os.path.isfile(os.path.join(tmp, "mando.log")))
+            self.tearDown()
+
+    def test_main_runs_server_and_cli_with_a_tty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"DATA_DIR": tmp}
+            with mock.patch.dict(os.environ, env), mock.patch.object(entry, "wants_cli", return_value=True), mock.patch.object(
+                entry, "create_app"
+            ) as make, mock.patch.object(entry.web, "run_app") as run, mock.patch.object(entry, "serve_and_cli") as both:
+                entry.main()
+            both.assert_called_once_with(make.return_value, "127.0.0.1", 8765)
+            run.assert_not_called()
+            self.tearDown()
+
+    def test_wants_cli_needs_both_ttys(self) -> None:
+        with mock.patch("sys.stdin") as stdin, mock.patch("sys.stdout") as stdout:
+            stdin.isatty.return_value = True
+            stdout.isatty.return_value = False
+            self.assertFalse(entry.wants_cli())
+            stdout.isatty.return_value = True
+            self.assertTrue(entry.wants_cli())
+
+    def test_wants_cli_without_stdin_is_false(self) -> None:
+        # Python sets sys.stdin to None when fd 0 is closed (`python -m mirror <&-`); the server
+        # must still start, as it did before the CLI existed
+        with mock.patch("sys.stdin", None), mock.patch("sys.stdout") as stdout:
+            stdout.isatty.return_value = True
+            self.assertFalse(entry.wants_cli())
+
+    def test_logging_goes_to_the_file_not_the_console(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            entry.configure_logging(tmp)
+            kinds = [type(h).__name__ for h in self.root.handlers if h not in self.before]
+            self.assertEqual(kinds, ["RotatingFileHandler"])
+            self.assertFalse(logging.getLogger("aiohttp.access").propagate)
+            self.tearDown()
+
+    def test_server_only_path_runs_without_prompt_toolkit(self) -> None:
+        # the CI smoke step and scripts start `python -m mirror` without a terminal; that path must not
+        # need the CLI's library, so it is blocked here (None in sys.modules makes the import fail)
+        code = (
+            "import sys\n"
+            "sys.modules['prompt_toolkit'] = None\n"
+            "from unittest import mock\n"
+            "import mirror.__main__ as entry\n"
+            "with mock.patch.object(entry.web, 'run_app') as run:\n"
+            "    entry.main()\n"
+            "print(run.call_count)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, DATA_DIR=tmp, PYTHONUTF8="1")
+            done = subprocess.run(
+                [sys.executable, "-c", code], cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(done.stdout.strip(), "1")
+            self.assertTrue(os.path.isfile(os.path.join(tmp, "mando.log")))
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+class ServeAndCliTests(unittest.TestCase):
+    """serve_and_cli with the CLI replaced: the API server it runs next to the CLI and the cleanup after."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_the_api_answers_while_the_cli_runs_and_the_engine_closes_after(self) -> None:
+        port = _free_port()
+        app = create_app(self.tmp.name, "127.0.0.1", port)
+        engine = app["engine"]
+        seen: dict[str, Any] = {}
+
+        async def cli(given: Any) -> None:
+            seen["engine"] = given
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"http://127.0.0.1:{port}/api/state") as resp:
+                    seen["state"] = resp.status
+
+        with mock.patch("mirror.cli.app.run_cli", cli), mock.patch.object(
+            engine, "close", wraps=engine.close
+        ) as close, self.assertNoLogs("aiohttp.access"):
+            entry.serve_and_cli(app, "127.0.0.1", port)
+        self.assertIs(seen["engine"], engine)
+        self.assertEqual(seen["state"], 200)
+        close.assert_awaited_once()
+
+    def test_a_port_in_use_still_closes_the_engine(self) -> None:
+        with socket.socket() as taken:
+            taken.bind(("127.0.0.1", 0))
+            taken.listen()
+            port = taken.getsockname()[1]
+            app = create_app(self.tmp.name, "127.0.0.1", port)
+            engine = app["engine"]
+            with mock.patch("mirror.cli.app.run_cli") as cli, mock.patch.object(engine, "close", wraps=engine.close) as close:
+                with self.assertRaises(OSError):
+                    entry.serve_and_cli(app, "127.0.0.1", port)
+        cli.assert_not_called()
+        close.assert_awaited_once()
+
+    def test_ctrl_c_before_the_cli_took_the_terminal_ends_quietly(self) -> None:
+        port = _free_port()
+        app = create_app(self.tmp.name, "127.0.0.1", port)
+        engine = app["engine"]
+
+        async def cli(_engine: Any) -> None:
+            raise KeyboardInterrupt
+
+        with mock.patch("mirror.cli.app.run_cli", cli), mock.patch.object(engine, "close", wraps=engine.close) as close:
+            try:
+                entry.serve_and_cli(app, "127.0.0.1", port)
+            except KeyboardInterrupt:
+                self.fail("Ctrl+C while the CLI starts ends in a traceback")
+        close.assert_awaited_once()
+
+
+@contextlib.contextmanager
+def _pipe_terminal():
+    """A prompt_toolkit session on a pipe instead of a terminal: the test types into the pipe."""
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        yield pipe
+
+
+async def _until(check: Any, timeout: float = 3.0) -> bool:
+    loop = asyncio.get_running_loop()
+    end = loop.time() + timeout
+    while not check():
+        if loop.time() > end:
+            return False
+        await asyncio.sleep(0.02)
+    return True
+
+
+async def _ended(task: asyncio.Future, timeout: float = 3.0) -> bool:
+    """Whether the app ended in time. One that did not is cancelled together with every other task (a
+    prompt_toolkit "Press ENTER" task keeps a cancelled app waiting), so a broken CLI fails the test
+    instead of hanging the run."""
+    done, _ = await asyncio.wait({task}, timeout=timeout)
+    if not done:
+        for other in asyncio.all_tasks():
+            if other is not asyncio.current_task():
+                other.cancel()
+        await asyncio.wait({task}, timeout=timeout)
+        return False
+    task.result()
+    return True
+
+
+def _recording_controller() -> Any:
+    from mirror.cli.controller import Controller
+    from tests.test_cli_controller import FakeEngine
+
+    class Recording(Controller):
+        def __init__(self, engine: Any) -> None:
+            super().__init__(engine)
+            self.calls: list[tuple] = []
+
+        async def press(self, key: str, plain: bool = False) -> None:
+            self.calls.append(("press", key, plain))
+            await super().press(key, plain)
+
+        async def paste(self, text: str) -> None:
+            self.calls.append(("paste", text))
+            await super().paste(text)
+
+    return Recording(FakeEngine())
+
+
+class CliAppTests(unittest.IsolatedAsyncioTestCase):
+    """The terminal layer driven through a pipe: keys in, controller calls out, rendered lines on screen."""
+
+    async def test_keys_and_paste_reach_the_controller(self) -> None:
+        from mirror.cli.app import build
+
+        controller = _recording_controller()
+        with _pipe_terminal() as pipe:
+            app = build(controller)
+            task = asyncio.ensure_future(app.run_async())
+            for chunk in ["x", "\x1b[B", "\x1b[A", "\x1b[C", "\x1b[D", "\x7f", "\x08", "\t", "é"]:
+                pipe.send_text(chunk)
+            self.assertTrue(await _until(lambda: len(controller.calls) >= 8))
+            pipe.send_text("\x1b")  # a lone Escape is told apart from a sequence after ttimeoutlen
+            self.assertTrue(await _until(lambda: len(controller.calls) >= 9))
+            pipe.send_text("\x1b[200~ab\r\ncd\re\x1b[201~")
+            pipe.send_text("\r")
+            self.assertTrue(await _until(lambda: len(controller.calls) >= 11))
+            pipe.send_text("\x11")
+            self.assertTrue(await _ended(task))
+        self.assertEqual(
+            controller.calls,
+            [
+                ("press", "x", True), ("press", "ArrowDown", False), ("press", "ArrowUp", False),
+                ("press", "ArrowRight", False), ("press", "ArrowLeft", False), ("press", "Backspace", False),
+                ("press", "Backspace", False), ("press", "é", True), ("press", "Escape", False),
+                ("paste", "ab\ncd\ne"), ("press", "Enter", False),
+            ],
+        )
+
+    async def test_ctrl_c_and_ctrl_q_end_the_cli(self) -> None:
+        from mirror.cli.app import build
+
+        for key in ("\x03", "\x11"):
+            with self.subTest(key=key), _pipe_terminal() as pipe:
+                task = asyncio.ensure_future(build(_recording_controller()).run_async())
+                pipe.send_text(key)
+                self.assertTrue(await _ended(task))
+
+    async def test_sigint_ends_the_cli(self) -> None:
+        # on POSIX prompt_toolkit turns SIGINT into a <sigint> key while it runs (on Windows Ctrl+C is a key)
+        from mirror.cli.app import build
+
+        with _pipe_terminal():
+            app = build(_recording_controller())
+            task = asyncio.ensure_future(app.run_async())
+            self.assertTrue(await _until(lambda: app.is_running))
+            app.key_processor.send_sigint()
+            self.assertTrue(await _ended(task))
+
+    async def test_the_screen_shows_the_rendered_lines_for_the_terminal_size(self) -> None:
+        from mirror.cli.app import build
+        from mirror.cli.render import render
+
+        controller = _recording_controller()
+        with _pipe_terminal() as pipe:
+            app = build(controller)
+            task = asyncio.ensure_future(app.run_async())
+            self.assertTrue(await _until(lambda: app.is_running))
+            size = app.output.get_size()
+            content = app.layout.current_control.create_content(size.columns, size.rows)
+            shown = ["".join(text for _style, text, *_rest in content.get_line(i)) for i in range(content.line_count)]
+            pipe.send_text("\x11")
+            self.assertTrue(await _ended(task))
+        self.assertEqual(shown, render(controller, size.columns, size.rows))
+
+    async def test_engine_events_reach_the_controller_and_the_listener_goes_at_exit(self) -> None:
+        from mirror.cli import app as cliapp
+        from mirror.cli.controller import Controller
+        from tests.test_cli_controller import FakeEngine
+
+        made: list[Controller] = []
+
+        class Kept(Controller):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                made.append(self)
+
+        engine = FakeEngine()
+        with _pipe_terminal() as pipe, mock.patch.object(cliapp, "Controller", Kept):
+            task = asyncio.ensure_future(cliapp.run_cli(engine))
+            self.assertTrue(await _until(lambda: bool(engine.listeners)))
+            for queue in list(engine.listeners):
+                queue.put_nowait({"kind": "mirrored", "mirrored": 3})
+            self.assertTrue(await _until(lambda: bool(made) and made[0].snap.get("mirrored") == 3))
+            pipe.send_text("\x11")
+            self.assertTrue(await _ended(task))
+        self.assertEqual(engine.listeners, set())
+
+    async def test_a_loop_error_goes_to_the_log_not_over_the_screen(self) -> None:
+        # the engine, the gateway and the API server share the CLI's loop; prompt_toolkit's own handler
+        # would print their unhandled errors over the screen and wait for Enter
+        from prompt_toolkit.application import get_app
+
+        from mirror.cli.app import run_cli
+        from tests.test_cli_controller import FakeEngine
+
+        engine = FakeEngine()
+        printed = io.StringIO()
+        with _pipe_terminal() as pipe, contextlib.redirect_stdout(printed), self.assertLogs("asyncio", "ERROR") as logs:
+            task = asyncio.ensure_future(run_cli(engine))
+            self.assertTrue(await _until(lambda: get_app().is_running))
+            asyncio.get_running_loop().call_exception_handler(
+                {"message": "engine task failed", "exception": RuntimeError("boom")}
+            )
+            await asyncio.sleep(0.2)
+            pipe.send_text("\x11")
+            ended = await _ended(task)
+            self.assertEqual(printed.getvalue(), "")
+            self.assertTrue(ended, "Ctrl+Q no longer ends the CLI")
+        self.assertIn("engine task failed", "\n".join(logs.output))
 
 
 if __name__ == "__main__":
