@@ -208,11 +208,6 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         hooks = {item["channel_id"]: item["webhook_url"] for item in self.store.selection()}
         self.assertEqual(hooks, {"10": HOOK, "11": HOOK_B})
         self.assertEqual(self.store.hooks(), {"10": HOOK, "11": HOOK_B})
-        self.store.clear_destination()
-        self.assertEqual({item["webhook_url"] for item in self.store.selection()}, {""})
-        self.assertEqual(self.store.hooks(), {})
-        self.store.replace_selection([row("10")])
-        self.assertEqual(self.store.selection()[0]["webhook_url"], "")
 
     def test_store_selection_webhook_updates_hooks(self) -> None:
         self.store.replace_selection([row("10", HOOK)])
@@ -433,7 +428,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await self.engine.check_token(TOKEN), {"result": "unreachable", "reason": reason})
 
     async def test_update_after_restart_edits_relay(self) -> None:
-        self.store.set_options(0, False, "", True)
+        self.store.set_options(0, False, True)
         self.store.replace_selection([row("8", HOOK)])
         self.store.remember_relay("9", "8", HOOK, "77")
         self.engine.names = {"8": ("Desk", "general")}
@@ -456,7 +451,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relay.creates, [])
 
     async def test_partial_update_without_author_is_ignored(self) -> None:
-        self.store.set_options(0, False, "", True)
+        self.store.set_options(0, False, True)
         self.store.replace_selection([row("8", HOOK)])
         self.store.remember_relay("9", "8", HOOK, "77")
         self.engine.names = {"8": ("Desk", "general")}
@@ -471,7 +466,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.engine.feed, {})
 
     async def test_full_update_without_relay_row_creates(self) -> None:
-        self.store.set_options(0, False, "", True)
+        self.store.set_options(0, False, True)
         self.store.replace_selection([row("8", HOOK)])
         self.engine.names = {"8": ("Desk", "general")}
         relay = FakeRelay()
@@ -560,32 +555,9 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("clyde", name.casefold())
         self.assertFalse(any(method == "DELETE" for method, path, body in http.calls))
 
-    async def test_provision_reports_gone_destination(self) -> None:
-        self.store.set_dest_guild("1")
-        self.engine.http = FakeHTTP(gone=ApiError(404, "Unknown Guild"))
-        with self.assertRaises(ApiError) as caught:
-            await self.engine._provision([row("10")])
-        self.assertIn("new server on next start", str(caught.exception))
-        self.engine.http = FakeHTTP(gone=ApiError(500, "boom"))
-        with self.assertRaises(ApiError) as caught:
-            await self.engine._provision([row("10")])
-        self.assertEqual(caught.exception.status, 500)
-        self.engine.http = None
-
-    async def test_provision_into_existing_server_reuses_categories(self) -> None:
-        self.store.set_dest_guild("500")
-        http = FakeHTTP(existing=[{"id": "c1", "type": 4, "name": "Desk"}])
-        self.engine.http = http
-        self.store.replace_selection([row("10")])
-        await self.engine._provision(self.store.selection())
-        self.assertFalse(any(body.get("type") == 4 for method, path, body in http.calls))
-        self.assertTrue(self.store.selection()[0]["webhook_url"].startswith("https://discord.com/api/webhooks/"))
-        self.engine.http = None
-
     async def test_start_while_running_provisions_and_refreshes(self) -> None:
         http = FakeHTTP()
         self.engine.http = http
-        self.store.set_dest_guild("500")
         self.store.replace_selection([row("10", HOOK)])
         with mock.patch.object(engine_mod, "Gateway", FakeGateway):
             await self.engine.start()
@@ -606,7 +578,6 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_during_running_start_is_respected(self) -> None:
         self.engine.http = FakeHTTP()
-        self.store.set_dest_guild("500")
         self.store.replace_selection([row("10", HOOK)])
         with mock.patch.object(engine_mod, "Gateway", FakeGateway):
             await self.engine.start()
@@ -640,22 +611,6 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sorted(FakeGateway.made[0].subs[-1]["5"]), ["10", "11"])
             await self.engine.stop()
 
-    async def test_copy_guild_keeps_new_destination(self) -> None:
-        http = FakeHTTP()
-        http.listed = [{"id": "5", "name": "Src", "owner": True, "permissions": "0"}]
-        http.sources["5"] = [{"id": "10", "type": 0, "name": "discord-news", "position": 0}]
-        self.engine.http = http
-        self.store.fill_webhooks([("99", HOOK_B)])
-        self.store.replace_selection([row("99", HOOK_B)])
-        with mock.patch.object(engine_mod, "Gateway", FakeGateway):
-            report = await self.engine.copy_guild("5")
-            self.assertEqual(report["destination_id"], "900")
-            self.assertEqual(self.store.options()["dest_guild_id"], "900")
-            self.assertNotIn("99", self.store.hooks())
-            hooks = [body["name"] for method, path, body in http.calls if path.endswith("/webhooks")]
-            self.assertEqual(hooks, ["dis.cord-news"])
-            await self.engine.stop()
-
     def test_text_types_consistent(self) -> None:
         self.assertIs(engine_mod.TEXT_TYPES, access.TEXT_TYPES)
         self.assertNotIn(15, engine_mod.TEXT_TYPES)
@@ -664,7 +619,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         relay = FakeRelay()
         self.engine.relay = relay
         self.engine.store.replace_selection([row("c1", "https://discord.com/api/webhooks/1/t")])
-        self.engine.store.set_options(0, False, "", True)
+        self.engine.store.set_options(0, False, True)
         self.assertEqual(self.engine.snapshot()["mirrored"], 0)
         await self.engine._relay_create({"id": "m1", "channel_id": "c1", "content": "hi"})
         await self.engine._relay_create({"id": "m1", "channel_id": "c1", "content": "hi"})
@@ -685,7 +640,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
 
         self.engine.relay = RefusingRelay()
         self.engine.store.replace_selection([row("c1", "https://discord.com/api/webhooks/1/t")])
-        self.engine.store.set_options(0, False, "", True)
+        self.engine.store.set_options(0, False, True)
         queue: asyncio.Queue = asyncio.Queue()
         self.engine.listeners.add(queue)
         await self.engine._relay_create({"id": "m1", "channel_id": "c1", "channel_name": "general", "content": "hi"})
@@ -711,7 +666,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine.http = FakeHTTP()
         self.engine.relay = FakeRelay()
         self.store.replace_selection([row("10", HOOK)])
-        self.store.set_options(0, False, "", True)
+        self.store.set_options(0, False, True)
         queue: asyncio.Queue = asyncio.Queue()
         self.engine.listeners.add(queue)
         with mock.patch.object(engine_mod, "Gateway", FakeGateway):
@@ -739,7 +694,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine.http = FakeHTTP()
         self.engine.relay = PickyRelay()
         self.store.replace_selection([row("10", HOOK)])
-        self.store.set_options(0, False, "", True)
+        self.store.set_options(0, False, True)
         ui = Controller(self.engine)
         ui.refresh()
         queue: asyncio.Queue = asyncio.Queue()

@@ -26,7 +26,6 @@ CREATE TABLE IF NOT EXISTS options (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     backfill INTEGER NOT NULL DEFAULT 0,
     include_threads INTEGER NOT NULL DEFAULT 0,
-    global_webhook TEXT NOT NULL DEFAULT '',
     mirror INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS selection (
@@ -46,6 +45,11 @@ CREATE TABLE IF NOT EXISTS relayed (
 CREATE TABLE IF NOT EXISTS hooks (
     channel_id TEXT PRIMARY KEY,
     webhook_url TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS targets (
+    source_guild_id TEXT PRIMARY KEY,
+    target_guild_id TEXT NOT NULL,
+    target_name TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -134,11 +138,7 @@ class Store:
             os.chmod(self.path, 0o600)
 
     def _migrate(self) -> None:
-        option_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(options)")}
-        if "dest_name" not in option_cols:
-            self.conn.execute("ALTER TABLE options ADD COLUMN dest_name TEXT NOT NULL DEFAULT 'mirror'")
-        if "dest_guild_id" not in option_cols:
-            self.conn.execute("ALTER TABLE options ADD COLUMN dest_guild_id TEXT NOT NULL DEFAULT ''")
+        # old files keep the options columns global_webhook, dest_name and dest_guild_id; nothing reads them (9h)
         picked_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(selection)")}
         if "parent" not in picked_cols:
             self.conn.execute("ALTER TABLE selection ADD COLUMN parent TEXT NOT NULL DEFAULT ''")
@@ -174,42 +174,36 @@ class Store:
         self.conn.commit()
 
     def options(self) -> dict:
-        row = self.conn.execute("SELECT * FROM options WHERE id = 1").fetchone()
+        row = self.conn.execute("SELECT backfill, include_threads, mirror FROM options WHERE id = 1").fetchone()
         return {
             "backfill": int(row["backfill"]),
             "include_threads": bool(row["include_threads"]),
-            "global_webhook": row["global_webhook"] or "",
             "mirror": bool(row["mirror"]),
-            "dest_name": row["dest_name"] or "mirror",
-            "dest_guild_id": row["dest_guild_id"] or "",
         }
 
-    def set_options(
-        self,
-        backfill: int,
-        include_threads: bool,
-        global_webhook: str,
-        mirror: bool,
-        dest_name: str | None = None,
-    ) -> None:
-        if dest_name is None:
-            dest_name = self.options()["dest_name"]
-        dest_name = " ".join(str(dest_name or "").split())[:100] or "mirror"
+    def set_options(self, backfill: int, include_threads: bool, mirror: bool) -> None:
         self.conn.execute(
-            "UPDATE options SET backfill = ?, include_threads = ?, global_webhook = ?, mirror = ?, dest_name = ? WHERE id = 1",
-            (int(backfill), int(include_threads), global_webhook, int(mirror), dest_name),
+            "UPDATE options SET backfill = ?, include_threads = ?, mirror = ? WHERE id = 1",
+            (int(backfill), int(include_threads), int(mirror)),
         )
         self.conn.commit()
 
-    def set_dest_guild(self, guild_id: str) -> None:
-        self.conn.execute("UPDATE options SET dest_guild_id = ? WHERE id = 1", (guild_id,))
+    def set_target(self, source_guild_id: str, target_guild_id: str, target_name: str) -> None:
+        """The server the owner picked as the copy of one source server (decision 9b'); a later pick replaces it."""
+        self.conn.execute(
+            "INSERT INTO targets (source_guild_id, target_guild_id, target_name) VALUES (?, ?, ?) "
+            "ON CONFLICT(source_guild_id) DO UPDATE SET "
+            "target_guild_id = excluded.target_guild_id, target_name = excluded.target_name",
+            (str(source_guild_id), str(target_guild_id), str(target_name or "")[:100]),
+        )
         self.conn.commit()
 
-    def clear_destination(self) -> None:
-        self.conn.execute("UPDATE selection SET webhook_url = ''")
-        self.conn.execute("DELETE FROM hooks")
-        self.conn.execute("UPDATE options SET dest_guild_id = '' WHERE id = 1")
-        self.conn.commit()
+    def targets(self) -> dict[str, dict[str, str]]:
+        rows = self.conn.execute("SELECT source_guild_id, target_guild_id, target_name FROM targets").fetchall()
+        return {
+            str(row["source_guild_id"]): {"target_id": str(row["target_guild_id"]), "target_name": str(row["target_name"])}
+            for row in rows
+        }
 
     def fill_webhooks(self, pairs: list[tuple[str, str]]) -> None:
         for source_id, url in pairs:

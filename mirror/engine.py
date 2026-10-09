@@ -76,6 +76,7 @@ class Engine:
             "selection": self.store.selection(),
             "log": list(self.lines),
             "mirrored": self.mirrored,
+            "targets": self.store.targets(),
         }
 
     def feed_items(self) -> list[dict[str, Any]]:
@@ -341,9 +342,7 @@ class Engine:
             }
             for item in wired
         ]
-        self.store.set_options(options["backfill"], options["include_threads"], "", True)
-        self.store.clear_destination()
-        self.store.set_dest_guild(dest_id)
+        self.store.set_options(options["backfill"], options["include_threads"], True)
         self.store.replace_selection(rows)
         self.note(f"webhooks on {len(rows)} channel(s)")
         if self.running:
@@ -460,13 +459,12 @@ class Engine:
                     "topic": str(row.get("topic") or "")[:1024],
                 }
             )
-        self.store.set_options(backfill, include_threads, global_webhook, mirror, None if dest_name is None else str(dest_name))
+        self.store.set_options(backfill, include_threads, mirror)
         self.store.replace_selection(cleaned)
 
     async def reset_destination(self) -> None:
         if self.running:
             await self.stop()
-        self.store.clear_destination()
         self.note("next start creates a new server")
 
     async def start(self) -> None:
@@ -486,7 +484,7 @@ class Engine:
             raise ApiError(400, "the mirror server could not be created")
         options = self.store.options()
         if not options["mirror"]:
-            self.store.set_options(options["backfill"], options["include_threads"], "", True, options["dest_name"])
+            self.store.set_options(options["backfill"], options["include_threads"], True)
             options = self.store.options()
         if was_running:
             if self.running:
@@ -515,10 +513,10 @@ class Engine:
         http = self._require_http()
         missing = [row for row in rows if not str(row.get("webhook_url") or "").strip()]
         options = self.store.options()
-        layout = destination_layout(missing, options["dest_name"])
+        layout = destination_layout(missing, options.get("dest_name", ""))
         if not layout["channels"]:
             raise ApiError(400, "select servers first")
-        dest_id = options["dest_guild_id"]
+        dest_id = options.get("dest_guild_id", "")
         fresh = False
         existing: list[dict[str, Any]] = []
         if not dest_id:
@@ -526,7 +524,6 @@ class Engine:
             if not isinstance(created, dict) or not created.get("id"):
                 raise ApiError(500, "server was not created")
             dest_id = str(created["id"])
-            self.store.set_dest_guild(dest_id)
             fresh = True
             self.note(f"server created: {layout['name']}")
         else:
@@ -874,7 +871,7 @@ class Engine:
         options = self.store.options()
         for row in self.store.selection():
             if row["channel_id"] == parent and row["enabled"]:
-                return row["webhook_url"] or options["global_webhook"]
+                return row["webhook_url"] or options.get("global_webhook", "")
         return ""
 
     def _prefix(self, url: str) -> bool:
@@ -883,7 +880,7 @@ class Engine:
         for row in self.store.selection():
             if not row["enabled"]:
                 continue
-            target = row["webhook_url"] or options["global_webhook"]
+            target = row["webhook_url"] or options.get("global_webhook", "")
             if target == url:
                 users += 1
         return users > 1
@@ -894,8 +891,8 @@ class Engine:
             return False
         options = self.store.options()
         known = set()
-        if options["global_webhook"]:
-            parts = webhook_parts(options["global_webhook"])
+        if options.get("global_webhook", ""):
+            parts = webhook_parts(options.get("global_webhook", ""))
             if parts:
                 known.add(parts[0])
         for row in self.store.selection():

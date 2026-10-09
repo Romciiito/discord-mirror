@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -99,9 +100,8 @@ class CoreTests(unittest.TestCase):
             store = Store(tmp)
             store.set_token("x" * 50, True)
             self.assertEqual(store.token(), "x" * 50)
-            store.set_options(25, True, "https://discord.com/api/webhooks/1/abc", True, "Desk copy")
-            self.assertEqual(store.options()["backfill"], 25)
-            self.assertEqual(store.options()["dest_name"], "Desk copy")
+            store.set_options(25, True, True)
+            self.assertEqual(store.options(), {"backfill": 25, "include_threads": True, "mirror": True})
             store.replace_selection(
                 [
                     {
@@ -119,15 +119,67 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(store.selection()[0]["parent"], "talk")
             store.fill_webhooks([("10", "https://discord.com/api/webhooks/1/abc")])
             self.assertEqual(store.selection()[0]["webhook_url"], "https://discord.com/api/webhooks/1/abc")
-            store.clear_destination()
-            self.assertEqual(store.selection()[0]["webhook_url"], "")
-            self.assertEqual(store.options()["dest_guild_id"], "")
+            self.assertEqual(store.hooks(), {"10": "https://discord.com/api/webhooks/1/abc"})
             store.remember_relay("1", "10", "https://discord.com/api/webhooks/1/abc", "99")
             self.assertEqual(store.relay_row("1")["webhook_message_id"], "99")
             store.forget_token()
             self.assertEqual(store.token(), "")
             if sys.platform != "win32":
                 self.assertEqual((Path(tmp) / "state.db").stat().st_mode & 0o777, 0o600)
+            store.close()
+
+    def test_store_targets_per_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            self.assertEqual(store.targets(), {})
+            store.set_target("5", "900", "Desk copy")
+            store.set_target("6", "900", "Desk copy")
+            store.set_target("5", "901", "Other")
+            self.assertEqual(
+                store.targets(),
+                {"5": {"target_id": "901", "target_name": "Other"}, "6": {"target_id": "900", "target_name": "Desk copy"}},
+            )
+            self.assertFalse(hasattr(store, "set_dest_guild"))
+            self.assertFalse(hasattr(store, "clear_destination"))
+            store.close()
+
+    def test_old_database_opens_and_ignores_the_shared_server_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = sqlite3.connect(Path(tmp) / "state.db")
+            conn.executescript(
+                """
+                CREATE TABLE account (id INTEGER PRIMARY KEY CHECK (id = 1), token TEXT, keep INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE options (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    backfill INTEGER NOT NULL DEFAULT 0,
+                    include_threads INTEGER NOT NULL DEFAULT 0,
+                    global_webhook TEXT NOT NULL DEFAULT '',
+                    mirror INTEGER NOT NULL DEFAULT 0,
+                    dest_name TEXT NOT NULL DEFAULT 'mirror',
+                    dest_guild_id TEXT NOT NULL DEFAULT ''
+                );
+                INSERT INTO options (id, backfill, global_webhook, dest_name, dest_guild_id) VALUES (1, 50, 'https://x', 'Old', '7');
+                CREATE TABLE selection (
+                    channel_id TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    guild_name TEXT NOT NULL DEFAULT '',
+                    channel_name TEXT NOT NULL DEFAULT '',
+                    webhook_url TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1
+                );
+                INSERT INTO selection (channel_id, guild_id, guild_name, channel_name, webhook_url) VALUES ('10', '5', 'Desk', 'general', 'https://discord.com/api/webhooks/1/abc');
+                """
+            )
+            conn.commit()
+            conn.close()
+            store = Store(tmp)
+            self.assertEqual(store.options(), {"backfill": 50, "include_threads": False, "mirror": False})
+            self.assertEqual(store.selection()[0]["webhook_url"], "https://discord.com/api/webhooks/1/abc")
+            self.assertEqual(store.selection()[0]["parent"], "")
+            self.assertEqual(store.hooks(), {"10": "https://discord.com/api/webhooks/1/abc"})
+            self.assertEqual(store.targets(), {})
+            store.set_options(0, True, True)
+            self.assertEqual(store.options(), {"backfill": 0, "include_threads": True, "mirror": True})
             store.close()
 
     def test_only_readable_text_channels_are_copied(self) -> None:
