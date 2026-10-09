@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import logging
+import logging.handlers
 import os
 import socket
 import sqlite3
@@ -247,9 +248,43 @@ class MainTests(unittest.TestCase):
     def test_logging_goes_to_the_file_not_the_console(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             entry.configure_logging(tmp)
-            kinds = [type(h).__name__ for h in self.root.handlers if h not in self.before]
-            self.assertEqual(kinds, ["RotatingFileHandler"])
+            added = [h for h in self.root.handlers if h not in self.before]
+            self.assertEqual(len(added), 1)
+            self.assertIsInstance(added[0], logging.handlers.RotatingFileHandler)
             self.assertFalse(logging.getLogger("aiohttp.access").propagate)
+            self.tearDown()
+
+    def test_a_failed_rotation_keeps_logging_to_the_file_and_off_stderr(self) -> None:
+        # Windows cannot rename a log file another process holds open (a second instance on the same
+        # DATA_DIR, a log viewer, a scanner); the stock handler then prints a traceback to stderr, over
+        # the CLI's screen, for every record and drops the record. POSIX renames an open file, so there
+        # the refusal is simulated.
+        with tempfile.TemporaryDirectory() as tmp:
+            entry.configure_logging(tmp)
+            (handler,) = [h for h in self.root.handlers if h not in self.before]
+            handler.maxBytes = 200
+            path = os.path.join(tmp, "mando.log")
+            log = logging.getLogger("mirror.rotation-test")
+            err = io.StringIO()
+            refused = (
+                contextlib.nullcontext()
+                if os.name == "nt"
+                else mock.patch("os.rename", side_effect=PermissionError(13, "file in use"))
+            )
+            held = open(path, "rb")
+            try:
+                with contextlib.redirect_stderr(err), refused:
+                    for n in range(20):
+                        log.warning("record %d %s", n, "x" * 50)
+            finally:
+                held.close()
+            self.assertEqual(err.getvalue(), "")
+            self.assertFalse(os.path.exists(path + ".1"))
+            with open(path, encoding="utf-8") as kept:
+                self.assertIn("record 19 ", kept.read())
+            # once the other handle is gone the next record rotates as usual
+            log.warning("after the holder let go")
+            self.assertTrue(os.path.exists(path + ".1"))
             self.tearDown()
 
     def test_server_only_path_runs_without_prompt_toolkit(self) -> None:

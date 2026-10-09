@@ -12,9 +12,25 @@ from aiohttp import web
 from .web import create_app
 
 
+class FileOnlyHandler(logging.handlers.RotatingFileHandler):
+    """The rotating log file; it never writes to stderr, which is the CLI's screen."""
+
+    def doRollover(self) -> None:
+        try:
+            super().doRollover()
+        except OSError:
+            # Windows cannot rename a file another process holds open (a second instance on the same data
+            # directory, a log viewer, a scanner): keep appending to the current file, retry on the next record
+            if self.stream is None:
+                self.stream = self._open()
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        pass  # the stock handler prints a traceback to stderr; a record that cannot be written is dropped
+
+
 def configure_logging(data_dir: str) -> None:
     Path(data_dir).mkdir(parents=True, exist_ok=True)
-    handler = logging.handlers.RotatingFileHandler(
+    handler = FileOnlyHandler(
         Path(data_dir) / "mando.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8"
     )
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
