@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import unittest
+from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 
 import aiohttp
 
@@ -300,6 +302,15 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.waits), 1)
         self.assertLessEqual(self.waits[0], 60.0)
         self.assertGreater(self.waits[0], 59.0)
+
+    async def test_retry_after_cap_survives_float_rounding(self) -> None:
+        # (t + 60.0) - t rounds above 60.0 at this clock value; seen on a fresh CI runner.
+        clock = SimpleNamespace(monotonic=lambda: 245.70428864746142)
+        self.session.queue.extend([FakeResp(429, {"retry_after": 900, "global": True}), FakeResp(200, {"id": "3"})])
+        with mock.patch("mirror.relay.time", clock):
+            self.assertEqual(await self.relay.create(HOOK, make_view([]), False), "3")
+        self.assertEqual(len(self.waits), 1)
+        self.assertLessEqual(self.waits[0], 60.0)
 
     async def test_rate_limit_headers_pace_next_request(self) -> None:
         headers = {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset-After": "2.0"}
