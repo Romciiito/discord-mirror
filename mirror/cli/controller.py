@@ -357,11 +357,8 @@ class Controller:
     async def _token_action(self) -> None:
         target = TOKEN_ROWS[self.token_index]
         self.error = ""
-        if self.typing in TEXT_FIELDS and target != self.typing:
-            await self._commit_field()
+        # no field is open here: _token_key sends every key to an open field and returns before this runs
         if target in TEXT_FIELDS:
-            if self.typing == target:
-                return
             self.typing = target
             self.draft = self.fields[target] or ""
         elif target == "keep":
