@@ -173,7 +173,9 @@ def _run(
             # to the caller after the teardown below, with its traceback intact
             if not main_task.done():
                 main_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
+                # a second Ctrl+C or GracefulExit during this teardown ends quietly too; what it left running is
+                # cancelled below
+                with contextlib.suppress(asyncio.CancelledError, KeyboardInterrupt, web.GracefulExit):
                     loop.run_until_complete(main_task)
     finally:
         try:

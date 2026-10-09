@@ -765,6 +765,44 @@ class GracefulExitTests(unittest.TestCase):
 
         self._ends_quietly(body)
 
+    def test_a_second_graceful_exit_while_the_server_task_is_cancelled_ends_quietly_and_closes_the_engine(
+        self,
+    ) -> None:
+        # Ctrl+C, then a GracefulExit out of the server task while _run cancels it and runs it to its end
+        def ctrl_c() -> None:
+            raise KeyboardInterrupt
+
+        async def body() -> None:
+            asyncio.get_running_loop().call_soon(ctrl_c)
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise web.GracefulExit() from None
+
+        self._ends_quietly(body)
+
+    def test_a_second_ctrl_c_during_the_teardown_ends_quietly(self) -> None:
+        # Ctrl+C, then another one from a loop callback while the cancelled server task is still cleaning up
+        def ctrl_c() -> None:
+            raise KeyboardInterrupt
+
+        async def body() -> None:
+            loop = asyncio.get_running_loop()
+            loop.call_soon(ctrl_c)
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                loop.call_soon(ctrl_c)
+                raise
+
+        port = _free_port()
+        app = create_app(self.tmp.name, "127.0.0.1", port)
+        self.addCleanup(app["engine"].store.close)  # the second Ctrl+C may cut Engine.close before it
+        try:
+            entry._run(app, "127.0.0.1", port, body, handle_signals=True)
+        except BaseException as exc:
+            self.fail(f"a second Ctrl+C during the teardown ends in {exc!r} instead of code 0")
+
     def _ends_with_the_engine_fully_closed(
         self,
         interrupt: Callable[[], None] | None,
