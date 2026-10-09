@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import logging.handlers
 import os
@@ -94,15 +95,52 @@ async def _serve(
         await runner.cleanup()
 
 
+def _cancel_remaining(loop: asyncio.AbstractEventLoop) -> None:
+    """Cancel what is left once the server task ended, as web.run_app's _cancel_tasks does."""
+    tasks = asyncio.all_tasks(loop)
+    if not tasks:
+        return
+    for task in tasks:
+        task.cancel()
+    loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+    for task in tasks:
+        if not task.cancelled() and task.exception() is not None:
+            loop.call_exception_handler(
+                {"message": "unhandled exception during shutdown", "exception": task.exception(), "task": task}
+            )
+
+
 def _run(
     app: web.Application, host: str, port: int, body: Callable[[], Awaitable[None]], handle_signals: bool = False
 ) -> None:
+    # the server task is cancelled and run to its end first, as in web.run_app, and only then the rest:
+    # asyncio.run would cancel every task at once, so the gateway task would already be cancelled when the
+    # engine's cleanup waits for it, and Engine.close would stop before closing the session and the store
+    loop = asyncio.new_event_loop()
     try:
-        asyncio.run(_serve(app, host, port, body, handle_signals))
-    except (KeyboardInterrupt, web.GracefulExit):
-        # Ctrl+C before the CLI took the terminal, or SIGINT/SIGTERM on the server alone; web.run_app ends
-        # the same way, with code 0
-        pass
+        asyncio.set_event_loop(loop)
+        main_task = loop.create_task(_serve(app, host, port, body, handle_signals))
+        try:
+            loop.run_until_complete(main_task)
+        except (KeyboardInterrupt, web.GracefulExit):
+            # Ctrl+C before the CLI took the terminal, or SIGINT/SIGTERM on the server alone; web.run_app ends
+            # the same way, with code 0
+            pass
+        finally:
+            # a task that already ended (a ListenError, any other error) is not run again: its error goes on
+            # to the caller after the teardown below, with its traceback intact
+            if not main_task.done():
+                main_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    loop.run_until_complete(main_task)
+    finally:
+        try:
+            _cancel_remaining(loop)
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.run_until_complete(loop.shutdown_default_executor())
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
 
 
 async def _forever() -> None:

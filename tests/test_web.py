@@ -764,6 +764,61 @@ class GracefulExitTests(unittest.TestCase):
 
         self._ends_quietly(body)
 
+    def _ends_with_the_engine_fully_closed(self, interrupt: Callable[[], None]) -> None:
+        # the real Engine with a running gateway: Gateway.stop is the real one, and _run waits on the stop event
+        # the way the real one waits on the socket, so a cancelled gateway task re-raises CancelledError and a
+        # gateway stopped before that ends at once; Engine.close must still reach session.close and store.close
+        from mirror.gateway import Gateway
+
+        class IdleGateway(Gateway):
+            async def _run(self) -> None:
+                await self._stop.wait()
+
+        port = _free_port()
+        app = create_app(self.tmp.name, "127.0.0.1", port)
+        engine = app["engine"]
+        seen: dict[str, Any] = {}
+
+        async def noop(*_args: Any) -> None:
+            pass
+
+        async def body() -> None:
+            gateway = IdleGateway(None, noop)  # type: ignore[arg-type]
+            gateway.start()
+            seen["task"] = gateway._task
+            engine.gateway = gateway
+            engine.running = True
+            asyncio.get_running_loop().call_soon(interrupt)
+            await asyncio.Event().wait()
+
+        with mock.patch.object(engine.store, "close", wraps=engine.store.close) as store_close, self.assertNoLogs(
+            "asyncio", level="WARNING"
+        ):
+            try:
+                entry._run(app, "127.0.0.1", port, body)
+            except (SystemExit, KeyboardInterrupt) as exc:
+                self.fail(f"the interrupt ends in {type(exc).__name__} instead of code 0")
+        self.assertTrue(seen["task"].done())
+        self.assertIsNone(engine.gateway)
+        self.assertEqual(engine.status, "stopped")
+        self.assertIn("stopped", engine.lines)
+        self.assertIsNone(engine.session)
+        store_close.assert_called_once()
+        with self.assertRaises(sqlite3.ProgrammingError):
+            engine.store.conn.execute("SELECT 1")
+
+    def test_a_graceful_exit_with_a_running_gateway_still_closes_the_session_and_the_store(self) -> None:
+        # what a POSIX loop does with SIGINT or SIGTERM under handle_signals=True
+        from aiohttp.web_runner import _raise_graceful_exit
+
+        self._ends_with_the_engine_fully_closed(_raise_graceful_exit)
+
+    def test_ctrl_c_with_a_running_gateway_still_closes_the_session_and_the_store(self) -> None:
+        def ctrl_c() -> None:
+            raise KeyboardInterrupt
+
+        self._ends_with_the_engine_fully_closed(ctrl_c)
+
 
 @contextlib.contextmanager
 def _pipe_terminal():
