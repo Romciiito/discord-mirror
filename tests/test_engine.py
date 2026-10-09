@@ -660,6 +660,22 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(hooks["11"].startswith("https://discord.com/api/webhooks/1001/"))
         self.assertIn("webhooks on 2 channel(s) in Desk copy, 1 reused", self.notes())
 
+    async def test_fill_replaces_an_own_webhook_of_a_ticked_channel_and_notes_it(self) -> None:
+        # a fill covers every ticked channel of the source (decision 9n), so a channel with an own webhook goes to the
+        # copy from now on; the note keeps the change visible, and the hooks memory follows the row
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection([row("10", HOOK, name="general"), row("11", name="news")])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 0})
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertNotEqual(urls["10"], HOOK)
+        self.assertTrue(urls["10"].startswith("https://discord.com/api/webhooks/"))
+        self.assertEqual(self.store.hooks(), urls)
+        self.assertIn("1 earlier webhook url(s) replaced", self.notes())
+
     async def test_fill_covers_an_unlisted_ticked_channel(self) -> None:
         http = FakeHTTP()
         http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
@@ -702,12 +718,14 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine.http = http
         self.store.set_target("5", "900", "Desk copy", False)
         self.store.set_target("6", "900", "Desk copy", True)
-        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}])
+        # the row holds the URL of Desk's first fill: found again, so nothing counts as replaced
+        self.store.replace_selection([row("10", "https://discord.com/api/webhooks/77/old", name="general") | {"parent": "Talk"}])
         report = await self.engine.fill_copy("5", "900")
         self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1})
         self.assertEqual([path for method, path, body in http.calls if method == "POST"], [])
         self.assertEqual([path for method, path, body in http.calls if method == "GET"], ["/channels/t1/webhooks"])
         self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, {"10": "https://discord.com/api/webhooks/77/old"})
+        self.assertFalse(any("replaced" in line for line in self.notes()))
         self.assertEqual(self.store.targets()["5"], {"target_id": "900", "target_name": "Desk copy", "shared": False})
         self.assertEqual(self.store.targets()["6"], {"target_id": "900", "target_name": "Desk copy", "shared": True})
 

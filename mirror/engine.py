@@ -299,12 +299,18 @@ class Engine:
         layout = copy_layout(source_name, rows, shared)
         self.note(f"filling {target['name']} from {source_name}")
         pairs, reused = await self._fill(http, target_id, layout, existing)
+        # a fill covers every ticked channel (decision 9n), an own webhook or an earlier copy's URL included; the
+        # store has no mark of who made a URL, so each one this fill changes is counted and noted, never kept
+        before = {str(row["channel_id"]): str(row.get("webhook_url") or "") for row in rows}
+        replaced = sum(1 for source, url in pairs if before.get(source) and before[source] != url)
         self.store.fill_webhooks(pairs)
         self.store.set_target(source_id, target_id, target["name"], shared)
         text = f"webhooks on {len(pairs)} channel(s) in {target['name']}"
         if reused:
             text += f", {reused} reused"
         self.note(text)
+        if replaced:
+            self.note(f"{replaced} earlier webhook url(s) replaced")
         if self.running:
             await self.refresh()
         return {"target": target["name"], "filled": len(pairs), "reused": reused}

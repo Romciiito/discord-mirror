@@ -163,6 +163,18 @@ Decisions (owner):
   already holds another source gets its categories as "<source> / <category>" and its
   loose channels under a category "<source>". A fill reuses a channel of the same name
   (9i) and a webhook it already created on it, instead of adding a second webhook.
+- **Gap in 9g and 9n, found in the Task 4 review of plan B (2026-10-09; plan B's rule,
+  not an owner decision yet).** A fill covers every ticked channel of the source (9n),
+  so a ticked channel with an own webhook (9g) gets the copy's webhook instead, and the
+  `hooks` memory (9l) follows the row; the feed says "<n> earlier webhook url(s)
+  replaced". The store keeps no mark of who made a URL, so a fill cannot tell an own
+  webhook from a URL an earlier fill made in another target. Two other rules were
+  measured with the engine's fakes and dropped: leaving alone every row with a URL the
+  fill does not find again in the target makes a fill into a second target create
+  channels and webhooks there while every row keeps the first target's URL
+  (`filled: 0`); keeping the old URL in `hooks` makes an untick and a retick send the
+  channel back to it. Keeping an own webhook through a fill needs a mark on each URL a
+  fill made; the owner decides whether it is wanted.
 - **10e.** (owner, 2026-10-09, plan C) Issue #6 (an edit that removes every embed sends
   `embeds: []`) and the 6000-character embed total from #8 ship in plan C. The rest of
   #8 and #4, #5, #7 stay separate.
