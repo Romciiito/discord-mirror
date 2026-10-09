@@ -137,7 +137,7 @@ class RenderTests(unittest.TestCase):
         ui.webhook_channel = ui.channel_rows[1]
         ui.draft = "https://"
         self.assertEqual(render(ui, 60, 8)[3], "  [ ] #dev  webhook: https://")
-        self.assertEqual(render(ui, 60, 8)[-1], "enter keeps it, esc cancels the edit")
+        self.assertEqual(render(ui, 80, 8)[-1], "enter keeps the url, empty enter unticks, esc leaves it as before")
 
     def test_webhook_settings_rows(self) -> None:
         ui = ui_on("webhooks")
@@ -234,7 +234,7 @@ class RenderTests(unittest.TestCase):
         lines = render(ui, 60, 9)
         self.assertEqual(lines[1], "Qwen")
         self.assertIn("> [x] #ch20  webhook: https://", lines)
-        self.assertEqual(lines[-1], "enter keeps it, esc cancels the edit")
+        self.assertEqual(render(ui, 80, 9)[-1], "enter keeps the url, empty enter unticks, esc leaves it as before")
 
     def test_short_window_keeps_the_cursor_row_check_and_error(self) -> None:
         ui = ui_on("token")

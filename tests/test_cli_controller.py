@@ -828,13 +828,21 @@ class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ui.typing, "webhook")
         self.assertEqual(ui.webhook_channel["id"], "c1")
         self.assertIn("c1", ui.picked)
-        self.assertEqual(ui.hint(), "enter keeps it, esc cancels the edit")
+        self.assertEqual(ui.hint(), "enter keeps the url, empty enter or esc unticks")
         for ch in HOOK:
             await ui.press(ch, plain=True)
         await keys(ui, "Enter")
         self.assertIsNone(ui.typing)
         self.assertEqual(ui.picked["c1"]["webhook_url"], HOOK)
         self.assertEqual(engine.calls[-1][1]["channels"][0]["webhook_url"], HOOK)
+
+    async def test_the_url_row_of_a_channel_ticked_before_says_esc_leaves_it(self) -> None:
+        ui, engine = await self.open_channels()
+        await keys(ui, "a", "Enter")
+        self.assertEqual((ui.typing, ui.webhook_new), ("webhook", False))
+        self.assertEqual(ui.hint(), "enter keeps the url, empty enter unticks, esc leaves it as before")
+        await keys(ui, "Escape")
+        self.assertEqual(ui.hint(), "enter toggles, a selects all, esc back")
 
     async def test_invalid_url_keeps_the_row_open_with_the_error(self) -> None:
         ui, engine = await self.open_channels()
