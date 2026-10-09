@@ -18,7 +18,7 @@ def copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict[str, A
     source = " ".join(str(source_name or "").split())[:100] or "server"
     categories: list[dict[str, str]] = []
     seen: set[str] = set()
-    channels: list[dict[str, str]] = []
+    channels: list[dict[str, Any]] = []
     for row in rows:
         if not row.get("enabled", True):
             continue
