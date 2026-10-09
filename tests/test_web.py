@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import io
 import json
 import logging
@@ -15,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+import warnings
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -241,6 +243,23 @@ class MainTests(unittest.TestCase):
             run.assert_not_called()
             self.tearDown()
 
+    def test_a_port_in_use_without_a_tty_ends_with_one_line_and_code_1(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"HOST": "127.0.0.1", "PORT": "9000", "DATA_DIR": tmp}
+            taken = OSError(errno.EADDRINUSE, "address already in use")
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, env), mock.patch.object(entry, "wants_cli", return_value=False), mock.patch.object(
+                entry, "create_app"
+            ), mock.patch.object(entry.web, "run_app", side_effect=taken), contextlib.redirect_stderr(err), self.assertLogs(
+                "mirror", "ERROR"
+            ) as logs:
+                with self.assertRaises(SystemExit) as ended:
+                    entry.main()
+            self.assertEqual(ended.exception.code, 1)
+            self.assertEqual(err.getvalue(), "could not listen on 127.0.0.1:9000: address already in use\n")
+            self.assertEqual(logs.records[0].getMessage(), "could not listen on 127.0.0.1:9000: address already in use")
+            self.tearDown()
+
     def test_wants_cli_needs_both_ttys(self) -> None:
         with mock.patch("sys.stdin") as stdin, mock.patch("sys.stdout") as stdout, mock.patch.object(
             entry, "has_console", return_value=True
@@ -454,6 +473,52 @@ class ServeAndCliTests(unittest.TestCase):
                     entry.serve_and_cli(app, "127.0.0.1", port)
         cli.assert_not_called()
         close.assert_awaited_once()
+
+    def test_a_port_in_use_with_a_tty_ends_with_one_line_and_code_1(self) -> None:
+        root = logging.getLogger()
+        before, level = list(root.handlers), root.level
+
+        def restore_logging() -> None:
+            for handler in list(root.handlers):
+                if handler not in before:
+                    root.removeHandler(handler)
+                    handler.close()
+            root.setLevel(level)
+
+        self.addCleanup(restore_logging)
+        made: dict[str, Any] = {}
+        err = io.StringIO()
+        with socket.socket() as taken, contextlib.ExitStack() as stack:
+
+            def make(*args: Any) -> Any:
+                app = create_app(*args)
+                made["close"] = stack.enter_context(
+                    mock.patch.object(app["engine"], "close", wraps=app["engine"].close)
+                )
+                return app
+
+            taken.bind(("127.0.0.1", 0))
+            taken.listen()
+            port = taken.getsockname()[1]
+            env = {"HOST": "127.0.0.1", "PORT": str(port), "DATA_DIR": self.tmp.name}
+            stack.enter_context(mock.patch.dict(os.environ, env))
+            stack.enter_context(mock.patch.object(entry, "wants_cli", return_value=True))
+            stack.enter_context(mock.patch.object(entry, "create_app", side_effect=make))
+            cli = stack.enter_context(mock.patch("mirror.cli.app.run_cli"))
+            stack.enter_context(contextlib.redirect_stderr(err))
+            # unittest shows aiohttp's NotAppKeyWarning from create_app on stderr; `python -m mirror` does not
+            stack.enter_context(warnings.catch_warnings())
+            warnings.simplefilter("ignore")
+            with self.assertRaises(SystemExit) as ended:
+                entry.main()
+            restore_logging()
+        self.assertEqual(ended.exception.code, 1)
+        lines = err.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, err.getvalue())
+        self.assertIn(f"could not listen on 127.0.0.1:{port}", lines[0])
+        self.assertNotIn("Traceback", err.getvalue())
+        cli.assert_not_called()
+        made["close"].assert_awaited_once()
 
     def test_ctrl_c_before_the_cli_took_the_terminal_ends_quietly(self) -> None:
         port = _free_port()

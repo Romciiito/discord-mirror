@@ -98,10 +98,17 @@ def main() -> None:
         data = str(Path(__file__).resolve().parent.parent / "data")
     configure_logging(data)
     app = create_app(data, host, port)
-    if wants_cli():
-        serve_and_cli(app, host, port)
-    else:
-        web.run_app(app, host=host, port=port, print=None, access_log=None)
+    try:
+        if wants_cli():
+            serve_and_cli(app, host, port)
+        else:
+            web.run_app(app, host=host, port=port, print=None, access_log=None)
+    except OSError as exc:
+        # a port in use: one line instead of a traceback, after the engine was closed
+        message = f"could not listen on {host}:{port}: {exc.strerror or exc}"
+        logging.getLogger("mirror").error(message)
+        print(message, file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
