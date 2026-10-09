@@ -625,7 +625,7 @@ git commit -m "Refuse Start on a ticked channel without a webhook and remove the
 
 - [ ] **Step 1: Write the failing tests**
 
-Extend `FakeHTTP` in `tests/test_engine.py`: record `GET` calls on `/webhooks` and answer from a `hooks: dict[str, list[dict]]` map keyed by channel id; created channels are remembered in `self.made: list[dict]` so a later `channels(target)` can return them when the test wants:
+Extend `FakeHTTP` in `tests/test_engine.py`: record `GET` calls on `/webhooks` and answer from a `hooks: dict[str, list[dict]]` map keyed by channel id; a created channel answers with its new id and the posted body (no test reads a created channel back through `channels(target)`, so the fake keeps no list of them); the `POST /guilds` branch goes, since nothing creates a server after Task 3:
 
 ```python
 class FakeHTTP:
