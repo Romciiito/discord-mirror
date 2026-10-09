@@ -712,16 +712,22 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.targets()["6"], {"target_id": "900", "target_name": "Desk copy", "shared": True})
 
     async def test_fill_refuses_bad_servers(self) -> None:
+        # 7 is a server the account is in but does not own (decision 9b'), 8 is not listed at all: neither is written to
         http = FakeHTTP()
-        http.listed = [{"id": "5", "name": "Desk", "owner": True}, {"id": "900", "name": "Desk copy", "owner": True}]
+        http.listed = [
+            {"id": "5", "name": "Desk", "owner": True},
+            {"id": "900", "name": "Desk copy", "owner": True},
+            {"id": "7", "name": "Theirs", "owner": False},
+        ]
         self.engine.http = http
         self.store.replace_selection([row("10", name="general")])
-        for source, target, text in (("x", "900", "unknown server"), ("5", "5", "a server cannot be its own copy"), ("6", "900", "tick the server or some of its channels first"), ("5", "7", "pick a server you own")):
+        for source, target, text in (("x", "900", "unknown server"), ("5", "5", "a server cannot be its own copy"), ("6", "900", "tick the server or some of its channels first"), ("5", "7", "pick a server you own"), ("5", "8", "pick a server you own")):
             with self.assertRaises(ApiError) as caught:
                 await self.engine.fill_copy(source, target)
             self.assertEqual(str(caught.exception), text)
         self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
         self.assertEqual(self.store.targets(), {})
+        self.assertEqual(self.store.selection()[0]["webhook_url"], "")
 
     async def test_fill_skips_what_discord_refuses_and_fails_when_nothing_is_wired(self) -> None:
         http = FakeHTTP(fail=("Talk", "news"))
