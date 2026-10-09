@@ -326,6 +326,34 @@ class TokenScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ui.fields["token"], "x")
         self.assertEqual(ui.token_check, "✗ token looks too short")
 
+    async def test_a_rejected_or_blocked_token_shows_the_reason(self) -> None:
+        verify = "403: You need to verify your account in order to perform this action (code 40002)"
+        for report, line in (
+            (
+                {"result": "rejected", "status": 403, "reason": verify},
+                f"✗ token rejected by Discord ({verify})",
+            ),
+            (
+                {"result": "rejected", "status": 401, "reason": "401: Unauthorized"},
+                "✗ token rejected by Discord (401: Unauthorized)",
+            ),
+            (
+                {"result": "blocked", "status": 403, "reason": "HTTP 403, Cloudflare error code 1020"},
+                "✗ Discord was not reached (HTTP 403, Cloudflare error code 1020): this network may be blocked",
+            ),
+            (
+                {"result": "blocked", "status": 200, "reason": "HTTP 200, not a Discord answer"},
+                "✗ Discord was not reached (HTTP 200, not a Discord answer): this network may be blocked",
+            ),
+        ):
+            with self.subTest(line=line):
+                ui, engine = await self.open_token()
+                engine.checks["e" * 40] = report
+                await ui.paste("e" * 40)
+                await keys(ui, "Enter")
+                self.assertEqual(engine.calls[-1], ("check_token", "e" * 40))
+                self.assertEqual(ui.token_check, line)
+
     async def test_reopening_the_token_field_starts_from_the_kept_token(self) -> None:
         ui, _ = await self.open_token()
         await ui.paste("j" * 40)
