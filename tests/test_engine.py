@@ -764,6 +764,30 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
         self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, urls)
 
+    async def test_refill_of_two_channels_of_the_same_name_keeps_each_on_its_own_copy(self) -> None:
+        # two "general" under "Talk": the store lists 10 before 11 (a tie on the name), Discord lists 11's copy first.
+        # Each row takes the copy that carries its own webhook, never the other's copy and history
+        http = KeepingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [
+            {"id": "c1", "type": 4, "name": "Talk"},
+            {"id": "t11", "type": 0, "name": "general", "parent_id": "c1"},
+            {"id": "t10", "type": 0, "name": "general", "parent_id": "c1"},
+        ]
+        http.hooks["t11"] = [{"id": "2", "name": "general", "token": "b"}]
+        http.hooks["t10"] = [{"id": "1", "name": "general", "token": "a"}]
+        self.engine.http = http
+        urls = {"10": "https://discord.com/api/webhooks/1/a", "11": "https://discord.com/api/webhooks/2/b"}
+        self.store.replace_selection(
+            [row("10", urls["10"], name="general") | {"parent": "Talk"}, row("11", urls["11"], name="general") | {"parent": "Talk"}]
+        )
+        self.assertEqual([r["channel_id"] for r in self.store.selection()], ["10", "11"])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 2})
+        self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
+        self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, urls)
+        self.assertFalse(any("replaced" in line for line in self.notes()))
+
     async def test_a_second_source_whose_category_fails_takes_no_loose_channel(self) -> None:
         # Desk (5) holds a loose "general" with its webhook in 900. Other (6) comes second and Discord refuses its
         # "Other / Talk": its "general" is skipped, never put loose beside Desk's and never given Desk's webhook (9o)
@@ -882,7 +906,9 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         report = await self.engine.fill_copy("5", "900")
         self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1})
         self.assertEqual([path for method, path, body in http.calls if method == "POST"], [])
+        # one spot of that name: its webhooks are listed once, in the webhook step, with no wait of their own
         self.assertEqual([path for method, path, body in http.calls if method == "GET"], ["/channels/t1/webhooks"])
+        self.assertEqual(self.delays, [0.25])
         self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, {"10": "https://discord.com/api/webhooks/77/old"})
         self.assertFalse(any("replaced" in line for line in self.notes()))
         self.assertEqual(self.store.targets()["5"], {"target_id": "900", "target_name": "Desk copy", "shared": False})

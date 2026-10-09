@@ -349,7 +349,8 @@ class Engine:
     ) -> tuple[list[tuple[str, str]], int]:
         """Find or create each channel of the layout in the target and give it a webhook (decisions 9i, 9o). A
         channel is found again by `same_name` under its own category (loose for a loose one; `existing` holds only
-        the categories this source may use). One of the same name elsewhere is taken when it carries the row's
+        the categories this source may use), of two or more there the one that carries the row's webhook (`before`),
+        so two rows of one name never swap copies. One of the same name elsewhere is taken when it carries the row's
         webhook (`before`), or, when none does, if the target holds no other source (`alone`), since it may
         otherwise be another source's channel. An existing channel serves one row only, a category is created only
         for a channel created under it and recorded for `source_id` as soon as Discord made it, and a channel whose
@@ -382,25 +383,14 @@ class Engine:
                 and (parent is None or str(item.get("parent_id") or "") == parent)
             ]
 
-        # every channel in its own place first, so a name found elsewhere never takes a channel another row has there
-        for channel in layout["channels"]:
-            key = channel["category_key"]
-            if key and key not in parents:
-                continue  # its category is not in the target yet, so nothing is under it
-            spots = free(channel["name"], parents.get(key, ""))
-            if spots:
-                found[channel["source_id"]] = spots[0]
-                claimed.add(spots[0])
-        for channel in layout["channels"]:
-            source = channel["source_id"]
-            if source in found:
-                continue
-            spots = free(channel["name"], None)
+        async def carrier(source: str, spots: list[str]) -> str:
+            """The spot whose webhooks hold the row's own webhook (`before`), each spot listed once and kept in
+            `listed`, with that webhook kept in `carried`; "" when no spot carries it."""
             mine = webhook_parts(before.get(source, ""))
-            pick = ""
             for spot in spots if mine else []:
-                listed[spot] = await self._hooks_on(http, spot)
-                await self._wait(0.25)
+                if spot not in listed:
+                    listed[spot] = await self._hooks_on(http, spot)
+                    await self._wait(0.25)
                 own = next(
                     (hook for hook in listed[spot] if str(hook.get("id") or "") == mine[0] and hook.get("token")), None
                 )
@@ -410,8 +400,26 @@ class Engine:
                     carried[source] = clean_webhook(f"https://discord.com/api/webhooks/{own['id']}/{own['token']}")
                 except ApiError:
                     continue
-                pick = spot
-                break
+                return spot
+            return ""
+
+        # every channel in its own place first, so a name found elsewhere never takes a channel another row has there;
+        # of two or more of the same name there, the one that carries the row's webhook, so two rows never swap copies
+        for channel in layout["channels"]:
+            key = channel["category_key"]
+            if key and key not in parents:
+                continue  # its category is not in the target yet, so nothing is under it
+            spots = free(channel["name"], parents.get(key, ""))
+            if spots:
+                pick = (await carrier(channel["source_id"], spots) if len(spots) > 1 else "") or spots[0]
+                found[channel["source_id"]] = pick
+                claimed.add(pick)
+        for channel in layout["channels"]:
+            source = channel["source_id"]
+            if source in found:
+                continue
+            spots = free(channel["name"], None)
+            pick = await carrier(source, spots)
             if not pick and alone and spots:
                 pick = spots[0]
             if pick:
