@@ -34,7 +34,7 @@ Inputs the spec implies but no decision names; each line's test is pinned to the
 4. **A fill while the mirror runs**: the new webhook URLs are mirrored to without a restart. → Task 4 (`test_fill_while_running_refreshes`).
 5. **A message with a sticker and a file over 20 MiB**: one post, the sticker uploaded, the file as one line with two links, no second attempt. → Task 8 (`test_sticker_and_oversize_file_in_one_post`).
 6. **Names that differ only in an emoji, a separator such as "┃" or an underscore** (`🔥-general` and `💬-general`): two channels in the copy, never one channel with one webhook for both; an emoji-only name is found again on the next fill. The same holds for two source channels with the very same name in one category (Discord allows it): each existing channel serves one row only, so each gets its own channel and webhook, and a refill finds each again. → Task 2 (`test_same_name_keeps_emoji_separators_and_underscores_apart`) and Task 4 (`test_fill_gives_two_channels_of_the_same_name_their_own_copies`).
-7. **A ticked channel with an own webhook (decision 9g) at a fill**: the fill covers it (decision 9n) and gives it the copy's webhook, the `hooks` memory follows, and the feed says "<n> earlier webhook url(s) replaced"; a refill that finds its own webhooks again says nothing. Whether an own webhook should survive a fill is the owner's open point (the gap after 9o in the design notes). → Task 4 (`test_fill_replaces_an_own_webhook_of_a_ticked_channel_and_notes_it`, `test_refill_of_the_first_source_keeps_its_names_after_a_second_source`).
+7. **A ticked channel with an own webhook (decision 9g) at a fill**: the fill covers it (decision 9n) and gives it the copy's webhook, the `hooks` memory follows, and the engine notes "<n> earlier webhook url(s) replaced" in its log; a refill that finds its own webhooks again says nothing. The CLI never shows the engine's log, so its line after the fill starts with the same count (a fill into another target replaces every URL of the earlier copy and says so too; the Task 6 review measured the note invisible after `c` and Enter). Whether an own webhook should survive a fill is the owner's open point (the gap after 9o in the design notes). → Task 4 (`test_fill_replaces_an_own_webhook_of_a_ticked_channel_and_notes_it`, `test_refill_of_the_first_source_keeps_its_names_after_a_second_source`) and Task 6 (`test_a_fill_that_replaces_earlier_webhook_urls_says_so`).
 
 ---
 
@@ -1720,7 +1720,7 @@ git commit -m "Add the owned servers and the fill to the API."
 - Test: `tests/test_cli_controller.py`, `tests/test_cli_render.py`
 
 **Interfaces:**
-- Produces, on the servers screen at depth `guilds`: `c`/`C` on a server row opens the target picker (depth `targets`): `self.targets` = `engine.owned_guilds()` without the source itself, `self.target_source` = the server, `local_index` on the current target when the snapshot's `targets` links the source, else 0. Errors before opening: `"tick the server or some of its channels first"` when no picked row belongs to the server; `"you own no other server, create one in Discord first"` when the list is empty. At depth `targets`: Up/Down wrap, Enter → `engine.fill_copy(source id, target id)` then `refresh()`, `self.error = "<filled> channel(s) ready in <target>"`, back to depth `guilds` with the cursor on the source; an `ApiError`/`RuntimeError` keeps the picker open with its text; Esc → depth `guilds`, cursor on the source. Unticking a server (Enter on a ticked server) whose source has a link in the snapshot's `targets` ends with `self.error = "copy in <target_name> kept, delete it in Discord if you do not need it"` (decision 9e). Hints: depth `guilds` `"enter toggles, c fills copy, right opens channels, esc back"` (59 characters); depth `targets` `"enter fills the copy, esc back"`. `_save_options` sends `backfill`, `include_threads`, `mirror`, `channels` only.
+- Produces, on the servers screen at depth `guilds`: `c`/`C` on a server row opens the target picker (depth `targets`): `self.targets` = `engine.owned_guilds()` without the source itself, `self.target_source` = the server, `local_index` on the current target when the snapshot's `targets` links the source, else 0. Errors before opening: `"tick the server or some of its channels first"` when no picked row belongs to the server; `"you own no other server, create one in Discord first"` when the list is empty. At depth `targets`: Up/Down wrap, Enter → `engine.fill_copy(source id, target id)` then `refresh()`, `self.error = "<filled> channel(s) ready in <target>"`, led by `"<r> earlier webhook url(s) replaced, "` when `r > 0` picked rows of the source had a non-empty webhook URL before the fill that differs after the refresh (an own webhook, decision 9g, or an earlier copy's URL, decision 9n; the engine notes the same count only in its log, which the CLI never shows, measured in the Task 6 review; the count leads so a long target name cut at the screen width never cuts it), back to depth `guilds` with the cursor on the source; an `ApiError`/`RuntimeError` keeps the picker open with its text; Esc → depth `guilds`, cursor on the source. Unticking a server (Enter on a ticked server) whose source has a link in the snapshot's `targets` ends with `self.error = "copy in <target_name> kept, delete it in Discord if you do not need it"` (decision 9e). Hints: depth `guilds` `"enter toggles, c fills copy, right opens channels, esc back"` (59 characters); depth `targets` `"enter fills the copy, esc back"`. `_save_options` sends `backfill`, `include_threads`, `mirror`, `channels` only.
 - Render: depth `targets`: title `"Copy of <source> into"`, rows `"[x] <name>"` for the linked target and `"[ ] <name>"` otherwise, `"no servers you own"` when empty; depth `guilds`: a linked server row ends with `"  copy: <target_name>"`.
 - Consumes: Task 1's snapshot key `targets`, Task 4's `owned_guilds`/`fill_copy`.
 
@@ -1739,9 +1739,11 @@ Update `FakeEngine` in `tests/test_cli_controller.py`: `self.options = {"backfil
         self._maybe_fail("fill_copy")
         name = next(g["name"] for g in self.owned if g["id"] == target_id)
         self.targets[source_id] = {"target_id": target_id, "target_name": name}
+        # as Engine.fill_copy: every ticked row of the source gets the target's webhook, an own one included
+        # (decision 9n), and a refill into the same target finds the same webhook again
         for row in self.selection:
-            if row["guild_id"] == source_id and not row["webhook_url"]:
-                row["webhook_url"] = f"https://discord.com/api/webhooks/{row['channel_id']}/t"
+            if row["guild_id"] == source_id:
+                row["webhook_url"] = f"https://discord.com/api/webhooks/{target_id}{row['channel_id']}/t"
         return {"target": name, "filled": 2, "reused": 0}
 ```
 
@@ -1795,6 +1797,26 @@ Change the assertions at lines 494–495 (the `_save_options` body) to `self.ass
             await keys(ui, "Enter")
         self.assertEqual(ui.error, "request failed")
         self.assertFalse(ui.busy)
+
+    async def test_a_fill_that_replaces_earlier_webhook_urls_says_so(self) -> None:
+        # the engine notes the count only in its log, which the CLI does not show (gap in 9g and 9n)
+        ui, engine = await self.open_servers()
+        long_name = "The archive of every message we ever wrote"
+        engine.owned = [{"id": "t1", "name": "Qwen copy"}, {"id": "t2", "name": long_name}]
+        await keys(ui, "Enter")
+        next(row for row in engine.selection if row["channel_id"] == "c1")["webhook_url"] = "https://discord.com/api/webhooks/111/own"
+        ui.refresh()
+        await keys(ui, "c", "Enter")
+        self.assertEqual(engine.calls[-1], ("fill_copy", "g1", "t1"))
+        self.assertEqual(ui.error, "1 earlier webhook url(s) replaced, 2 channel(s) ready in Qwen copy")
+        await keys(ui, "c", "Enter")
+        self.assertEqual(engine.calls[-1], ("fill_copy", "g1", "t1"))
+        self.assertEqual(ui.error, "2 channel(s) ready in Qwen copy")
+        await keys(ui, "c", "ArrowDown", "Enter")
+        self.assertEqual(engine.calls[-1], ("fill_copy", "g1", "t2"))
+        self.assertEqual(ui.error, f"2 earlier webhook url(s) replaced, 2 channel(s) ready in {long_name}")
+        # the count leads, so a narrow screen that cuts a long server name never cuts it
+        self.assertIn("2 earlier webhook url(s) replaced, 2 channel(s) ready in The", render(ui, 60, 10))
 
     async def test_no_owned_server_and_a_failed_list_show_errors(self) -> None:
         ui, engine = await self.open_servers()
@@ -1920,6 +1942,13 @@ and in the guilds branch: `elif key in ("c", "C"): await self._open_targets(self
 
     async def _fill(self, target: dict[str, Any]) -> None:
         source = self.target_source or {}
+        # a fill gives every ticked channel of the source the copy's webhook, an own one (decision 9g) or an earlier
+        # copy's URL included (decision 9n); the engine notes the count only in its log, which the CLI does not show
+        before = {
+            cid: row["webhook_url"]
+            for cid, row in self.picked.items()
+            if row.get("guild_id") == source.get("id") and row.get("webhook_url")
+        }
         self.busy = True
         try:
             report = await self.engine.fill_copy(str(source.get("id") or ""), target["id"])
@@ -1934,7 +1963,12 @@ and in the guilds branch: `elif key in ("c", "C"): await self._open_targets(self
         finally:
             self.busy = False
         self._leave_targets()
-        self.error = f"{report.get('filled', 0)} channel(s) ready in {report.get('target') or target.get('name')}"
+        text = f"{report.get('filled', 0)} channel(s) ready in {report.get('target') or target.get('name')}"
+        replaced = sum(
+            1 for cid, url in before.items() if (self.picked.get(cid) or {}).get("webhook_url") not in (None, "", url)
+        )
+        # the count leads, so a narrow screen that cuts a long server name never cuts it
+        self.error = f"{replaced} earlier webhook url(s) replaced, {text}" if replaced else text
 ```
 
 - `_toggle_guild`, untick branch: after `await self._save_options()`, add
@@ -2338,4 +2372,4 @@ Not a task for an agent: it writes to the owner's Discord account.
 1. `start.bat`, sign in, tick a small source server, `c`, pick the test server `1557894816161992704`, Enter. Expect the categories, channels and webhooks in that server, the row `copy: <name>`, and no deleted channel there.
 2. `c` again on the same server, Enter on the same target. Expect "n channel(s) ready in <name>, n reused" style notes in `data/mando.log` and no second channel or webhook.
 3. Start. Post in a source channel a PNG sticker, a GIF sticker and a file over 20 MiB. Expect the stickers as images and the file as one line with two links in the copy. Edit a source message to remove an embed; expect the mirrored embed gone.
-4. Decide the gap after decision 9o in the design notes: a fill gives a ticked channel with an own webhook the copy's webhook (feed: "1 earlier webhook url(s) replaced"). Keep it, or ask for own webhooks to survive a fill, which needs a mark on each URL a fill made.
+4. Decide the gap after decision 9o in the design notes: a fill gives a ticked channel with an own webhook the copy's webhook (the CLI line after the fill: "1 earlier webhook url(s) replaced, n channel(s) ready in <name>"). Keep it, or ask for own webhooks to survive a fill, which needs a mark on each URL a fill made.

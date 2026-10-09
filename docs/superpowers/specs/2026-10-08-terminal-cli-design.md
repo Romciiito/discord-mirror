@@ -166,8 +166,12 @@ Decisions (owner):
 - **Gap in 9g and 9n, found in the Task 4 review of plan B (2026-10-09; plan B's rule,
   not an owner decision yet).** A fill covers every ticked channel of the source (9n),
   so a ticked channel with an own webhook (9g) gets the copy's webhook instead, and the
-  `hooks` memory (9l) follows the row; the feed says "<n> earlier webhook url(s)
-  replaced". The store keeps no mark of who made a URL, so a fill cannot tell an own
+  `hooks` memory (9l) follows the row; the engine notes "<n> earlier webhook url(s)
+  replaced" in its log, and the CLI's line after the fill starts with the same words,
+  because the CLI never shows the engine's log (the Task 6 review of plan B measured
+  the note invisible after `c` and Enter). The same holds when a source is filled into
+  another target: every URL of the earlier copy is replaced and counted. The store
+  keeps no mark of who made a URL, so a fill cannot tell an own
   webhook from a URL an earlier fill made in another target. Two other rules were
   measured with the engine's fakes and dropped: leaving alone every row with a URL the
   fill does not find again in the target makes a fill into a second target create

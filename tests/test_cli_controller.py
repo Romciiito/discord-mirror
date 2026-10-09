@@ -107,9 +107,11 @@ class FakeEngine:
         self._maybe_fail("fill_copy")
         name = next(g["name"] for g in self.owned if g["id"] == target_id)
         self.targets[source_id] = {"target_id": target_id, "target_name": name}
+        # as Engine.fill_copy: every ticked row of the source gets the target's webhook, an own one included
+        # (decision 9n), and a refill into the same target finds the same webhook again
         for row in self.selection:
-            if row["guild_id"] == source_id and not row["webhook_url"]:
-                row["webhook_url"] = f"https://discord.com/api/webhooks/{row['channel_id']}/t"
+            if row["guild_id"] == source_id:
+                row["webhook_url"] = f"https://discord.com/api/webhooks/{target_id}{row['channel_id']}/t"
         return {"target": name, "filled": 2, "reused": 0}
 
 
@@ -876,6 +878,26 @@ class ServersScreenTests(unittest.IsolatedAsyncioTestCase):
             await keys(ui, "Enter")
         self.assertEqual(ui.error, "request failed")
         self.assertFalse(ui.busy)
+
+    async def test_a_fill_that_replaces_earlier_webhook_urls_says_so(self) -> None:
+        # the engine notes the count only in its log, which the CLI does not show (gap in 9g and 9n)
+        ui, engine = await self.open_servers()
+        long_name = "The archive of every message we ever wrote"
+        engine.owned = [{"id": "t1", "name": "Qwen copy"}, {"id": "t2", "name": long_name}]
+        await keys(ui, "Enter")
+        next(row for row in engine.selection if row["channel_id"] == "c1")["webhook_url"] = "https://discord.com/api/webhooks/111/own"
+        ui.refresh()
+        await keys(ui, "c", "Enter")
+        self.assertEqual(engine.calls[-1], ("fill_copy", "g1", "t1"))
+        self.assertEqual(ui.error, "1 earlier webhook url(s) replaced, 2 channel(s) ready in Qwen copy")
+        await keys(ui, "c", "Enter")
+        self.assertEqual(engine.calls[-1], ("fill_copy", "g1", "t1"))
+        self.assertEqual(ui.error, "2 channel(s) ready in Qwen copy")
+        await keys(ui, "c", "ArrowDown", "Enter")
+        self.assertEqual(engine.calls[-1], ("fill_copy", "g1", "t2"))
+        self.assertEqual(ui.error, f"2 earlier webhook url(s) replaced, 2 channel(s) ready in {long_name}")
+        # the count leads, so a narrow screen that cuts a long server name never cuts it
+        self.assertIn("2 earlier webhook url(s) replaced, 2 channel(s) ready in The", render(ui, 60, 10))
 
     async def test_no_owned_server_and_a_failed_list_show_errors(self) -> None:
         ui, engine = await self.open_servers()
