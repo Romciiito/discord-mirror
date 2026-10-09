@@ -5,7 +5,9 @@ import contextlib
 import logging
 import logging.handlers
 import os
+import signal
 import sys
+import threading
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -110,6 +112,37 @@ def _cancel_remaining(loop: asyncio.AbstractEventLoop) -> None:
             )
 
 
+class _SigintCancels:
+    """SIGINT as asyncio.Runner handles it since Python 3.11: the first one cancels the server task, so no
+    KeyboardInterrupt lands at whatever bytecode a task is running; a later one raises KeyboardInterrupt."""
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, task: asyncio.Task) -> None:
+        self.loop = loop
+        self.task = task
+        self.count = 0
+
+    def __call__(self, _signum: int, _frame: object) -> None:
+        self.count += 1
+        if self.count == 1 and not self.task.done():
+            self.loop.call_soon_threadsafe(self.task.cancel)
+            return
+        raise KeyboardInterrupt
+
+
+def _cancel_on_sigint(loop: asyncio.AbstractEventLoop, task: asyncio.Task) -> _SigintCancels | None:
+    # only over Python's own default handler and in the main thread, as asyncio.Runner checks
+    if threading.current_thread() is not threading.main_thread():
+        return None
+    if signal.getsignal(signal.SIGINT) is not signal.default_int_handler:
+        return None
+    handler = _SigintCancels(loop, task)
+    try:
+        signal.signal(signal.SIGINT, handler)
+    except ValueError:
+        return None
+    return handler
+
+
 def _run(
     app: web.Application, host: str, port: int, body: Callable[[], Awaitable[None]], handle_signals: bool = False
 ) -> None:
@@ -117,15 +150,24 @@ def _run(
     # asyncio.run would cancel every task at once, so the gateway task would already be cancelled when the
     # engine's cleanup waits for it, and Engine.close would stop before closing the session and the store
     loop = asyncio.new_event_loop()
+    sigint: _SigintCancels | None = None
     try:
         asyncio.set_event_loop(loop)
         main_task = loop.create_task(_serve(app, host, port, body, handle_signals))
+        if handle_signals:
+            # Windows has no loop signal handlers, so this one takes Ctrl+C on the server alone; on POSIX the
+            # runner's loop handler replaces it while the server runs and turns SIGINT into GracefulExit
+            sigint = _cancel_on_sigint(loop, main_task)
         try:
             loop.run_until_complete(main_task)
         except (KeyboardInterrupt, web.GracefulExit):
             # Ctrl+C before the CLI took the terminal, or SIGINT/SIGTERM on the server alone; web.run_app ends
             # the same way, with code 0
             pass
+        except asyncio.CancelledError:
+            # the server task cancelled by the first SIGINT ran its cleanup to the end: code 0 as well
+            if sigint is None or sigint.count == 0:
+                raise
         finally:
             # a task that already ended (a ListenError, any other error) is not run again: its error goes on
             # to the caller after the teardown below, with its traceback intact
@@ -139,6 +181,8 @@ def _run(
             loop.run_until_complete(loop.shutdown_asyncgens())
             loop.run_until_complete(loop.shutdown_default_executor())
         finally:
+            if sigint is not None and signal.getsignal(signal.SIGINT) is sigint:
+                signal.signal(signal.SIGINT, signal.default_int_handler)
             asyncio.set_event_loop(None)
             loop.close()
 

@@ -9,6 +9,7 @@ import logging
 import logging.handlers
 import os
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -764,14 +765,22 @@ class GracefulExitTests(unittest.TestCase):
 
         self._ends_quietly(body)
 
-    def _ends_with_the_engine_fully_closed(self, interrupt: Callable[[], None]) -> None:
+    def _ends_with_the_engine_fully_closed(
+        self,
+        interrupt: Callable[[], None] | None,
+        handle_signals: bool = False,
+        in_gateway: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         # the real Engine with a running gateway: Gateway.stop is the real one, and _run waits on the stop event
         # the way the real one waits on the socket, so a cancelled gateway task re-raises CancelledError and a
-        # gateway stopped before that ends at once; Engine.close must still reach session.close and store.close
+        # gateway stopped before that ends at once; Engine.close must still reach session.close and store.close.
+        # interrupt runs as a loop callback; in_gateway runs inside a step of the gateway task itself
         from mirror.gateway import Gateway
 
         class IdleGateway(Gateway):
             async def _run(self) -> None:
+                if in_gateway is not None:
+                    in_gateway()
                 await self._stop.wait()
 
         port = _free_port()
@@ -788,14 +797,15 @@ class GracefulExitTests(unittest.TestCase):
             seen["task"] = gateway._task
             engine.gateway = gateway
             engine.running = True
-            asyncio.get_running_loop().call_soon(interrupt)
+            if interrupt is not None:
+                asyncio.get_running_loop().call_soon(interrupt)
             await asyncio.Event().wait()
 
         with mock.patch.object(engine.store, "close", wraps=engine.store.close) as store_close, self.assertNoLogs(
             "asyncio", level="WARNING"
         ):
             try:
-                entry._run(app, "127.0.0.1", port, body)
+                entry._run(app, "127.0.0.1", port, body, handle_signals=handle_signals)
             except (SystemExit, KeyboardInterrupt) as exc:
                 self.fail(f"the interrupt ends in {type(exc).__name__} instead of code 0")
         self.assertTrue(seen["task"].done())
@@ -806,6 +816,7 @@ class GracefulExitTests(unittest.TestCase):
         store_close.assert_called_once()
         with self.assertRaises(sqlite3.ProgrammingError):
             engine.store.conn.execute("SELECT 1")
+        return seen
 
     def test_a_graceful_exit_with_a_running_gateway_still_closes_the_session_and_the_store(self) -> None:
         # what a POSIX loop does with SIGINT or SIGTERM under handle_signals=True
@@ -818,6 +829,23 @@ class GracefulExitTests(unittest.TestCase):
             raise KeyboardInterrupt
 
         self._ends_with_the_engine_fully_closed(ctrl_c)
+
+    def test_sigint_inside_the_gateway_task_cancels_the_server_task_and_the_gateway_stops_normally(self) -> None:
+        # the headless server on Windows, where the loop has no signal handlers: Ctrl+C is a SIGINT the Python
+        # handler sees at whatever bytecode runs; here inside a step of the gateway task. As under asyncio.Runner
+        # it must cancel the server task instead of raising KeyboardInterrupt into that task, so Gateway.stop
+        # ends the gateway task normally. On POSIX the runner's loop handler takes SIGINT and the exit is the
+        # graceful one; both end the same way here.
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
+
+        seen = self._ends_with_the_engine_fully_closed(
+            None, handle_signals=True, in_gateway=lambda: signal.raise_signal(signal.SIGINT)
+        )
+        task = seen["task"]
+        self.assertFalse(task.cancelled())
+        self.assertIsNone(task.exception(), "the SIGINT landed in the gateway task")
+        self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)
 
     def test_a_graceful_exit_with_a_client_on_the_event_stream_closes_the_engine_without_the_shutdown_wait(
         self,
