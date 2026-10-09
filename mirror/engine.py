@@ -389,7 +389,7 @@ class Engine:
         carried: dict[str, str] = {}  # source channel id -> the row's own webhook, found on that channel
         listed: dict[str, list[dict[str, Any]]] = {}  # existing channel id -> its webhooks, once fetched
         unlisted: set[str] = set()  # existing channels whose webhooks Discord refused to list in this fill
-        unproven: set[str] = set()  # source channel ids that may have their copy on an unlisted channel
+        unproven: dict[str, str] = {}  # source channel id -> the unlisted channel its copy may stand on
 
         def spots(name: str, parent: str | None) -> list[str]:
             """The unclaimed text channels of the name, under `parent` ("" for loose ones) or anywhere when None."""
@@ -466,8 +466,10 @@ class Engine:
                 if pick:
                     found[source] = pick
                     claimed.add(pick)
-                elif any(spot in unlisted for spot in spots(channel["name"], parent)):
-                    unproven.add(source)
+                else:
+                    blocker = next((spot for spot in spots(channel["name"], parent) if spot in unlisted), "")
+                    if blocker:
+                        unproven.setdefault(source, blocker)
         needed = {
             channel["category_key"]
             for channel in layout["channels"]
@@ -490,12 +492,14 @@ class Engine:
             await self._wait(0.3)
         pairs: list[tuple[str, str]] = []
         reused = 0
+        blocked: list[str] = []  # the unlisted channels that kept a row from being wired, in layout order
         for channel in layout["channels"]:
             source = channel["source_id"]
             dest = found.get(source, "")
             if not dest and source in unproven:
                 # never a channel beside one that may be the row's copy; the stored URL stays (Mando never deletes)
                 self.note(f"#{channel['name']} was not wired (its webhooks could not be listed)")
+                blocked.append(unproven[source])
                 continue
             if not dest:
                 key = channel["category_key"]
@@ -535,6 +539,10 @@ class Engine:
                 pairs.append((source, url))
                 reused += int(kept)
                 self.note(f"#{channel['name']}")
+        if not pairs and blocked:
+            # no webhook was tried for those rows: the owner is told which listing to wait for, not a creation failure
+            name = next(str(item.get("name") or "") for item in texts if str(item["id"]) == blocked[0])
+            raise ApiError(400, f"webhooks of #{name} could not be listed, try again")
         if not pairs:
             raise ApiError(400, "no webhook could be created")
         return pairs, reused

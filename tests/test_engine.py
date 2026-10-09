@@ -1469,6 +1469,22 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             await self.engine.fill_copy("5", "900")
         self.assertEqual(str(caught.exception), "no webhook could be created")
 
+    async def test_a_fill_whose_every_row_waits_on_a_failed_listing_says_so(self) -> None:
+        # the one ticked "general" has its copy t10, whose listing Discord answers with a 500: nothing is wired, and the
+        # error names the listing that failed, not a webhook creation that was never tried
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [{"id": "t10", "type": 0, "name": "general", "parent_id": None}]
+        http.hooks["t10"] = [{"id": "1", "name": "general", "token": "a"}]
+        http.refused.add(("GET", "/channels/t10/webhooks"))
+        self.engine.http = http
+        self.store.replace_selection([row("10", "https://discord.com/api/webhooks/1/a", name="general")])
+        with self.assertRaises(ApiError) as caught:
+            await self.engine.fill_copy("5", "900")
+        self.assertEqual((caught.exception.status, str(caught.exception)), (400, "webhooks of #general could not be listed, try again"))
+        self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
+        self.assertEqual(self.store.targets(), {})
+
     async def test_fill_while_running_refreshes(self) -> None:
         http = FakeHTTP()
         http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
