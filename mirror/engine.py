@@ -27,6 +27,11 @@ log = logging.getLogger("mirror.engine")
 WINDOWS = sys.platform == "win32"
 
 
+def _rejected(exc: ApiError) -> bool:
+    """Discord itself refused the token; an answer that is not Discord's (a block page) means Discord was not reached."""
+    return exc.status in (401, 403) and not isinstance(exc, NotDiscordAnswer)
+
+
 class Engine:
     def __init__(self, store: Store) -> None:
         self.store = store
@@ -97,7 +102,7 @@ class Engine:
             await self.use_token(token, keep=True)
             self.note("saved token accepted")
         except ApiError as exc:
-            if exc.status in (401, 403):
+            if _rejected(exc):
                 self.note("saved token was rejected")
                 self.store.forget_token()
                 return
@@ -120,7 +125,7 @@ class Engine:
                 try:
                     await self.use_token(token, keep=True)
                 except ApiError as exc:
-                    if exc.status in (401, 403):
+                    if _rejected(exc):
                         self.note("saved token was rejected")
                         self.store.forget_token()
                         return

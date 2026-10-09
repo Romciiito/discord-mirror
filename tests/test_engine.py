@@ -173,6 +173,18 @@ class FakeDiscord:
         pass
 
 
+class ScriptedDiscord(FakeDiscord):
+    """A FakeDiscord that gives its answers in turn and keeps giving the last one."""
+
+    def __init__(self, *answers: FakeResp | BaseException) -> None:
+        super().__init__(answers[0])
+        self.answers = list(answers)
+
+    def request(self, method: str, url: str, **kw: Any) -> FakeResp:
+        self.answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        return super().request(method, url, **kw)
+
+
 class FakeGateway:
     made: list["FakeGateway"] = []
 
@@ -402,6 +414,40 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.token(), "")
         self.assertEqual(len(calls), 2)
         self.assertIn("saved token was rejected", self.notes())
+
+    async def test_restore_keeps_token_when_the_answer_is_not_discords(self) -> None:
+        # a Cloudflare block page (403, error code 1020) at start and at the first retry: Discord was not
+        # reached, so the token is kept and tried again until Discord itself answers
+        page = FakeResp("<html><body>error code: 1020</body></html>", 403)
+        self.store.set_token(TOKEN, True)
+        discord = ScriptedDiscord(page, page, FakeResp('{"id": "7", "username": "ada"}'))
+        self.engine.session = discord
+        await self.engine.restore()
+        self.assertEqual(self.store.token(), TOKEN)
+        self.assertIn(
+            "saved token check failed (GET /users/@me failed (HTTP 403, Cloudflare error code 1020)), retrying",
+            self.notes(),
+        )
+        await self.engine._restore_task
+        self.assertEqual(self.store.token(), TOKEN)
+        self.assertEqual(len(discord.sent), 3)
+        self.assertEqual(self.delays, [5.0, 10.0])
+        self.assertNotIn("saved token was rejected", self.notes())
+        self.assertIn("saved token accepted", self.notes())
+
+    async def test_restore_forgets_token_discord_itself_rejects(self) -> None:
+        refused = FakeResp('{"message": "401: Unauthorized", "code": 0}', 401)
+        page = FakeResp("<html><body>error code: 1020</body></html>", 403)
+        for answers in ((refused,), (page, refused)):
+            with self.subTest(answers=[answer.status for answer in answers]):
+                self.store.set_token(TOKEN, True)
+                self.engine.lines.clear()
+                self.engine.session = ScriptedDiscord(*answers)
+                await self.engine.restore()
+                if self.engine._restore_task is not None:
+                    await self.engine._restore_task
+                self.assertEqual(self.store.token(), "")
+                self.assertIn("saved token was rejected", self.notes())
 
     async def test_restore_retry_stops_on_manual_token(self) -> None:
         self.store.set_token("x" * 50, True)
