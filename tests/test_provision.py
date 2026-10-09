@@ -2,111 +2,56 @@ from __future__ import annotations
 
 import unittest
 
-from mirror.provision import destination_layout, webhook_name
+from mirror.provision import copy_layout, same_name, webhook_name
+
+
+def row(channel_id: str, name: str, parent: str = "", topic: str = "", enabled: bool = True) -> dict:
+    return {"channel_id": channel_id, "channel_name": name, "parent": parent, "topic": topic, "enabled": enabled}
+
+
+class CopyLayoutTests(unittest.TestCase):
+    def test_first_source_keeps_its_own_categories(self) -> None:
+        plan = copy_layout("Desk", [row("10", "general", "Talk"), row("11", "dev", "Talk", "  builds  here "), row("12", "news")], False)
+        self.assertEqual(plan["categories"], [{"key": "talk", "name": "Talk"}])
+        self.assertEqual(
+            plan["channels"],
+            [
+                {"source_id": "10", "name": "general", "category_key": "talk", "topic": ""},
+                {"source_id": "11", "name": "dev", "category_key": "talk", "topic": "builds here"},
+                {"source_id": "12", "name": "news", "category_key": "", "topic": ""},
+            ],
+        )
+
+    def test_copy_layout_prefixes_only_a_shared_target(self) -> None:
+        rows = [row("10", "general", "Talk"), row("12", "news")]
+        plan = copy_layout("Desk", rows, True)
+        self.assertEqual(plan["categories"], [{"key": "desk / talk", "name": "Desk / Talk"}, {"key": "desk", "name": "Desk"}])
+        self.assertEqual([c["category_key"] for c in plan["channels"]], ["desk / talk", "desk"])
+        self.assertEqual(copy_layout("Desk", rows, False)["categories"], [{"key": "talk", "name": "Talk"}])
+
+    def test_copy_layout_skips_disabled_and_bad_rows_and_folds_categories(self) -> None:
+        plan = copy_layout("  Desk  ", [row("10", "a", "Talk"), row("11", "b", "talk"), row("x", "c"), row("13", "d", enabled=False), row("14", "   ")], False)
+        self.assertEqual(plan["categories"], [{"key": "talk", "name": "Talk"}])
+        self.assertEqual([c["source_id"] for c in plan["channels"]], ["10", "11", "14"])
+        self.assertEqual(plan["channels"][2]["name"], "channel")
+        self.assertEqual(copy_layout("", [row("1", "a")], True)["categories"], [{"key": "server", "name": "server"}])
+        self.assertEqual(len(copy_layout("x" * 200, [row("1", "y" * 200, "z" * 200)], True)["categories"][0]["name"]), 100)
+        self.assertEqual(len(copy_layout("x", [row("1", "y" * 200)], False)["channels"][0]["name"]), 100)
+        # Store.selection() keeps the tick as the integer 0 or 1
+        self.assertEqual(copy_layout("Desk", [row("15", "e") | {"enabled": 0}], False)["channels"], [])
+
+    def test_same_name_follows_what_discord_shows(self) -> None:
+        self.assertTrue(same_name("General Chat", "general-chat"))
+        self.assertTrue(same_name("dev", "DEV"))
+        self.assertTrue(same_name("a  b", "a-b"))
+        self.assertFalse(same_name("general", "general-2"))
+        self.assertFalse(same_name("", "channel"))
+        # a channel named "channel" (also the name an empty source name gets) is reused on the next fill (decision 9i)
+        self.assertTrue(same_name("Channel", "channel"))
+        self.assertFalse(same_name("!!!", "channel"))
 
 
 class ProvisionTests(unittest.TestCase):
-    def test_blank_name_becomes_mirror(self) -> None:
-        plan = destination_layout([], "   ")
-        self.assertEqual(plan["name"], "mirror")
-        self.assertEqual(plan["categories"], [])
-        self.assertEqual(plan["channels"], [])
-
-    def test_disabled_and_bad_ids_dropped(self) -> None:
-        plan = destination_layout(
-            [
-                {"channel_id": "10", "guild_id": "1", "guild_name": "Desk", "channel_name": "general", "enabled": False},
-                {"channel_id": "nope", "guild_id": "1", "guild_name": "Desk", "channel_name": "secret"},
-                {"channel_id": "", "guild_id": "1", "guild_name": "Desk", "channel_name": "x"},
-            ],
-            "Copy",
-        )
-        self.assertEqual(plan["channels"], [])
-        self.assertEqual(plan["name"], "Copy")
-
-    def test_two_guilds_keep_their_categories(self) -> None:
-        plan = destination_layout(
-            [
-                {"channel_id": "11", "guild_id": "2", "guild_name": "Other", "channel_name": "lobby", "parent": ""},
-                {"channel_id": "10", "guild_id": "1", "guild_name": "Desk", "channel_name": "general", "parent": ""},
-            ],
-            "mirror",
-        )
-        self.assertEqual([item["name"] for item in plan["categories"]], ["Desk", "Other"])
-        self.assertEqual(plan["channels"][0]["category_key"], "1|")
-        self.assertEqual(plan["channels"][1]["guild_id"], "2")
-
-    def test_parent_category_name(self) -> None:
-        plan = destination_layout(
-            [
-                {
-                    "channel_id": "10",
-                    "guild_id": "1",
-                    "guild_name": "Desk",
-                    "channel_name": "notes",
-                    "parent": "talk",
-                }
-            ],
-            "mirror",
-        )
-        self.assertEqual(plan["categories"][0]["name"], "Desk / talk")
-        self.assertEqual(plan["categories"][0]["key"], "1|talk")
-
-    def test_duplicate_slugs(self) -> None:
-        plan = destination_layout(
-            [
-                {"channel_id": "10", "guild_id": "1", "guild_name": "Desk", "channel_name": "General", "parent": ""},
-                {"channel_id": "11", "guild_id": "1", "guild_name": "Desk", "channel_name": "general", "parent": "talk"},
-            ],
-            "mirror",
-        )
-        self.assertEqual([item["name"] for item in plan["channels"]], ["general", "general-2"])
-
-    def test_slug_and_topic(self) -> None:
-        plan = destination_layout(
-            [
-                {
-                    "channel_id": "10",
-                    "guild_id": "1",
-                    "guild_name": "Desk",
-                    "channel_name": "Hello, World!",
-                    "parent": "",
-                    "topic": "x" * 1100,
-                }
-            ],
-            "n" * 150,
-        )
-        self.assertEqual(plan["channels"][0]["name"], "hello-world")
-        self.assertEqual(len(plan["channels"][0]["topic"]), 1024)
-        self.assertEqual(len(plan["name"]), 100)
-
-    def test_empty_slug(self) -> None:
-        plan = destination_layout(
-            [{"channel_id": "10", "guild_id": "1", "guild_name": "Desk", "channel_name": "!!!", "parent": ""}],
-            "mirror",
-        )
-        self.assertEqual(plan["channels"][0]["name"], "channel")
-
-    def test_unicode_names_keep_letters(self) -> None:
-        names = ["日本語 チャット", "Привет Мир", "Café_Lounge", "!!!", "ü" * 150]
-        plan = destination_layout(
-            [
-                {"channel_id": str(10 + n), "guild_id": "1", "guild_name": "Desk", "channel_name": name, "parent": ""}
-                for n, name in enumerate(names)
-            ],
-            "mirror",
-        )
-        got = [item["name"] for item in plan["channels"]]
-        self.assertEqual(got[:4], ["日本語-チャット", "привет-мир", "café-lounge", "channel"])
-        self.assertEqual(got[4], "ü" * 100)
-
-    def test_underscore_becomes_hyphen(self) -> None:
-        plan = destination_layout(
-            [{"channel_id": "10", "guild_id": "1", "guild_name": "Desk", "channel_name": "__dev__ notes__", "parent": ""}],
-            "mirror",
-        )
-        self.assertEqual(plan["channels"][0]["name"], "dev-notes")
-
     def test_webhook_name_rules(self) -> None:
         samples = ["discord-updates", "Clyde", "DiscordFan", "discord.", "x CLYDE discord y", "ev eryone"]
         for value in samples:
