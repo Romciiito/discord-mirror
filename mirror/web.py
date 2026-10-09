@@ -141,6 +141,7 @@ async def events(request: web.Request) -> web.StreamResponse:
     engine: Engine = request.app["engine"]
     queue: asyncio.Queue = asyncio.Queue(maxsize=200)
     engine.listeners.add(queue)
+    request.app["streams"].add(queue)
     response = web.StreamResponse(
         status=200,
         headers={
@@ -160,12 +161,15 @@ async def events(request: web.Request) -> web.StreamResponse:
                     break
                 await response.write(b": ping\n\n")
                 continue
+            if item is None:
+                break  # _end_streams: the server is shutting down
             payload = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
             await response.write(f"data: {payload}\n\n".encode())
             if queue not in engine.listeners:
                 break
     finally:
         engine.listeners.discard(queue)
+        request.app["streams"].discard(queue)
     return response
 
 
@@ -186,6 +190,18 @@ async def _start(app: web.Application) -> None:
     await app["engine"].restore()
 
 
+async def _end_streams(app: web.Application) -> None:
+    """End every /api/events stream before runner.cleanup waits for in-flight handlers: a connected client would
+    otherwise hold the exit for shutdown_timeout, twice over, before Engine.close runs. The CLI's own listener
+    queue is not one of these and is left alone."""
+    for queue in list(app["streams"]):
+        app["engine"].listeners.discard(queue)
+        try:
+            queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass  # the handler ends after its next item, since its queue is no longer a listener
+
+
 async def _stop(app: web.Application) -> None:
     await app["engine"].close()
 
@@ -194,7 +210,9 @@ def create_app(data_dir: str, host: str = "127.0.0.1", port: int = 8765) -> web.
     app = web.Application(middlewares=[origin_guard, guard], client_max_size=1024 * 512)
     app["bind"] = (host, port)
     app["engine"] = Engine(Store(data_dir))
+    app["streams"] = set()
     app.on_startup.append(_start)
+    app.on_shutdown.append(_end_streams)
     app.on_cleanup.append(_stop)
     app.router.add_get("/", index)
     app.router.add_get("/api/state", state)

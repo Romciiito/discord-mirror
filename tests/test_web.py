@@ -819,6 +819,56 @@ class GracefulExitTests(unittest.TestCase):
 
         self._ends_with_the_engine_fully_closed(ctrl_c)
 
+    def test_a_graceful_exit_with_a_client_on_the_event_stream_closes_the_engine_without_the_shutdown_wait(
+        self,
+    ) -> None:
+        # runner.cleanup waits up to shutdown_timeout for in-flight handlers, twice over, before the app's cleanup
+        # runs Engine.close; an /api/events client that stays connected must not hold the exit for that long
+        from aiohttp.web_runner import _raise_graceful_exit
+
+        shutdown_timeout = 3.0
+        port = _free_port()
+        app = create_app(self.tmp.name, "127.0.0.1", port)
+        engine = app["engine"]
+        real = web.AppRunner
+        seen: dict[str, Any] = {}
+
+        def short_shutdown(*args: Any, **kwargs: Any) -> web.AppRunner:
+            return real(*args, shutdown_timeout=shutdown_timeout, **kwargs)
+
+        def subscribe() -> None:
+            # a raw socket the test keeps open until _run returned, so only the server can end the stream
+            sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+            seen["sock"] = sock
+            sock.sendall(f"GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+            data = b""
+            while b": ok\n\n" not in data:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError(f"the event stream ended before its first line: {data!r}")
+                data += chunk
+
+        async def body() -> None:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, subscribe)
+            seen["listeners"] = len(engine.listeners)
+            seen["interrupted"] = time.monotonic()
+            loop.call_soon(_raise_graceful_exit)
+            await asyncio.Event().wait()
+
+        try:
+            with mock.patch.object(web, "AppRunner", short_shutdown):
+                entry._run(app, "127.0.0.1", port, body, handle_signals=True)
+            elapsed = time.monotonic() - seen["interrupted"]
+        finally:
+            if "sock" in seen:
+                seen["sock"].close()
+        self.assertEqual(seen["listeners"], 1)
+        self.assertLess(elapsed, shutdown_timeout / 2, f"the exit took {elapsed:.2f} s")
+        self.assertIsNone(engine.session)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            engine.store.conn.execute("SELECT 1")
+
 
 @contextlib.contextmanager
 def _pipe_terminal():
