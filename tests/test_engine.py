@@ -1586,6 +1586,22 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((caught.exception.status, str(caught.exception)), (400, "webhooks of #general could not be listed, try again"))
         self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
         self.assertEqual(self.store.targets(), {})
+        self.assertIn("#general was not wired (its webhooks could not be listed)", self.notes())
+
+    async def test_a_row_held_back_by_a_failed_listing_is_noted_with_the_channel_whose_listing_failed(self) -> None:
+        # the ticked "My Chat" has its copy "my-chat" (the same name for a fill), whose listing Discord answers with a
+        # 500: the note names the row and the channel whose webhooks could not be listed, and so does the error
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [{"id": "t10", "type": 0, "name": "my-chat", "parent_id": None}]
+        http.refused.add(("GET", "/channels/t10/webhooks"))
+        self.engine.http = http
+        self.store.replace_selection([row("10", "https://discord.com/api/webhooks/1/a", name="My Chat")])
+        with self.assertRaises(ApiError) as caught:
+            await self.engine.fill_copy("5", "900")
+        self.assertEqual(str(caught.exception), "webhooks of #my-chat could not be listed, try again")
+        self.assertIn("#My Chat was not wired (the webhooks of #my-chat could not be listed)", self.notes())
+        self.assertFalse(any("its webhooks" in line for line in self.notes()))
 
     async def test_fill_while_running_refreshes(self) -> None:
         http = FakeHTTP()

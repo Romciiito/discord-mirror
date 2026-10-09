@@ -513,14 +513,17 @@ class Engine:
             await self._wait(0.3)
         pairs: list[tuple[str, str]] = []
         reused = 0
-        blocked: list[str] = []  # the unlisted channels that kept a row from being wired, in layout order
+        blocked: list[str] = []  # the names of the unlisted channels that kept a row from being wired, in layout order
         for channel in layout["channels"]:
             source = channel["source_id"]
             dest = found.get(source, "")
             if not dest and source in unproven:
-                # never a channel beside one that may be the row's copy; the stored URL stays (Mando never deletes)
-                self.note(f"#{channel['name']} was not wired (its webhooks could not be listed)")
-                blocked.append(unproven[source])
+                # never a channel beside one that may be the row's copy; the stored URL stays (Mando never deletes).
+                # The note names the channel whose listing failed when its name is not the row's
+                blocker = next(str(item.get("name") or "") for item in texts if str(item["id"]) == unproven[source])
+                whose = "its webhooks" if blocker == channel["name"] else f"the webhooks of #{blocker}"
+                self.note(f"#{channel['name']} was not wired ({whose} could not be listed)")
+                blocked.append(blocker)
                 continue
             if not dest:
                 key = channel["category_key"]
@@ -558,8 +561,7 @@ class Engine:
                 self.note(f"#{channel['name']}")
         if not pairs and blocked:
             # no webhook was tried for those rows: the owner is told which listing to wait for, not a creation failure
-            name = next(str(item.get("name") or "") for item in texts if str(item["id"]) == blocked[0])
-            raise ApiError(400, f"webhooks of #{name} could not be listed, try again")
+            raise ApiError(400, f"webhooks of #{blocked[0]} could not be listed, try again")
         if not pairs:
             raise ApiError(400, "no webhook could be created")
         return pairs, reused
