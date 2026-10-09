@@ -403,10 +403,6 @@ class Engine:
                 and (parent is None or str(item.get("parent_id") or "") == parent)
             ]
 
-        def free(name: str, parent: str | None) -> list[str]:
-            """The spots a row may take: neither claimed nor unlisted, since an unlisted channel may be a copy."""
-            return [spot for spot in spots(name, parent) if spot not in unlisted]
-
         def others(source: str) -> set[str]:
             """The webhook ids held by channels other than the row, without the row's own (a webhook two rows share
             stays the row's own)."""
@@ -425,11 +421,11 @@ class Engine:
                     listed[spot] = hooks
             return listed.get(spot)
 
-        async def carrier(source: str, spots: list[str]) -> str:
-            """The spot whose webhooks hold the row's own webhook (`before`), with that webhook kept in `carried`; ""
-            when no spot carries it."""
+        async def carrier(source: str, candidates: list[str]) -> str:
+            """The candidate whose webhooks hold the row's own webhook (`before`), with that webhook kept in
+            `carried`; "" when no candidate carries it."""
             mine = webhook_parts(before.get(source, ""))
-            for spot in spots if mine else []:
+            for spot in candidates if mine else []:
                 own = next(
                     (
                         hook
@@ -447,10 +443,10 @@ class Engine:
                 return spot
             return ""
 
-        async def stranger(source: str, spots: list[str]) -> str:
-            """The first spot whose listing works and shows no webhook of another channel (`others`): one that does
-            is that channel's copy, so the row passes it over as if it were claimed; "" when no spot is left."""
-            for spot in spots:
+        async def stranger(source: str, candidates: list[str]) -> str:
+            """The first candidate whose listing works and shows no webhook of another channel (`others`): one that
+            does is that channel's copy, so the row passes it over as if it were claimed; "" when none is left."""
+            for spot in candidates:
                 hooks = await hooks_of(spot)
                 if hooks is not None and not {str(hook.get("id") or "") for hook in hooks} & others(source):
                     return spot
@@ -483,15 +479,16 @@ class Engine:
                     or (not by_webhook and source in unproven)
                 ):
                     continue
-                if by_webhook:
-                    pick = await carrier(source, free(channel["name"], parent))
-                else:
-                    pick = await stranger(source, free(channel["name"], parent))
+                # the unclaimed channels of the row's name in this mode's place; the free ones leave out every
+                # unlisted channel, since it may be a copy
+                candidates = spots(channel["name"], parent)
+                free = [spot for spot in candidates if spot not in unlisted]
+                pick = await (carrier if by_webhook else stranger)(source, free)
                 if pick:
                     found[source] = pick
                     claimed.add(pick)
                 elif mine or own_place:
-                    blocker = next((spot for spot in spots(channel["name"], parent) if spot in unlisted), "")
+                    blocker = next((spot for spot in candidates if spot in unlisted), "")
                     if blocker:
                         unproven.setdefault(source, blocker)
         needed = {
