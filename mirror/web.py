@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from aiohttp import web
@@ -14,7 +13,6 @@ from .keychain import read_keychain
 from .store import Store
 
 log = logging.getLogger("mirror.web")
-STATIC = Path(__file__).resolve().parent.parent / "static"
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 PING = 15.0
 
@@ -66,8 +64,8 @@ async def guard(request: web.Request, handler):
         return web.json_response({"error": "request failed"}, status=500)
 
 
-async def index(_request: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC / "index.html")
+async def index(_request: web.Request) -> web.Response:
+    return web.Response(text="UI unavailable now", content_type="text/plain")
 
 
 async def state(request: web.Request) -> web.Response:
@@ -199,7 +197,6 @@ def create_app(data_dir: str, host: str = "127.0.0.1", port: int = 8765) -> web.
     app.on_startup.append(_start)
     app.on_cleanup.append(_stop)
     app.router.add_get("/", index)
-    app.router.add_static("/static/", STATIC, show_index=False)
     app.router.add_get("/api/state", state)
     app.router.add_get("/api/feed", feed)
     app.router.add_post("/api/session", open_session)

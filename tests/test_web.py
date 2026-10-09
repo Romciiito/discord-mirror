@@ -185,6 +185,15 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app["engine"].store.path, Path(data) / "state.db")
         self.assertTrue(os.path.isfile(os.path.join(data, "state.db")))
 
+    async def test_root_says_the_ui_is_unavailable_and_static_is_gone(self) -> None:
+        client = await self.client()
+        resp = await client.get("/")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.content_type, "text/plain")
+        self.assertEqual(await resp.text(), "UI unavailable now")
+        resp = await client.get("/static/app.js")
+        self.assertEqual(resp.status, 404)
+
 
 class MainTests(unittest.TestCase):
     """configure_logging opens a file under DATA_DIR; every test closes the handlers it added, or
