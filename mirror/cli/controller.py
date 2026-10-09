@@ -65,7 +65,8 @@ class Controller:
 
     def _apply(self, snap: dict[str, Any]) -> None:
         self.snap = snap
-        self.picked = {row["channel_id"]: row for row in snap.get("selection") or [] if row.get("enabled")}
+        # copies: the URL row edits a picked row, which must not change the snapshot's rows before a save
+        self.picked = {row["channel_id"]: dict(row) for row in snap.get("selection") or [] if row.get("enabled")}
 
     async def load(self) -> None:
         self.refresh()
@@ -180,6 +181,19 @@ class Controller:
     # ---- menu actions ------------------------------------------------------
 
     async def _begin(self) -> None:
+        try:
+            # engine.start() reads the stored selection, so Start checks that and not the ticks a failed
+            # save left in memory (a stored row without a URL would make the engine create a server)
+            self.refresh()
+        except (ApiError, RuntimeError) as exc:
+            self.error = str(exc)
+            self.flow = _menu_state()
+            return
+        except Exception:
+            log.exception("reading the selection before start failed")
+            self.error = UNEXPECTED
+            self.flow = _menu_state()
+            return
         blocker = self._start_blocker()
         if blocker is not None:
             await self._jump_to(blocker)
@@ -229,22 +243,23 @@ class Controller:
             self.busy = False
         at = next((at for at, channel in enumerate(listed) if channel["id"] == row.get("channel_id")), None)
         if at is None:
-            # the server is gone from the account's list or the channel from the server's readable
-            # channels: there is no row to jump to and Select servers cannot untick it, so Start does
-            await self._drop_unreadable(row, name)
-            return
+            # not listed: the channel was deleted or hidden, the account left the server, or the engine's
+            # list missed it (Engine._role_ids reads no roles when the member call fails), so this proves
+            # nothing; the row is shown at the end of the list so Enter can give it a URL or untick it
+            guild = guild or {"id": row.get("guild_id"), "name": row.get("guild_name") or "", "icon": ""}
+            listed.append({
+                "id": row.get("channel_id"),
+                "name": row.get("channel_name") or str(row.get("channel_id") or ""),
+                "parent": row.get("parent") or "",
+                "topic": row.get("topic") or "",
+            })
+            at = len(listed) - 1
+            self.error = f"{name} has no webhook (not listed)"
         self.channel_rows = listed
         self.active_guild = guild
         self.depth = "channels"
         self.local_index = at
         self.flow = _menu_state("servers")
-
-    async def _drop_unreadable(self, row: dict[str, Any], name: str) -> None:
-        self.picked.pop(row.get("channel_id"), None)
-        self.flow = _menu_state()
-        await self._save_options()
-        if not self.error:  # a failed save keeps its own error
-            self.error = f"{name} is no longer readable, unticked"
 
     async def _halt(self) -> None:
         self.busy = True

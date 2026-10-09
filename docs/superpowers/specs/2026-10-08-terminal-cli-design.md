@@ -112,12 +112,20 @@ Decisions (owner):
   columns are ignored, channels without a webhook follow 9f, and the old shared
   server on Discord is left alone (as in 9e).
 - **Gap in 9f, found in the Task 6b review (2026-10-09; plan A's rule, not an owner
-  decision yet).** A ticked channel without a webhook that the account can no longer
-  list (channel deleted or hidden, or the server left; a selection kept by 9h can hold
-  one) has no row to jump to, and Select servers only unticks listed channels, so 9f as
-  written refuses every Start. Plan A's Task 6b unticks such a row at Start, saves, and
-  says "#x is no longer readable, unticked"; a list call that fails keeps the row and
-  the refusal. Plan B, which moves the Start rule into the engine, inherits the case.
+  decision yet).** A ticked channel without a webhook that the lists do not show
+  (channel deleted or hidden, or the server left; a selection kept by 9h can hold one)
+  has no row to jump to, and Select servers only unticks listed channels, so 9f as
+  written refuses every Start. Not being listed is not proof: `Engine.channels` drops
+  every channel readable only through a role when the member call fails
+  (`Engine._role_ids` returns no roles on an error), so a network blip hides a readable
+  channel from a list that looks successful (measured in the round-2 review). Plan A's
+  Task 6b therefore never unticks at Start: it adds the row at the end of that server's
+  channel list (alone, under the stored server name, when the server is not listed),
+  jumps to it with "#x has no webhook (not listed)", and the owner gives it a URL or
+  unticks it in its URL row. A list call that fails keeps the row and the refusal.
+  Start checks the stored selection, re-read at Start, because `engine.start()` reads
+  that and a failed save leaves the CLI's ticks and the store apart. Plan B, which
+  moves the Start rule into the engine, inherits the case.
 
 **Measured 2026-10-09: Mando cannot create servers.** The Discord changelog of
 2025-04-15, "Deprecating Guild Creation by Apps", retired `POST /guilds` for

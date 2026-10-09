@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+import tempfile
 import unittest
 from typing import Any
 
@@ -8,6 +10,8 @@ import aiohttp
 
 from mirror.cli.controller import Controller
 from mirror.discord_api import ApiError, clean_token
+from mirror.engine import Engine
+from mirror.store import Store
 
 
 class FakeEngine:
@@ -841,50 +845,184 @@ class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
         engine.selection = [dict(row, enabled=True) for row in rows]
         ui.refresh()
 
-    async def test_start_unticks_a_ticked_channel_that_is_no_longer_listed(self) -> None:
-        # a kept selection (story 26) can hold a channel deleted or hidden since: the channel list has no
-        # row to jump to, so Start unticks it and says so instead of refusing every later Start
+    async def test_start_jumps_to_a_ticked_channel_that_is_no_longer_listed(self) -> None:
+        # a kept selection (story 26) can hold a channel deleted or hidden since, and the engine's list can
+        # also miss a readable one (Engine._role_ids reads no roles when the member call fails): the row is
+        # added to the channel list so Enter can give it a URL or untick it; Start never drops it itself
         ui, engine = make()
         self.stale(ui, engine, [
             {"channel_id": "c9", "guild_id": "g1", "guild_name": "Qwen", "channel_name": "gone", "webhook_url": ""},
             {"channel_id": "c2", "guild_id": "g1", "guild_name": "Qwen", "channel_name": "dev", "webhook_url": HOOK},
         ])
         await keys(ui, "Enter", "1")
-        self.assertEqual([call[0] for call in engine.calls], ["guilds", "channels", "save_setup"])
-        self.assertEqual([row["channel_id"] for row in engine.selection], ["c2"])
-        self.assertEqual(set(ui.picked), {"c2"})
-        self.assertEqual(ui.error, "#gone is no longer readable, unticked")
-        self.assertEqual(ui.flow["screen"], "menu")
+        self.assertEqual([call[0] for call in engine.calls], ["guilds", "channels"])
+        self.assertEqual([row["channel_id"] for row in engine.selection], ["c9", "c2"])
+        self.assertEqual(set(ui.picked), {"c9", "c2"})
+        self.assertEqual(ui.error, "#gone has no webhook (not listed)")
+        self.assertEqual((ui.flow["screen"], ui.depth, ui.active_guild["id"]), ("servers", "channels", "g1"))
+        self.assertEqual([channel["id"] for channel in ui.channel_rows], ["c2", "c9"])
+        self.assertEqual(ui.channel_rows[ui.local_index]["id"], "c9")
         self.assertFalse(ui.busy)
-        await keys(ui, "1")
+        await keys(ui, "Enter", "Enter")
+        self.assertEqual([row["channel_id"] for row in engine.selection], ["c2"])
+        await keys(ui, "Escape", "Escape", "Escape", "1")
         self.assertEqual(engine.calls[-1], ("start",))
         self.assertEqual(ui.flow["screen"], "running")
 
-    async def test_start_unticks_a_ticked_channel_of_a_server_the_account_left(self) -> None:
+    async def test_start_jumps_to_a_ticked_channel_of_a_server_the_account_left(self) -> None:
         ui, engine = make()
         self.stale(ui, engine, [
-            {"channel_id": "c7", "guild_id": "g7", "guild_name": "Old", "channel_name": "news", "webhook_url": ""},
+            {"channel_id": "c7", "guild_id": "g7", "guild_name": "Old", "channel_name": "news",
+             "parent": "Info", "topic": "t", "webhook_url": ""},
         ])
         await keys(ui, "Enter", "1")
         # the server is not in the account's server list, so its channels are not asked for
-        self.assertEqual([call[0] for call in engine.calls], ["guilds", "save_setup"])
-        self.assertEqual(engine.selection, [])
-        self.assertEqual(ui.picked, {})
-        self.assertEqual(ui.error, "#news is no longer readable, unticked")
-        self.assertEqual(ui.flow["screen"], "menu")
-        self.assertFalse(ui.busy)
+        self.assertEqual([call[0] for call in engine.calls], ["guilds"])
+        self.assertEqual(set(ui.picked), {"c7"})
+        self.assertEqual(ui.error, "#news has no webhook (not listed)")
+        self.assertEqual((ui.flow["screen"], ui.depth), ("servers", "channels"))
+        self.assertEqual((ui.active_guild["id"], ui.active_guild["name"]), ("g7", "Old"))
+        self.assertEqual(ui.channel_rows, [{"id": "c7", "name": "news", "parent": "Info", "topic": "t"}])
+        self.assertEqual(ui.local_index, 0)
+        await keys(ui, "Enter")
+        await ui.paste(HOOK)
+        await keys(ui, "Enter")
+        # the URL row of the shown row keeps the stored server, parent and topic
+        self.assertEqual(engine.selection[0]["webhook_url"], HOOK)
+        self.assertEqual((engine.selection[0]["guild_id"], engine.selection[0]["parent"]), ("g7", "Info"))
+        await keys(ui, "Escape")
+        self.assertEqual((ui.depth, ui.local_index), ("guilds", 0))
 
-    async def test_a_failed_save_of_the_unticked_row_shows_the_save_error(self) -> None:
+    async def test_a_failed_save_keeps_start_refused_while_the_stored_row_has_no_webhook(self) -> None:
+        # Start checks what is stored, not the ticks in memory a failed save left behind: engine.start()
+        # reads the stored selection and would try to create a server for a stored row without a URL
         ui, engine = make()
         self.stale(ui, engine, [
             {"channel_id": "c9", "guild_id": "g1", "guild_name": "Qwen", "channel_name": "gone", "webhook_url": ""},
         ])
-        engine.fail["save_setup"] = RuntimeError("database is locked")
         await keys(ui, "Enter", "1")
+        engine.fail["save_setup"] = RuntimeError("database is locked")
+        await keys(ui, "Enter", "Enter")
+        self.assertEqual(ui.error, "database is locked")
+        self.assertEqual([row["channel_id"] for row in engine.selection], ["c9"])
+        await keys(ui, "Escape", "Escape", "Escape", "1")
         self.assertNotIn(("start",), engine.calls)
+        self.assertEqual(ui.error, "#gone has no webhook (not listed)")
+        self.assertEqual(ui.channel_rows[ui.local_index]["id"], "c9")
+        self.assertFalse(ui.busy)
+
+    async def test_a_failed_url_save_keeps_start_refused(self) -> None:
+        ui, engine = await self.open_channels()
+        await keys(ui, "Enter")
+        await ui.paste("https://")
+        await keys(ui, "Escape")
+        self.assertEqual(engine.selection[0]["webhook_url"], "")
+        await keys(ui, "Enter")
+        await ui.paste(HOOK)
+        engine.fail["save_setup"] = RuntimeError("database is locked")
+        await keys(ui, "Enter")
+        self.assertEqual(ui.error, "database is locked")
+        await keys(ui, "Escape", "Escape", "Escape", "1")
+        self.assertNotIn(("start",), engine.calls)
+        self.assertEqual(ui.error, "#general has no webhook")
+        self.assertEqual(ui.channel_rows[ui.local_index]["id"], "c1")
+        del engine.fail["save_setup"]
+        await keys(ui, "Enter")
+        await ui.paste(HOOK)
+        await keys(ui, "Enter", "Escape", "Escape", "Escape", "1")
+        self.assertEqual(engine.calls[-1], ("start",))
+
+    async def test_start_does_not_run_when_the_stored_selection_cannot_be_read(self) -> None:
+        ui, engine = make()
+        await keys(ui, "Enter")
+        snapshot = engine.snapshot
+
+        def locked() -> dict:
+            raise RuntimeError("database is locked")
+
+        def broken() -> dict:
+            raise sqlite3.OperationalError("disk I/O error")
+
+        engine.snapshot = locked
+        await keys(ui, "1")
         self.assertEqual(ui.error, "database is locked")
         self.assertEqual(ui.flow["screen"], "menu")
+        engine.snapshot = broken
+        with self.assertLogs("mirror.cli", level="ERROR"):
+            await keys(ui, "1")
+        self.assertEqual(ui.error, "request failed")
+        self.assertEqual(ui.flow["screen"], "menu")
+        self.assertNotIn(("start",), engine.calls)
         self.assertFalse(ui.busy)
+        engine.snapshot = snapshot
+        await keys(ui, "1")
+        self.assertEqual(engine.calls, [("start",)])
+
+
+PERMS = str((1 << 10) | (1 << 16))  # VIEW_CHANNEL and READ_MESSAGE_HISTORY
+
+
+class RoleGatedHTTP:
+    """Discord for the real Engine: #gated (13) is readable through role 77 only."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.member_error: ApiError | None = None
+
+    async def guilds(self) -> list[dict]:
+        self.calls.append(("GET", "/users/@me/guilds"))
+        return [{"id": "900", "name": "Qwen", "permissions": PERMS}]
+
+    async def channels(self, guild_id: str) -> list[dict]:
+        self.calls.append(("GET", f"/guilds/{guild_id}/channels"))
+        return [
+            {"id": "12", "name": "dev", "type": 0, "position": 0},
+            {"id": "13", "name": "gated", "type": 0, "position": 1, "permission_overwrites": [
+                {"id": "900", "type": 0, "allow": "0", "deny": str(1 << 10)},
+                {"id": "77", "type": 0, "allow": str(1 << 10), "deny": "0"},
+            ]},
+        ]
+
+    async def call(self, method: str, path: str, **kw: Any) -> Any:
+        self.calls.append((method, path))
+        if path == "/users/@me/guilds/900/member":
+            if self.member_error is not None:
+                raise self.member_error
+            return {"roles": ["77"]}
+        raise ApiError(403, f"{method} {path} is not expected")
+
+
+class RealEngineStartTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(self.tmp.name)
+        self.engine = Engine(self.store)
+        self.http = RoleGatedHTTP()
+        self.engine.http = self.http
+        self.engine.user = {"id": "1", "username": "sosa", "global_name": "Sosa"}
+        self.store.replace_selection([{
+            "channel_id": "13", "guild_id": "900", "guild_name": "Qwen", "channel_name": "gated",
+            "webhook_url": "", "enabled": True, "parent": "", "topic": "",
+        }])
+
+    async def asyncTearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+
+    async def test_a_failed_member_call_keeps_the_ticked_channel(self) -> None:
+        self.assertEqual([c["id"] for c in await self.engine.channels("900")], ["12", "13"])
+        self.http.member_error = ApiError(500, "GET /users/@me/guilds/900/member failed")
+        # Engine._role_ids reads no roles, so the engine's list misses #gated: that proves nothing
+        self.assertEqual([c["id"] for c in await self.engine.channels("900")], ["12"])
+        ui = Controller(self.engine, read_keychain=read_keychain_fake)
+        ui.refresh()
+        await keys(ui, "Enter", "1")
+        self.assertEqual([row["channel_id"] for row in self.store.selection()], ["13"])
+        self.assertEqual(set(ui.picked), {"13"})
+        self.assertEqual(ui.error, "#gated has no webhook (not listed)")
+        self.assertEqual(ui.channel_rows[ui.local_index]["id"], "13")
+        self.assertNotIn(("POST", "/guilds"), self.http.calls)
+        self.assertFalse(self.engine.running)
 
 
 if __name__ == "__main__":
