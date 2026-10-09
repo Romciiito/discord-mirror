@@ -1183,6 +1183,24 @@ class RealEngineStartTests(unittest.IsolatedAsyncioTestCase):
         self.store.close()
         self.tmp.cleanup()
 
+    async def test_a_failed_gateway_stop_shows_the_real_engine_stopped_on_the_status_line(self) -> None:
+        # the real Engine.stop clears running and drops the gateway before it awaits gateway.stop()
+        class FailingGateway:
+            async def stop(self) -> None:
+                raise RuntimeError("gateway timeout")
+
+        self.engine.gateway = FailingGateway()
+        self.engine.running = True
+        ui = Controller(self.engine, read_keychain=read_keychain_fake)
+        ui.refresh()
+        self.assertIn(" · running · ", status_line(ui))
+        await keys(ui, "Enter", "3")
+        self.assertEqual(ui.flow["screen"], "exit")
+        self.assertEqual(status_line(ui), "Sosa · stopped · 0 mirrored · gateway timeout")
+        self.assertFalse(self.engine.running)
+        self.assertIsNone(self.engine.gateway)
+        self.assertFalse(ui.busy)
+
     async def test_a_failed_member_call_keeps_the_ticked_channel(self) -> None:
         self.assertEqual([c["id"] for c in await self.engine.channels("900")], ["12", "13"])
         self.http.member_error = ApiError(500, "GET /users/@me/guilds/900/member failed")
