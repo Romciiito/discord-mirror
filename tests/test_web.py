@@ -165,6 +165,23 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(chunk[6:].decode()), {"kind": "log", "text": "hello"})
         resp.close()
 
+    async def test_events_that_fail_before_the_headers_leave_no_queue_behind(self) -> None:
+        # a client that closed its socket before the headers went out: prepare() raises, and the queue must not
+        # stay in app["streams"] or engine.listeners for the life of the process
+        class ClosedBeforeHeaders(web.StreamResponse):
+            async def prepare(self, request: web.BaseRequest) -> Any:
+                raise ConnectionResetError("the client closed the socket before the headers")
+
+        client = await self.client()
+        app = client.server.app
+        with mock.patch.object(webmod.web, "StreamResponse", ClosedBeforeHeaders), self.assertLogs(
+            "mirror.web", level="ERROR"
+        ):
+            resp = await client.get("/api/events")
+            self.assertEqual(resp.status, 500)
+        self.assertEqual(len(app["streams"]), 0)
+        self.assertEqual(len(app["engine"].listeners), 0)
+
     async def test_cleanup_closes_store(self) -> None:
         client = await self.client()
         engine = client.server.app["engine"]

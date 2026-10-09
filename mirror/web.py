@@ -140,8 +140,6 @@ async def stop(request: web.Request) -> web.Response:
 async def events(request: web.Request) -> web.StreamResponse:
     engine: Engine = request.app["engine"]
     queue: asyncio.Queue = asyncio.Queue(maxsize=200)
-    engine.listeners.add(queue)
-    request.app["streams"].add(queue)
     response = web.StreamResponse(
         status=200,
         headers={
@@ -152,6 +150,9 @@ async def events(request: web.Request) -> web.StreamResponse:
     )
     await response.prepare(request)
     try:
+        # registered only once the headers went out, inside the try: a client gone before them leaves no queue
+        engine.listeners.add(queue)
+        request.app["streams"].add(queue)
         await response.write(b": ok\n\n")
         while True:
             try:
