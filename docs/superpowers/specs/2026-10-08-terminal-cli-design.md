@@ -207,6 +207,15 @@ Decisions (owner):
   webhook; the first source, refilled with a newly ticked category named like a later
   source's, took that source's channel; a source named "Text Channels" took the server's
   own `general` that the first source had reused, with its webhook.
+- **The facts a fill copies, found in the Task 4 review of plan B, round 4 (2026-10-09;
+  plan B's rule, not an owner decision yet).** The facts a fill copies for a channel
+  (name, category, topic, age restriction) are those stored when the owner ticked it;
+  re-ticking refreshes them; the owner decides whether a fill should read them live
+  instead. Each selection row takes them from the channel list at the tick, and only the
+  tick writes them: Start and the refresh rewrite no row, and a fill writes only the
+  webhook URL. So a source channel renamed, moved, given another topic or made
+  age-restricted after the tick gets its copy created with the stored values, in the
+  last case without the age gate. A channel the fill finds is never altered.
 - **10e.** (owner, 2026-10-09, plan C) Issue #6 (an edit that removes every embed sends
   `embeds: []`) and the 6000-character embed total from #8 ship in plan C. The rest of
   #8 and #4, #5, #7 stay separate.
