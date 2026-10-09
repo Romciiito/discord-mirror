@@ -1,1 +1,2 @@
 aiohttp>=3.10.11,<4
+prompt_toolkit>=3.0.53,<3.1
