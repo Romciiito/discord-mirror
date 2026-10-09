@@ -35,6 +35,7 @@ class FakeEngine:
         self.guild_list: list[dict] = []
         self.channel_lists: dict[str, list[dict]] = {}
         self.keychain: dict[tuple[str, str], str] = {}
+        self.replaced: int | None = None  # the count a fill reports, when not the one fill_copy counts
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -108,13 +109,17 @@ class FakeEngine:
         name = next(g["name"] for g in self.owned if g["id"] == target_id)
         self.targets[source_id] = {"target_id": target_id, "target_name": name}
         # as Engine.fill_copy: every ticked row of the source gets the target's webhook, an own one included
-        # (decision 9n), and a refill into the same target finds the same webhook again
+        # (decision 9n), and a refill into the same target finds the same webhook again; the report counts the
+        # earlier URLs the fill replaced
+        replaced = 0
         for row in self.selection:
             if row["guild_id"] == source_id:
-                row["webhook_url"] = f"https://discord.com/api/webhooks/{target_id}{row['channel_id']}/t"
+                url = f"https://discord.com/api/webhooks/{target_id}{row['channel_id']}/t"
+                replaced += int(row.get("webhook_url") not in ("", None, url))
+                row["webhook_url"] = url
         # as Engine.fill_copy: the refresh of a running mirror comes after the store holds the URLs and the link
         self._maybe_fail("fill_copy_refresh")
-        return {"target": name, "filled": 2, "reused": 0}
+        return {"target": name, "filled": 2, "reused": 0, "replaced": replaced if self.replaced is None else self.replaced}
 
 
 async def read_keychain_fake(service: str, account: str) -> str:
@@ -913,7 +918,8 @@ class ServersScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ui.busy)
 
     async def test_a_fill_that_replaces_earlier_webhook_urls_says_so(self) -> None:
-        # the engine notes the count only in its log, which the CLI does not show (gap in 9g and 9n)
+        # the engine notes the count in its log, which the CLI does not show, so the line shows the report's count
+        # (gap in 9g and 9n)
         ui, engine = await self.open_servers()
         long_name = "The archive of every message we ever wrote"
         engine.owned = [{"id": "t1", "name": "Qwen copy"}, {"id": "t2", "name": long_name}]
@@ -931,6 +937,21 @@ class ServersScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ui.error, f"2 earlier webhook url(s) replaced, 2 channel(s) ready in {long_name}")
         # the count leads, so a narrow screen that cuts a long server name never cuts it
         self.assertIn("2 earlier webhook url(s) replaced, 2 channel(s) ready in The", render(ui, 60, 10))
+
+    async def test_the_line_after_a_fill_shows_the_count_the_engine_reports(self) -> None:
+        # the engine compares webhook ids, not URLs: a row whose own webhook it found again under the discord.com host
+        # changes its URL and is not replaced, and the CLI never counts on its own
+        ui, engine = await self.open_servers()
+        engine.owned = [{"id": "t1", "name": "Qwen copy"}]
+        await keys(ui, "Enter")
+        next(row for row in engine.selection if row["channel_id"] == "c1")["webhook_url"] = "https://ptb.discord.com/api/webhooks/111/own"
+        ui.refresh()
+        engine.replaced = 0
+        await keys(ui, "c", "Enter")
+        self.assertEqual(ui.error, "2 channel(s) ready in Qwen copy")
+        engine.replaced = 3
+        await keys(ui, "c", "Enter")
+        self.assertEqual(ui.error, "3 earlier webhook url(s) replaced, 2 channel(s) ready in Qwen copy")
 
     async def test_no_owned_server_and_a_failed_list_show_errors(self) -> None:
         ui, engine = await self.open_servers()

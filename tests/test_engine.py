@@ -669,7 +669,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine.http = http
         self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}, row("11", name="news"), row("20", name="other", guild_id="6")])
         report = await self.engine.fill_copy("5", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 0})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 0, "replaced": 0})
         categories = [b for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 4]
         self.assertEqual([c["name"] for c in categories], ["Talk"])
         texts = [b for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 0]
@@ -701,7 +701,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         # Discord shows it, same parent), not the loose "general"; its webhook named "general" has a token and is kept
         self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}, row("11", name="news")])
         report = await self.engine.fill_copy("5", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 1})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 1, "replaced": 0})
         self.assertEqual(self.posts(http, "/guilds/900/channels"), [])
         self.assertEqual([path for method, path, body in http.calls if method == "POST"], ["/channels/t2/webhooks"])
         hooks = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
@@ -738,7 +738,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine.http = http
         self.store.replace_selection([row("10", name="general"), row("11", name="rules") | {"parent": "Info"}, row("12", name="news") | {"parent": "Chat"}])
         report = await self.engine.fill_copy("5", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 3, "reused": 0})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 3, "reused": 0, "replaced": 0})
         self.assertEqual([(b["type"], b["name"]) for b in self.posts(http, "/guilds/900/channels")], [(4, "Chat"), (0, "news")])
         hooked = [path for method, path, body in http.calls if method == "POST" and path.endswith("/webhooks")]
         self.assertIn("/channels/t1/webhooks", hooked)
@@ -754,13 +754,13 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine.http = http
         self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}, row("11", name="general") | {"parent": "Talk"}])
         report = await self.engine.fill_copy("5", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 0})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 0, "replaced": 0})
         self.assertEqual([(b["type"], b["name"]) for b in self.posts(http, "/guilds/900/channels")], [(4, "Talk"), (0, "general"), (0, "general")])
         urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
         self.assertNotEqual(urls["10"], urls["11"])
         http.calls.clear()
         report = await self.engine.fill_copy("5", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 2})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 2, "replaced": 0})
         self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
         self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, urls)
 
@@ -783,7 +783,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([r["channel_id"] for r in self.store.selection()], ["10", "11"])
         report = await self.engine.fill_copy("5", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 2})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 2, "replaced": 0})
         self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
         self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, urls)
         self.assertFalse(any("replaced" in line for line in self.notes()))
@@ -805,7 +805,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         report = await self.engine.fill_copy("6", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0, "replaced": 0})
         self.assertIn("#general was not created (its category failed)", self.notes())
         self.assertEqual([(b["type"], b["name"]) for b in self.posts(http, "/guilds/900/channels")], [(4, "Other / Talk"), (4, "Other"), (0, "news")])
         self.assertFalse(any(path == "/channels/t1/webhooks" for method, path, body in http.calls))
@@ -837,7 +837,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         report = await self.engine.fill_copy("5", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1, "replaced": 0})
         self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
         urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
         self.assertEqual(urls, {"10": "https://discord.com/api/webhooks/77/old", "20": "https://discord.com/api/webhooks/88/other"})
@@ -852,7 +852,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine.http = http
         self.store.replace_selection([row("10", HOOK, name="general"), row("11", name="news")])
         report = await self.engine.fill_copy("5", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 0})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 0, "replaced": 1})
         urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
         self.assertNotEqual(urls["10"], HOOK)
         self.assertTrue(urls["10"].startswith("https://discord.com/api/webhooks/"))
@@ -869,7 +869,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine.http = http
         self.store.replace_selection([row("10", "https://ptb.discord.com/api/webhooks/77/tok", name="general")])
         report = await self.engine.fill_copy("5", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1, "replaced": 0})
         self.assertEqual(self.store.selection()[0]["webhook_url"], "https://discord.com/api/webhooks/77/tok")
         self.assertFalse(any("replaced" in line for line in self.notes()))
 
@@ -918,7 +918,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         # the row holds the URL of Desk's first fill: found again, so nothing counts as replaced
         self.store.replace_selection([row("10", "https://discord.com/api/webhooks/77/old", name="general") | {"parent": "Talk"}])
         report = await self.engine.fill_copy("5", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1, "replaced": 0})
         self.assertEqual([path for method, path, body in http.calls if method == "POST"], [])
         # one spot of that name: its webhooks are listed once, in the webhook step, with no wait of their own
         self.assertEqual([path for method, path, body in http.calls if method == "GET"], ["/channels/t1/webhooks"])
@@ -944,14 +944,15 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         http.hooks["t1"] = [{"id": "77", "name": "general", "token": "old"}]
         http.calls.clear()
         report = await self.engine.fill_copy("6", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0, "replaced": 0})
         self.assertEqual([b["name"] for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 4], ["Other / Talk"])
         urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
         self.assertNotEqual(urls["20"], "https://discord.com/api/webhooks/77/old")
         self.assertEqual(self.store.targets()["6"], {"target_id": "900", "target_name": "Desk copy", "shared": True})
         http.calls.clear()
+        # the row holds the URL the fill into 901 made, so finding Desk's own webhook in 900 again replaces it
         report = await self.engine.fill_copy("5", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1, "replaced": 1})
         self.assertEqual([path for method, path, body in http.calls if method == "POST"], [])
         urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
         self.assertEqual(urls["10"], "https://discord.com/api/webhooks/77/old")
@@ -990,7 +991,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         await self.engine.fill_copy("5", "900")
         http.calls.clear()
         report = await self.engine.fill_copy("6", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0, "replaced": 0})
         made = self.posts(http, "/guilds/900/channels")
         self.assertEqual([(b["type"], b["name"]) for b in made], [(4, "Trading"), (0, "general")])
         desk, other = [item["id"] for item in http.sources["900"] if item["type"] == 4]
@@ -1051,7 +1052,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         )
         http.calls.clear()
         report = await self.engine.fill_copy("5", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 1})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 1, "replaced": 0})
         self.assertEqual([(b["type"], b["name"]) for b in self.posts(http, "/guilds/900/channels")], [(4, "Trading"), (0, "general")])
         after = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
         self.assertEqual((after["10"], after["20"]), (urls["10"], urls["20"]))
@@ -1074,7 +1075,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         await self.engine.fill_copy("5", "900")
         http.calls.clear()
         report = await self.engine.fill_copy("6", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0})
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0, "replaced": 0})
         made = self.posts(http, "/guilds/900/channels")
         self.assertEqual([(b["type"], b["name"]) for b in made], [(4, "Text Channels"), (0, "general")])
         self.assertNotEqual(made[1]["parent_id"], "c1")

@@ -734,13 +734,6 @@ class Controller:
 
     async def _fill(self, target: dict[str, Any]) -> None:
         source = self.target_source or {}
-        # a fill gives every ticked channel of the source the copy's webhook, an own one (decision 9g) or an earlier
-        # copy's URL included (decision 9n); the engine notes the count only in its log, which the CLI does not show
-        before = {
-            cid: row["webhook_url"]
-            for cid, row in self.picked.items()
-            if row.get("guild_id") == source.get("id") and row.get("webhook_url")
-        }
         self.busy = True
         try:
             report = await self.engine.fill_copy(str(source.get("id") or ""), target["id"])
@@ -760,8 +753,9 @@ class Controller:
             self.busy = False
         self._leave_targets()
         text = f"{report.get('filled', 0)} channel(s) ready in {report.get('target') or target.get('name')}"
-        replaced = sum(
-            1 for cid, url in before.items() if (self.picked.get(cid) or {}).get("webhook_url") not in (None, "", url)
-        )
-        # the count leads, so a narrow screen that cuts a long server name never cuts it
+        # a fill gives every ticked channel of the source the copy's webhook, an own one (decision 9g) or an earlier
+        # copy's URL included (decision 9n); the engine notes the count in its log, which the CLI does not show, and
+        # reports it, so the line shows the engine's count. The count leads, so a narrow screen that cuts a long
+        # server name never cuts it
+        replaced = int(report.get("replaced") or 0)
         self.error = f"{replaced} earlier webhook url(s) replaced, {text}" if replaced else text

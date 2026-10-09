@@ -339,7 +339,7 @@ class Engine:
             self.note(f"{replaced} earlier webhook url(s) replaced")
         if self.running:
             await self.refresh()
-        return {"target": target["name"], "filled": len(pairs), "reused": reused}
+        return {"target": target["name"], "filled": len(pairs), "reused": reused, "replaced": replaced}
 
     async def _fill(
         self,

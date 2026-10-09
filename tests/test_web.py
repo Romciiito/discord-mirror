@@ -254,13 +254,13 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         engine = client.server.app["engine"]
 
         async def fill(source: str, target: str) -> dict:
-            return {"target": f"{source}->{target}", "filled": 2, "reused": 0}
+            return {"target": f"{source}->{target}", "filled": 2, "reused": 0, "replaced": 1}
 
         engine.fill_copy = fill
         resp = await client.post("/api/guilds/5/fill", json={"target": 900})
         self.assertEqual(resp.status, 200)
         body = await resp.json()
-        self.assertEqual(body["report"], {"target": "5->900", "filled": 2, "reused": 0})
+        self.assertEqual(body["report"], {"target": "5->900", "filled": 2, "reused": 0, "replaced": 1})
         self.assertIn("selection", body)
         self.assertEqual(body["targets"], {})
 
