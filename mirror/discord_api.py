@@ -89,6 +89,14 @@ def clean_webhook(url: str) -> str:
     return url
 
 
+def clean_token(raw: str) -> str:
+    raw = raw.strip()
+    for left, right in ('""', "''", "“”"):
+        if raw.startswith(left) and raw.endswith(right):
+            return raw[1:-1].strip()
+    return raw
+
+
 class DiscordHTTP:
     def __init__(self, session: aiohttp.ClientSession, token: str, properties: dict[str, Any]) -> None:
         self.session = session

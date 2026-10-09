@@ -8,7 +8,7 @@ import zlib
 from pathlib import Path
 
 from mirror.access import READ_MESSAGE_HISTORY, VIEW_CHANNEL, readable_plan
-from mirror.discord_api import ApiError, CAPABILITIES, _fail_detail, build_properties, clean_webhook
+from mirror.discord_api import ApiError, CAPABILITIES, _fail_detail, build_properties, clean_token, clean_webhook
 from mirror.gateway import Inflate
 from mirror.relay import author_name, clip, payload_for, view_from_message
 from mirror.store import Store
@@ -37,6 +37,18 @@ class CoreTests(unittest.TestCase):
             clean_webhook("https://example.com/api/webhooks/123/abc")
         with self.assertRaises(ApiError):
             clean_webhook("https://discord.com.evil.com/api/webhooks/123/abc")
+
+    def test_token_loses_whitespace_and_double_quotes(self) -> None:
+        self.assertEqual(clean_token(' \t" MTIz.Gx_y-Z.abc_DEF-1 "\n'), "MTIz.Gx_y-Z.abc_DEF-1")
+
+    def test_token_loses_single_and_curly_quotes(self) -> None:
+        self.assertEqual(clean_token("'MTIz.Gx_y-Z.abc_DEF-1'"), "MTIz.Gx_y-Z.abc_DEF-1")
+        self.assertEqual(clean_token("“MTIz.Gx_y-Z.abc_DEF-1”"), "MTIz.Gx_y-Z.abc_DEF-1")
+
+    def test_token_loses_one_matching_pair_only(self) -> None:
+        self.assertEqual(clean_token('""MTIz.Gx_y-Z""'), '"MTIz.Gx_y-Z"')
+        self.assertEqual(clean_token('"MTIz.Gx_y-Z'), '"MTIz.Gx_y-Z')
+        self.assertEqual(clean_token("'MTIz.Gx_y-Z\""), "'MTIz.Gx_y-Z\"")
 
     def test_payload_clips_and_drops_mentions(self) -> None:
         view = {

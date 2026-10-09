@@ -56,33 +56,9 @@ if ($LASTEXITCODE -ne 0) {
     Copy-Item -LiteralPath "requirements.txt" -Destination ".venv\requirements.txt" -Force
 }
 
-$h = $env:HOST
-if (-not $h -or $h -eq "0.0.0.0" -or $h -eq "::") { $h = "127.0.0.1" }
-if ($h.Contains(":") -and -not $h.StartsWith("[")) { $h = "[" + $h + "]" }
-$p = $env:PORT
-if (-not $p) { $p = "8765" }
-$url = "http://" + $h + ":" + $p + "/"
-
-$job = Start-Job -ArgumentList $url -ScriptBlock {
-    param($u)
-    for ($i = 0; $i -lt 30; $i++) {
-        try {
-            Invoke-WebRequest -UseBasicParsing -Uri $u -TimeoutSec 1 | Out-Null
-            break
-        } catch {
-            Start-Sleep -Milliseconds 500
-        }
-    }
-    Start-Process $u
-}
-
-Write-Host "starting on $url"
+Write-Host "starting Mando"
 $env:PYTHONUTF8 = "1"
-$code = 1
-try {
-    & $venvPy -m mirror
-    $code = $LASTEXITCODE
-} finally {
-    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
-}
-exit $code
+# a launch that fails (no exe) leaves $LASTEXITCODE stale; preset it so that failure exits 1
+$LASTEXITCODE = 1
+& $venvPy -m mirror
+exit $LASTEXITCODE

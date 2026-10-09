@@ -322,7 +322,7 @@ class Relay:
         status = 0
         backoff = 1.0
         for attempt in range(ATTEMPTS):
-            gap = self._next.get(webhook_url, 0.0) - time.monotonic()
+            gap = min(self._next.get(webhook_url, 0.0) - time.monotonic(), RETRY_CAP)
             if gap > 0:
                 await self._wait(gap)
             try:

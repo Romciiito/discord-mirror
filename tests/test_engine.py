@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ from mirror.store import Store
 
 HOOK = "https://discord.com/api/webhooks/111/aaa"
 HOOK_B = "https://discord.com/api/webhooks/222/bbb"
+TOKEN = "fake-token_for.tests_only-0123456789.abcdefghij_klmnop"
 
 OLD_SCHEMA = """
 CREATE TABLE account (id INTEGER PRIMARY KEY CHECK (id = 1), token TEXT, keep INTEGER NOT NULL DEFAULT 0);
@@ -101,6 +103,42 @@ class FakeHTTP:
 
     async def active_threads(self, guild_id: str) -> list[dict]:
         return []
+
+
+class FakeResp:
+    def __init__(self, body: str, status: int = 200) -> None:
+        self.status = status
+        self.body = body
+
+    async def text(self) -> str:
+        return self.body
+
+    async def json(self, content_type: Any = None) -> Any:
+        return json.loads(self.body)
+
+    async def __aenter__(self) -> FakeResp:
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+
+class FakeDiscord:
+    def __init__(self, answer: FakeResp | BaseException | None = None) -> None:
+        self.sent: list[tuple[str, str]] = []
+        self.answer = answer or FakeResp('{"id": "7", "username": "ada"}')
+
+    def get(self, url: str, **kw: Any) -> FakeResp:
+        return FakeResp('{"versions": [{"version": "131.0.0.0"}]}')
+
+    def request(self, method: str, url: str, **kw: Any) -> FakeResp:
+        self.sent.append((url, kw["headers"]["Authorization"]))
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        return self.answer
+
+    async def close(self) -> None:
+        pass
 
 
 class FakeGateway:
@@ -343,6 +381,57 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(task.cancelled())
         self.assertIsNone(self.engine._restore_task)
 
+    async def test_pasted_token_is_cleaned_before_check_and_store(self) -> None:
+        discord = FakeDiscord()
+        self.engine.session = discord
+        await self.engine.use_token(' "' + TOKEN + '"\n', True)
+        self.assertEqual(discord.sent, [("https://discord.com/api/v9/users/@me", TOKEN)])
+        self.assertEqual(self.store.token(), TOKEN)
+
+    async def test_checked_token_reports_the_user_and_keeps_nothing(self) -> None:
+        discord = FakeDiscord()
+        self.engine.session = discord
+        report = await self.engine.check_token(' "' + TOKEN + '"\n')
+        self.assertEqual(report, {"result": "works", "user": {"id": "7", "username": "ada", "global_name": ""}})
+        self.assertEqual(discord.sent, [("https://discord.com/api/v9/users/@me", TOKEN)])
+        self.assertEqual(self.store.token(), "")
+        self.assertIsNone(self.engine.snapshot()["user"])
+        self.assertFalse(self.engine.snapshot()["has_token"])
+
+    async def test_checked_token_too_short_is_refused_before_discord(self) -> None:
+        discord = FakeDiscord()
+        self.engine.session = discord
+        for raw in ("  ", '"MTIz.Gx_y-Z"'):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ApiError) as caught:
+                    await self.engine.check_token(raw)
+                self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(discord.sent, [])
+
+    async def test_checked_token_refused_by_discord_is_rejected(self) -> None:
+        for answer in (
+            FakeResp('{"message": "401: Unauthorized"}', 401),
+            FakeResp('{"message": "Forbidden"}', 403),
+            FakeResp("{}"),
+        ):
+            with self.subTest(status=answer.status, body=answer.body):
+                self.engine.session = FakeDiscord(answer)
+                self.assertEqual(await self.engine.check_token(TOKEN), {"result": "rejected"})
+
+    async def test_checked_token_on_discord_5xx_is_unreachable(self) -> None:
+        self.engine.session = FakeDiscord(FakeResp("bad gateway", 502))
+        report = await self.engine.check_token(TOKEN)
+        self.assertEqual(report, {"result": "unreachable", "reason": "GET /users/@me failed"})
+
+    async def test_checked_token_on_network_error_is_unreachable(self) -> None:
+        for error, reason in (
+            (aiohttp.ClientConnectionError("connection refused"), "connection refused"),
+            (asyncio.TimeoutError(), "network error"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                self.engine.session = FakeDiscord(error)
+                self.assertEqual(await self.engine.check_token(TOKEN), {"result": "unreachable", "reason": reason})
+
     async def test_update_after_restart_edits_relay(self) -> None:
         self.store.set_options(0, False, "", True)
         self.store.replace_selection([row("8", HOOK)])
@@ -570,6 +659,108 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
     def test_text_types_consistent(self) -> None:
         self.assertIs(engine_mod.TEXT_TYPES, access.TEXT_TYPES)
         self.assertNotIn(15, engine_mod.TEXT_TYPES)
+
+    async def test_mirrored_counter_follows_created_messages(self) -> None:
+        relay = FakeRelay()
+        self.engine.relay = relay
+        self.engine.store.replace_selection([row("c1", "https://discord.com/api/webhooks/1/t")])
+        self.engine.store.set_options(0, False, "", True)
+        self.assertEqual(self.engine.snapshot()["mirrored"], 0)
+        await self.engine._relay_create({"id": "m1", "channel_id": "c1", "content": "hi"})
+        await self.engine._relay_create({"id": "m1", "channel_id": "c1", "content": "hi"})
+        await self.engine._relay_create({"id": "m2", "channel_id": "c1", "content": "yo"})
+        self.assertEqual(self.engine.snapshot()["mirrored"], 2)
+        self.assertEqual(len(relay.creates), 2)
+
+    async def test_failed_webhook_post_reaches_the_status_line(self) -> None:
+        # relay.create returns None when Discord refuses the post or never answers (relay.py logs the
+        # status to the log file); the engine notes it and emits an "error" event (story 5)
+        from mirror.cli.controller import Controller
+        from mirror.cli.render import status_line
+
+        class RefusingRelay(FakeRelay):
+            async def create(self, webhook_url: str, view: dict, prefix: bool) -> str | None:
+                self.creates.append(view)
+                return None
+
+        self.engine.relay = RefusingRelay()
+        self.engine.store.replace_selection([row("c1", "https://discord.com/api/webhooks/1/t")])
+        self.engine.store.set_options(0, False, "", True)
+        queue: asyncio.Queue = asyncio.Queue()
+        self.engine.listeners.add(queue)
+        await self.engine._relay_create({"id": "m1", "channel_id": "c1", "channel_name": "general", "content": "hi"})
+        events = [queue.get_nowait() for _ in range(queue.qsize())]
+        self.assertEqual(
+            events,
+            [
+                {"kind": "log", "text": "#general: webhook post failed"},
+                {"kind": "error", "text": "#general: webhook post failed"},
+            ],
+        )
+        self.assertEqual(self.engine.snapshot()["mirrored"], 0)
+        self.assertIsNone(self.engine.store.relay_row("m1"))
+        ui = Controller(self.engine)
+        ui.refresh()
+        for event in events:
+            ui.on_event(event)
+        self.assertEqual(status_line(ui), "signed out · stopped · 0 mirrored · #general: webhook post failed")
+
+    async def test_status_events_carry_the_mirrored_count(self) -> None:
+        # every status emit (start, READY, stop, the gateway's fatal error) carries the counter,
+        # which the controller copies into its snapshot for the status line
+        self.engine.http = FakeHTTP()
+        self.engine.relay = FakeRelay()
+        self.store.replace_selection([row("10", HOOK)])
+        self.store.set_options(0, False, "", True)
+        queue: asyncio.Queue = asyncio.Queue()
+        self.engine.listeners.add(queue)
+        with mock.patch.object(engine_mod, "Gateway", FakeGateway):
+            await self.engine.start()
+            await self.engine._relay_create({"id": "m1", "channel_id": "10", "content": "hi"})
+            await self.engine.on_dispatch("READY", {})
+            await self.engine._fatal("gateway closed (4004)")
+            await self.engine.stop()
+        events = [queue.get_nowait() for _ in range(queue.qsize())]
+        status = [(item["status"], item.get("mirrored")) for item in events if item["kind"] == "status"]
+        self.assertEqual(status, [("connecting", 0), ("live", 1), ("error", 1), ("stopped", 1)])
+        self.engine.http = None
+
+    async def test_each_mirrored_message_moves_the_status_line_count(self) -> None:
+        # a live run reports no status between READY and Stop, so each created mirrored message emits
+        # the count on its own "mirrored" event; a failed post keeps its error next to the count
+        from mirror.cli.controller import Controller
+        from mirror.cli.render import status_line
+
+        class PickyRelay(FakeRelay):
+            async def create(self, webhook_url: str, view: dict, prefix: bool) -> str | None:
+                self.creates.append(view)
+                return None if view["id"] == "m1" else "1"
+
+        self.engine.http = FakeHTTP()
+        self.engine.relay = PickyRelay()
+        self.store.replace_selection([row("10", HOOK)])
+        self.store.set_options(0, False, "", True)
+        ui = Controller(self.engine)
+        ui.refresh()
+        queue: asyncio.Queue = asyncio.Queue()
+        self.engine.listeners.add(queue)
+        with mock.patch.object(engine_mod, "Gateway", FakeGateway):
+            await self.engine.start()
+            await self.engine.on_dispatch("READY", {})
+            for at in range(3):
+                message = {"id": f"m{at}", "channel_id": "10", "author": {"id": "1", "username": "ann"}, "content": "hi"}
+                await self.engine.on_dispatch("MESSAGE_CREATE", message)
+            events = [queue.get_nowait() for _ in range(queue.qsize())]
+            for event in events:
+                ui.on_event(event)
+            self.assertEqual(
+                [item for item in events if item["kind"] == "mirrored"],
+                [{"kind": "mirrored", "mirrored": 1}, {"kind": "mirrored", "mirrored": 2}],
+            )
+            self.assertEqual(self.engine.snapshot()["mirrored"], 2)
+            self.assertEqual(status_line(ui), "signed out · running · 2 mirrored · #general: webhook post failed")
+            await self.engine.stop()
+        self.engine.http = None
 
 
 if __name__ == "__main__":

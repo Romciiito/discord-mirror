@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from aiohttp import web
@@ -14,7 +13,6 @@ from .keychain import read_keychain
 from .store import Store
 
 log = logging.getLogger("mirror.web")
-STATIC = Path(__file__).resolve().parent.parent / "static"
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 PING = 15.0
 
@@ -66,8 +64,8 @@ async def guard(request: web.Request, handler):
         return web.json_response({"error": "request failed"}, status=500)
 
 
-async def index(_request: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC / "index.html")
+async def index(_request: web.Request) -> web.Response:
+    return web.Response(text="UI unavailable now", content_type="text/plain")
 
 
 async def state(request: web.Request) -> web.Response:
@@ -142,7 +140,6 @@ async def stop(request: web.Request) -> web.Response:
 async def events(request: web.Request) -> web.StreamResponse:
     engine: Engine = request.app["engine"]
     queue: asyncio.Queue = asyncio.Queue(maxsize=200)
-    engine.listeners.add(queue)
     response = web.StreamResponse(
         status=200,
         headers={
@@ -153,6 +150,9 @@ async def events(request: web.Request) -> web.StreamResponse:
     )
     await response.prepare(request)
     try:
+        # registered only once the headers went out, inside the try: a client gone before them leaves no queue
+        engine.listeners.add(queue)
+        request.app["streams"].add(queue)
         await response.write(b": ok\n\n")
         while True:
             try:
@@ -162,12 +162,15 @@ async def events(request: web.Request) -> web.StreamResponse:
                     break
                 await response.write(b": ping\n\n")
                 continue
+            if item is None:
+                break  # _end_streams: the server is shutting down
             payload = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
             await response.write(f"data: {payload}\n\n".encode())
             if queue not in engine.listeners:
                 break
     finally:
         engine.listeners.discard(queue)
+        request.app["streams"].discard(queue)
     return response
 
 
@@ -188,6 +191,19 @@ async def _start(app: web.Application) -> None:
     await app["engine"].restore()
 
 
+async def _end_streams(app: web.Application) -> None:
+    """End every idle /api/events stream at once, before runner.cleanup waits for in-flight handlers, so a connected
+    client does not hold the exit for the runner's shutdown_timeout before Engine.close runs. A handler blocked in
+    response.write (a client that stopped reading) does not see the sentinel: runner.cleanup cancels it once its
+    shutdown_timeout ran out twice. The CLI's own listener queue is not one of these and is left alone."""
+    for queue in list(app["streams"]):
+        app["engine"].listeners.discard(queue)
+        try:
+            queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass  # the handler ends after its next item, since its queue is no longer a listener
+
+
 async def _stop(app: web.Application) -> None:
     await app["engine"].close()
 
@@ -196,10 +212,11 @@ def create_app(data_dir: str, host: str = "127.0.0.1", port: int = 8765) -> web.
     app = web.Application(middlewares=[origin_guard, guard], client_max_size=1024 * 512)
     app["bind"] = (host, port)
     app["engine"] = Engine(Store(data_dir))
+    app["streams"] = set()
     app.on_startup.append(_start)
+    app.on_shutdown.append(_end_streams)
     app.on_cleanup.append(_stop)
     app.router.add_get("/", index)
-    app.router.add_static("/static/", STATIC, show_index=False)
     app.router.add_get("/api/state", state)
     app.router.add_get("/api/feed", feed)
     app.router.add_post("/api/session", open_session)
