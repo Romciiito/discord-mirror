@@ -121,8 +121,6 @@ def _body(ui: Any, height: int) -> Body:
                 rows.append(_row(label, at == ui.local_index))
         elif ui.depth == "targets" and ui.target_source:
             title = f"Copy of {ui.target_source.get('name') or 'server'} into"
-            if not ui.targets:
-                rows.append("no servers you own")
             link = (ui.snap.get("targets") or {}).get(ui.target_source.get("id")) or {}
             for at, target in enumerate(ui.targets):
                 mark = "[x] " if target.get("id") == link.get("target_id") else "[ ] "

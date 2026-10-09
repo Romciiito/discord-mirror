@@ -1915,7 +1915,7 @@ git commit -m "Add the owned servers and the fill to the API."
 
 **Interfaces:**
 - Produces, on the servers screen at depth `guilds`: `c`/`C` on a server row opens the target picker (depth `targets`): `self.targets` = `engine.owned_guilds()` without the source itself, `self.target_source` = the server, `local_index` on the current target when the snapshot's `targets` links the source, else 0. Errors before opening: `"tick the server or some of its channels first"` when no picked row belongs to the server; `"you own no other server, create one in Discord first"` when the list is empty. At depth `targets`: Up/Down wrap, Enter → `engine.fill_copy(source id, target id)` then `refresh()`, `self.error = "<filled> channel(s) ready in <target>"`, led by `"<r> earlier webhook url(s) replaced, "` when the report's `replaced` is `r > 0` (an own webhook, decision 9g, or an earlier copy's URL, decision 9n; the engine notes the count in its log, which the CLI never shows, measured in the Task 6 review, and reports it; the CLI prints the engine's count and derives none from its rows, which differed from the engine's for a webhook found again under another host; the count leads so a long target name cut at the screen width never cuts it), back to depth `guilds` with the cursor on the source; an `ApiError`/`RuntimeError` keeps the picker open with its text, and every error of the fill reads the snapshot again (`_resync`, as `_save_options` does), because `Engine.fill_copy` can raise after the store holds the copy's URLs and the link (the refresh of a running mirror) and the next save would otherwise put the URLs from before back (measured in the Task 6 review); Esc → depth `guilds`, cursor on the source. Unticking a server (Enter on a ticked server) whose source has a link in the snapshot's `targets` ends with `self.error = "copy in <target_name> kept, delete it in Discord if you do not need it"` (decision 9e). Hints: depth `guilds` `"enter toggles, c fills copy, right opens channels, esc back"` (59 characters); depth `targets` `"enter fills the copy, esc back"`. `_save_options` sends `backfill`, `include_threads`, `mirror`, `channels` only.
-- Render: depth `targets`: title `"Copy of <source> into"`, rows `"[x] <name>"` for the linked target and `"[ ] <name>"` otherwise, `"no servers you own"` when empty; depth `guilds`: a linked server row ends with `"  copy: <target_name>"`.
+- Render: depth `targets`: title `"Copy of <source> into"`, rows `"[x] <name>"` for the linked target and `"[ ] <name>"` otherwise (no row for an empty list: `c` refuses to open the picker without a server the owner owns); depth `guilds`: a linked server row ends with `"  copy: <target_name>"`.
 - Consumes: Task 1's snapshot key `targets`, Task 4's `owned_guilds`/`fill_copy`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -2120,8 +2120,6 @@ In `tests/test_cli_render.py`:
         self.assertEqual(lines[2], "  [ ] Qwen copy")
         self.assertEqual(lines[3], "> [x] Spare")
         self.assertEqual(lines[-1], "enter fills the copy, esc back")
-        ui.targets = []
-        self.assertIn("no servers you own", render(ui, 60, 8))
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -2245,8 +2243,6 @@ and in the guilds branch: `elif key in ("c", "C"): await self._open_targets(self
 ```python
         elif ui.depth == "targets" and ui.target_source:
             title = f"Copy of {ui.target_source.get('name') or 'server'} into"
-            if not ui.targets:
-                rows.append("no servers you own")
             link = (ui.snap.get("targets") or {}).get(ui.target_source.get("id")) or {}
             for at, target in enumerate(ui.targets):
                 mark = "[x] " if target.get("id") == link.get("target_id") else "[ ] "

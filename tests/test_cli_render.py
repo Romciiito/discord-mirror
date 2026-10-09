@@ -158,8 +158,6 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(lines[2], "  [ ] Qwen copy")
         self.assertEqual(lines[3], "> [x] Spare")
         self.assertEqual(lines[-1], "enter fills the copy, esc back")
-        ui.targets = []
-        self.assertIn("no servers you own", render(ui, 60, 8))
 
     def test_webhook_settings_rows(self) -> None:
         ui = ui_on("webhooks")
