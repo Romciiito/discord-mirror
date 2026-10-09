@@ -151,9 +151,14 @@ class Controller:
             await self._server_key(key)
 
     async def paste(self, text: str) -> None:
-        if self.busy or self.flow["screen"] != "token" or self.typing or TOKEN_ROWS[self.token_index] != "token":
+        if self.busy or self.flow["screen"] != "token":
             return
-        self._type_token(text)
+        if self.typing in TEXT_FIELDS:
+            # an open field takes the paste at the end, as typed keys do; the token keeps the raw
+            # text for clean_token, a keychain field keeps one line as the page's <input> did
+            self.draft += text if self.typing == "token" else text.replace("\r", "").replace("\n", "")
+        elif TOKEN_ROWS[self.token_index] == "token":
+            self._type_token(text)
 
     # ---- menu actions ------------------------------------------------------
 
@@ -197,6 +202,8 @@ class Controller:
                     await self._commit_field()
                 else:
                     self._cancel_edit()
+            elif key == "Backspace":
+                self.draft = self.draft[:-1]
             elif plain:
                 self.draft += key
             return

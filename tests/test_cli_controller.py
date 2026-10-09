@@ -278,6 +278,44 @@ class TokenScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.calls[-1], ("check_token", '  "' + "d" * 40 + '"\n'))
         self.assertEqual(ui.token_check, "✓ token works – signed in as u")
 
+    async def test_paste_into_the_open_token_field_is_checked_on_enter(self) -> None:
+        ui, engine = await self.open_token()
+        engine.checks["p" * 40] = {"result": "works", "user": {"id": "1", "username": "sosa", "global_name": "Sosa"}}
+        await keys(ui, "Enter")
+        self.assertEqual(ui.typing, "token")
+        await ui.paste("p" * 40 + "\n")
+        self.assertEqual(ui.draft, "p" * 40 + "\n")
+        await keys(ui, "Enter")
+        self.assertEqual(ui.fields["token"], "p" * 40 + "\n")
+        self.assertEqual(engine.calls[-1], ("check_token", "p" * 40 + "\n"))
+        self.assertEqual(ui.token_check, "✓ token works – signed in as Sosa")
+
+    async def test_paste_into_an_open_keychain_field_appends_one_line(self) -> None:
+        ui, engine = await self.open_token()
+        await keys(ui, "4", "s")
+        await ui.paste("vc\r\n")
+        self.assertEqual(ui.typing, "service")
+        self.assertEqual(ui.draft, "svc")
+        await keys(ui, "Enter", "5")
+        await ui.paste("acc")
+        self.assertEqual(ui.draft, "acc")
+        await keys(ui, "Enter", "6")
+        self.assertEqual(engine.calls[-1], ("use_token", "k" * 40, True))
+
+    async def test_backspace_deletes_the_last_character_of_the_open_field(self) -> None:
+        ui, engine = await self.open_token()
+        await keys(ui, "1", "a", "b", "Backspace")
+        self.assertEqual(ui.typing, "token")
+        self.assertEqual(ui.draft, "a")
+        await keys(ui, "Backspace", "Backspace")
+        self.assertEqual(ui.draft, "")
+        await keys(ui, "Enter", "4", "s", "v", "x", "Backspace", "c", "Enter")
+        self.assertEqual(ui.fields["service"], "svc")
+        await keys(ui, "Backspace")
+        self.assertIsNone(ui.typing)
+        self.assertEqual(ui.fields["service"], "svc")
+        self.assertEqual(ui.flow["screen"], "token")
+
     async def test_save_signs_in_and_returns_to_settings(self) -> None:
         ui, engine = await self.open_token()
         await keys(ui, "1")
