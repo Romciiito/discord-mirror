@@ -77,7 +77,7 @@ Up and down move. Enter or the number opens the line. Esc goes back. Ctrl+C or C
 
 Start/Resume mirror shows the feed: the latest messages of the selected source channels, one per line as `server / #channel · author: text`, marked `(edited)` or `(deleted)`, as many as fit the window. Esc returns to the menu and the mirror keeps running. Exit stops the mirror and shows Stopped; any key returns to the menu.
 
-In Add token, typing or pasting on the token row opens it. Enter or Esc keeps what you typed and asks Discord at once; the line under the list then shows `✓ token works – signed in as <name>`, `✗ token rejected by Discord` or `✗ could not reach Discord (<reason>)`, or another `✗` line when the token cannot be checked, such as one that looks too short. The check only asks; save token signs in with the token. In the keychain fields Enter keeps the value and Esc cancels the edit.
+In Add token, typing or pasting on the token row opens it. Ctrl+V and Shift+Insert paste in the Windows console window too. Enter or Esc keeps what you typed and asks Discord at once; the line under the list then shows `✓ token works – signed in as <name>`, `✗ token rejected by Discord` or `✗ could not reach Discord (<reason>)`, or another `✗` line when the token cannot be checked, such as one that looks too short. The check only asks; save token signs in with the token. In the keychain fields Enter keeps the value and Esc cancels the edit.
 
 Select servers lists your source servers and only the text channels the account can open and read. `c` on a server lists the servers you own, with the one that is this server's copy marked; Enter fills it and the server row then shows `copy: <name>`, the line under the list `<n> channel(s) ready in <name>`. Esc goes back without a fill. `c` needs some of the server's channels ticked (`tick the server or some of its channels first`) and a server you own besides this one (`you own no other server, create one in Discord first`). A fill while the mirror runs takes effect without a restart. Enter on a source server ticks all its listed channels, or unticks every channel of that server when any of them is ticked, listed or not; unticking a server with a copy shows `copy in <name> kept, delete it in Discord if you do not need it`. In the channel list, Enter on a channel ticks it and opens its webhook row; Enter keeps the URL once its shape is checked; Discord is asked only when mirroring starts and posts to it. A webhook that no longer exists shows up as `#channel: webhook post failed` on the status line. Enter on an empty row unticks the channel. Esc closes the row and leaves the channel as it was before that Enter, so it unticks only a channel that the Enter just ticked. Enter on a channel with a webhook unticks it. Enter on a source server and `a` in the channel list tick channels without opening their rows; a channel that shows `no webhook` gets its URL with Enter or through a fill.
 
@@ -137,14 +137,14 @@ The API answers under `/api/`; `/` only says "UI unavailable now". It refuses re
 Unit tests:
 
 ```sh
-python -m unittest tests.test_core tests.test_store tests.test_keychain tests.test_provision tests.test_relay tests.test_gateway tests.test_engine tests.test_web tests.test_cli_flow tests.test_cli_controller tests.test_cli_render
+python -m unittest tests.test_core tests.test_store tests.test_keychain tests.test_provision tests.test_relay tests.test_gateway tests.test_engine tests.test_web tests.test_cli_flow tests.test_cli_controller tests.test_cli_render tests.test_cli_app
 ```
 
 They come in three groups:
 
 - mirroring: `tests.test_core`, `tests.test_store`, `tests.test_keychain`, `tests.test_provision`, `tests.test_relay`, `tests.test_gateway`, `tests.test_engine`
 - API: `tests.test_web`
-- CLI: `tests.test_cli_flow`, `tests.test_cli_controller`, `tests.test_cli_render`
+- CLI: `tests.test_cli_flow`, `tests.test_cli_controller`, `tests.test_cli_render`, `tests.test_cli_app`
 
 CI runs the unit tests on Linux (Python 3.12), Windows x64 (Python 3.10 and 3.12) and Windows x86 (Python 3.12). On Linux and Windows it also starts `python -m mirror` without a terminal and checks that the API answers and refuses a request from another website.
 
