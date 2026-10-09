@@ -7,11 +7,13 @@ import json
 import logging
 import logging.handlers
 import os
+import shutil
 import socket
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -231,12 +233,70 @@ class MainTests(unittest.TestCase):
             self.tearDown()
 
     def test_wants_cli_needs_both_ttys(self) -> None:
-        with mock.patch("sys.stdin") as stdin, mock.patch("sys.stdout") as stdout:
+        with mock.patch("sys.stdin") as stdin, mock.patch("sys.stdout") as stdout, mock.patch.object(
+            entry, "has_console", return_value=True
+        ):
             stdin.isatty.return_value = True
             stdout.isatty.return_value = False
             self.assertFalse(entry.wants_cli())
             stdout.isatty.return_value = True
             self.assertTrue(entry.wants_cli())
+
+    def test_wants_cli_needs_a_console_behind_the_ttys(self) -> None:
+        # Windows calls the NUL device a TTY: isatty() is True for `< NUL > NUL`
+        with mock.patch("sys.stdin") as stdin, mock.patch("sys.stdout") as stdout, mock.patch.object(
+            entry, "has_console", return_value=False
+        ):
+            stdin.isatty.return_value = True
+            stdout.isatty.return_value = True
+            self.assertFalse(entry.wants_cli())
+
+    def test_the_null_device_is_no_terminal(self) -> None:
+        code = "import sys\nimport mirror.__main__ as entry\nsys.stderr.write(repr(entry.wants_cli()))\n"
+        done = subprocess.run(
+            [sys.executable, "-c", code], cwd=ROOT, env=dict(os.environ, PYTHONUTF8="1"),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=60,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr.strip(), "False")
+
+    @unittest.skipUnless(os.name == "nt", "a console of its own is a Windows process flag")
+    def test_a_real_console_still_runs_the_cli(self) -> None:
+        # the child gets a console without a window, so its standard handles are a console's; it reports
+        # through a file because a pipe on stdout would replace that console
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "wants_cli.txt")
+            code = (
+                "import sys\nimport mirror.__main__ as entry\n"
+                "open(sys.argv[1], 'w').write(repr(entry.wants_cli()))\n"
+            )
+            subprocess.run(
+                [sys.executable, "-c", code, out], cwd=ROOT, env=dict(os.environ, PYTHONUTF8="1"),
+                creationflags=subprocess.CREATE_NO_WINDOW, timeout=60,
+            )
+            with open(out, encoding="utf-8") as seen:
+                self.assertEqual(seen.read(), "True")
+
+    def test_without_a_terminal_the_api_server_runs(self) -> None:
+        # story 36: stdin and stdout on the null device (a hidden start, a scheduler, `start /b` with
+        # redirects) must still serve the API
+        port = _free_port()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(_remove_when_free, tmp)
+        env = dict(os.environ, HOST="127.0.0.1", DATA_DIR=os.path.join(tmp, "data"), PORT=str(port), PYTHONUTF8="1")
+        err_path = os.path.join(tmp, "err.txt")
+        with open(err_path, "wb") as err:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "mirror"], cwd=ROOT, env=env,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
+            )
+        try:
+            status = asyncio.run(_poll_state(port, proc, 30.0))
+        finally:
+            proc.kill()
+            proc.wait(10)
+        with open(err_path, "rb") as err:
+            self.assertEqual(status, 200, err.read().decode("utf-8", "replace")[-2000:])
 
     def test_wants_cli_without_stdin_is_false(self) -> None:
         # Python sets sys.stdin to None when fd 0 is closed (`python -m mirror <&-`); the server
@@ -314,6 +374,36 @@ def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+def _remove_when_free(path: str, timeout: float = 10.0) -> None:
+    """Remove the data directory of a killed `python -m mirror`. A venv's python.exe on Windows is a launcher:
+    the interpreter it started outlives the killed launcher for a moment and still holds mando.log."""
+    end = time.monotonic() + timeout
+    while True:
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if time.monotonic() > end:
+                raise
+            time.sleep(0.1)
+
+
+async def _poll_state(port: int, proc: subprocess.Popen, timeout: float) -> int | None:
+    """GET /api/state until it answers, the process dies or the time is up."""
+    loop = asyncio.get_running_loop()
+    end = loop.time() + timeout
+    async with aiohttp.ClientSession() as session:
+        while loop.time() < end and proc.poll() is None:
+            try:
+                async with session.get(f"http://127.0.0.1:{port}/api/state") as resp:
+                    return resp.status
+            except aiohttp.ClientError:
+                await asyncio.sleep(0.3)
+    return None
 
 
 class ServeAndCliTests(unittest.TestCase):
@@ -516,6 +606,68 @@ class CliAppTests(unittest.IsolatedAsyncioTestCase):
             pipe.send_text("\x11")
             self.assertTrue(await _ended(task))
         self.assertEqual(engine.listeners, set())
+
+    async def test_a_burst_of_engine_events_keeps_the_cli_subscribed(self) -> None:
+        # Engine._emit drops a listener whose queue is full, and the CLI never subscribes again; a backfill
+        # with mirror off emits an event per history message (up to 500) and a log line without yielding
+        from mirror.cli import app as cliapp
+        from mirror.cli.controller import Controller
+        from mirror.engine import Engine
+        from tests.test_cli_controller import FakeEngine
+
+        made: list[Controller] = []
+
+        class Kept(Controller):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                made.append(self)
+
+        engine = FakeEngine()
+        with _pipe_terminal() as pipe, mock.patch.object(cliapp, "Controller", Kept):
+            task = asyncio.ensure_future(cliapp.run_cli(engine))
+            self.assertTrue(await _until(lambda: bool(engine.listeners)))
+            (queue,) = engine.listeners
+            for n in range(1, 601):
+                Engine._emit(engine, {"kind": "mirrored", "mirrored": n})  # the engine's own drop rule
+            still = queue in engine.listeners
+            reached = await _until(lambda: made[0].snap.get("mirrored") == 600)
+            pipe.send_text("\x11")
+            self.assertTrue(await _ended(task))
+        self.assertTrue(still, "the engine dropped the CLI's listener")
+        self.assertTrue(reached)
+
+    async def test_an_event_the_controller_cannot_take_is_logged_and_the_next_one_arrives(self) -> None:
+        # the CLI's queue has no bound, so a pump that died on one event would let it grow for the session
+        from mirror.cli import app as cliapp
+        from mirror.cli.controller import Controller
+        from tests.test_cli_controller import FakeEngine
+
+        made: list[Controller] = []
+
+        class Picky(Controller):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                made.append(self)
+
+            def on_event(self, item: dict[str, Any]) -> None:
+                if item.get("bad"):
+                    raise ValueError("cannot take it")
+                super().on_event(item)
+
+        engine = FakeEngine()
+        with _pipe_terminal() as pipe, mock.patch.object(cliapp, "Controller", Picky), self.assertLogs(
+            "mirror.cli", "ERROR"
+        ) as logs:
+            task = asyncio.ensure_future(cliapp.run_cli(engine))
+            self.assertTrue(await _until(lambda: bool(engine.listeners)))
+            (queue,) = engine.listeners
+            queue.put_nowait({"kind": "mirrored", "mirrored": 1, "bad": True})
+            queue.put_nowait({"kind": "mirrored", "mirrored": 2})
+            reached = await _until(lambda: made[0].snap.get("mirrored") == 2)
+            pipe.send_text("\x11")
+            self.assertTrue(await _ended(task))
+        self.assertTrue(reached)
+        self.assertIn("cannot take it", "\n".join(logs.output))
 
     async def test_a_loop_error_goes_to_the_log_not_over_the_screen(self) -> None:
         # the engine, the gateway and the API server share the CLI's loop; prompt_toolkit's own handler

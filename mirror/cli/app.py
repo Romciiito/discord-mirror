@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from prompt_toolkit.application import Application, get_app
@@ -12,6 +13,8 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 
 from .controller import Controller
 from .render import render
+
+log = logging.getLogger("mirror.cli")
 
 KEY_NAMES = {
     "up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft", "right": "ArrowRight",
@@ -69,13 +72,19 @@ async def run_cli(engine: Any) -> None:
     controller = Controller(engine)
     await controller.load()
     app = build(controller)
-    queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+    # no bound: Engine._emit drops a listener whose queue is full and the CLI never subscribes again, while a
+    # backfill with mirror off emits up to 500 message events and a log line without yielding to this pump
+    queue: asyncio.Queue = asyncio.Queue()
     engine.listeners.add(queue)
 
     async def pump() -> None:
         while True:
             item = await queue.get()
-            controller.on_event(item)
+            try:
+                controller.on_event(item)
+            except Exception:
+                # a pump that died here would leave the unbounded queue growing for the rest of the session
+                log.exception("engine event failed")
             app.invalidate()
 
     pumping = asyncio.create_task(pump())

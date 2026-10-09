@@ -42,7 +42,33 @@ def configure_logging(data_dir: str) -> None:
 
 def wants_cli() -> bool:
     # a closed fd 0 or 1 leaves sys.stdin or sys.stdout None: no terminal, so the server alone
-    return all(stream is not None and stream.isatty() for stream in (sys.stdin, sys.stdout))
+    if not all(stream is not None and stream.isatty() for stream in (sys.stdin, sys.stdout)):
+        return False
+    return has_console()
+
+
+def has_console() -> bool:
+    """Whether the TTYs are a console. Windows calls the NUL device a TTY (isatty() is True for
+    `< NUL > NUL`), and prompt_toolkit then stops with NoConsoleScreenBufferError before the server runs.
+    POSIX isatty() already says no for /dev/null."""
+    if os.name != "nt":
+        return True
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    try:
+        # the screen buffer behind the standard output handle, the one prompt_toolkit's Win32Output asks for
+        # (os.get_terminal_size on Windows calls GetConsoleScreenBufferInfo on GetStdHandle)
+        os.get_terminal_size(1)
+        handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+    except (OSError, ValueError):
+        return False
+    # a console input handle; a file, a pipe or NUL is refused (get_terminal_size(0) fails on a real one too)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetConsoleMode.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.GetConsoleMode.restype = wintypes.BOOL
+    return bool(kernel32.GetConsoleMode(handle, ctypes.byref(wintypes.DWORD())))
 
 
 def serve_and_cli(app: web.Application, host: str, port: int) -> None:
