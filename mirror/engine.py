@@ -358,8 +358,10 @@ class Engine:
         rows of one name never swap copies. Then a row takes the first free channel of its name under its own
         category (loose for a loose one; `existing` holds only the categories this source may use), and after that
         one elsewhere if the target holds no other source (`alone`), since it may otherwise be another source's
-        channel. An existing channel serves one row only, and one whose webhooks Discord refuses to list serves none:
-        a row that may have its copy there gets no channel and keeps its URL. A category is created only for a channel
+        channel. Every channel is listed before a row takes it: an existing channel serves one row only, one whose
+        webhooks Discord refuses to list serves none (a row that may have its copy there gets no channel and keeps its
+        URL), and one that carries the webhook of another channel (`held`) is that channel's copy and serves no other
+        row, which takes the next free channel or gets one created. A category is created only for a channel
         created under it and recorded for `source_id` as soon as Discord made it, and a channel whose category Discord
         refuses is skipped, never put loose."""
         categories: dict[str, str] = {}
@@ -405,23 +407,33 @@ class Engine:
             """The spots a row may take: neither claimed nor unlisted, since an unlisted channel may be a copy."""
             return [spot for spot in spots(name, parent) if spot not in unlisted]
 
+        def others(source: str) -> set[str]:
+            """The webhook ids held by channels other than the row, without the row's own (a webhook two rows share
+            stays the row's own)."""
+            mine = webhook_parts(before.get(source, "")) or ("", "")
+            return {hook for hook, rows in held.items() if rows - {source}} - {mine[0]}
+
+        async def hooks_of(spot: str) -> list[dict[str, Any]] | None:
+            """The spot's webhooks, listed once per fill and kept in `listed`; None when the listing fails, and the
+            spot is then kept in `unlisted`, never listed again and taken by no row in this fill."""
+            if spot not in listed and spot not in unlisted:
+                hooks = await self._hooks_on(http, spot)
+                await self._wait(0.25)
+                if hooks is None:
+                    unlisted.add(spot)
+                else:
+                    listed[spot] = hooks
+            return listed.get(spot)
+
         async def carrier(source: str, spots: list[str]) -> str:
-            """The spot whose webhooks hold the row's own webhook (`before`), each spot listed once and kept in
-            `listed`, with that webhook kept in `carried`; "" when no spot carries it. A spot whose listing fails is
-            kept in `unlisted`, never in `listed`, and no row takes it in this fill."""
+            """The spot whose webhooks hold the row's own webhook (`before`), with that webhook kept in `carried`; ""
+            when no spot carries it."""
             mine = webhook_parts(before.get(source, ""))
             for spot in spots if mine else []:
-                if spot not in listed and spot not in unlisted:
-                    hooks = await self._hooks_on(http, spot)
-                    await self._wait(0.25)
-                    if hooks is None:
-                        unlisted.add(spot)
-                    else:
-                        listed[spot] = hooks
                 own = next(
                     (
                         hook
-                        for hook in listed.get(spot, [])
+                        for hook in await hooks_of(spot) or []
                         if str(hook.get("id") or "") == mine[0] and hook.get("token")
                     ),
                     None,
@@ -435,6 +447,15 @@ class Engine:
                 return spot
             return ""
 
+        async def stranger(source: str, spots: list[str]) -> str:
+            """The first spot whose listing works and shows no webhook of another channel (`others`): one that does
+            is that channel's copy, so the row passes it over as if it were claimed; "" when no spot is left."""
+            for spot in spots:
+                hooks = await hooks_of(spot)
+                if hooks is not None and not {str(hook.get("id") or "") for hook in hooks} & others(source):
+                    return spot
+            return ""
+
         def home(channel: dict[str, Any]) -> str | None:
             """The parent of the channel's own place in the target ("" when loose), None when its category is not in
             the target yet, so nothing is under it."""
@@ -445,8 +466,9 @@ class Engine:
         # claims it before any row takes a channel by its name, first in its own place, then elsewhere, so a row
         # without a URL, or a row listed first, never takes another row's copy and history. Then by name, every
         # channel in its own place first, so a name found elsewhere never takes a channel another row has there, and
-        # elsewhere only when the target holds no other source (`alone`). A row that meets an unlisted channel of its
-        # name and gets none is `unproven`: its copy may stand there, so it takes none by name and none is created
+        # elsewhere only when the target holds no other source (`alone`), never one that carries another channel's
+        # webhook. A row that meets an unlisted channel of its name and gets none is `unproven`: its copy may stand
+        # there, so it takes none by name and none is created
         modes = [(True, True), (True, False), (False, True)] + ([(False, False)] if alone else [])
         for by_webhook, own_place in modes:
             for channel in layout["channels"]:
@@ -462,7 +484,7 @@ class Engine:
                 if by_webhook:
                     pick = await carrier(source, free(channel["name"], parent))
                 else:
-                    pick = next(iter(free(channel["name"], parent)), "")
+                    pick = await stranger(source, free(channel["name"], parent))
                 if pick:
                     found[source] = pick
                     claimed.add(pick)
@@ -529,11 +551,7 @@ class Engine:
             if source in carried:
                 url, kept = carried[source], True
             else:
-                mine = webhook_parts(before.get(source, "")) or ("", "")
-                others = {hook for hook, rows in held.items() if rows - {source}} - {mine[0]}
-                url, kept = await self._webhook_on(
-                    http, dest, channel["name"], look=source in found, listed=listed.get(dest), others=others
-                )
+                url, kept = await self._webhook_on(http, dest, channel["name"], listed.get(dest), others(source))
                 await self._wait(0.25)
             if url:
                 pairs.append((source, url))
@@ -556,27 +574,17 @@ class Engine:
         return [hook for hook in listed if isinstance(hook, dict)] if isinstance(listed, list) else []
 
     async def _webhook_on(
-        self,
-        http: DiscordHTTP,
-        channel_id: str,
-        name: str,
-        look: bool,
-        listed: list[dict[str, Any]] | None = None,
-        others: set[str] | None = None,
+        self, http: DiscordHTTP, channel_id: str, name: str, hooks: list[dict[str, Any]] | None, others: set[str]
     ) -> tuple[str, bool]:
-        """The URL of a webhook on the channel: one this fill made before, when `look` and it is still there
-        (same name, token visible; `listed` when the fill already fetched the channel's webhooks, None when it did
-        not or its listing failed), otherwise a new one. ("", False) when Discord refuses, when the webhooks of
-        a found channel cannot be listed: it may carry one already, and Mando never deletes the second, and when a
-        found channel carries a webhook in `others`, the webhook ids of the other rows and remembered channels: the
-        channel is that channel's target, so the row gets neither that webhook nor a second one beside it."""
+        """The URL of a webhook on the channel: on a found channel (`hooks`, the webhooks the fill listed on it;
+        None for a channel the fill created) one this fill made before, when it is still there (same name, token
+        visible), otherwise a new one. ("", False) when Discord refuses, and when a found channel carries a webhook
+        in `others`, the webhook ids of the other rows and remembered channels: the fill passes such a channel over,
+        and should one reach this step it is that channel's target, so the row gets neither that webhook nor a second
+        one beside it."""
         wanted = webhook_name(name)
-        if look:
-            hooks = listed if listed is not None else await self._hooks_on(http, channel_id)
-            if hooks is None:
-                self.note(f"webhooks of #{name} could not be listed")
-                return "", False
-            if any(str(hook.get("id") or "") in (others or set()) for hook in hooks):
+        if hooks is not None:
+            if any(str(hook.get("id") or "") in others for hook in hooks):
                 self.note(f"#{name} was not wired (it carries the webhook of another channel)")
                 return "", False
             for hook in hooks:

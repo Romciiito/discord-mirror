@@ -1079,11 +1079,12 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.posts(http, "/webhooks"), [])
         self.assertFalse(any("replaced" in line for line in self.notes()))
 
-    async def test_a_channel_found_by_name_that_carries_another_rows_webhook_is_not_wired(self) -> None:
+    async def test_a_channel_found_by_name_that_carries_another_rows_webhook_is_passed_over(self) -> None:
         # Other (6) was never filled; the owner gave its "general" an own webhook (decision 9g), 5/x, made on the loose
         # "general" t1 of 900 and named "general". Desk (5) is alone in 900 and its loose "general" finds t1 by name:
-        # t1 is 20's target, so 10 neither adopts 20's webhook nor gets a webhook of its own there
-        http = FakeHTTP()
+        # t1's listing proves it is 20's target, so 10 neither adopts 20's webhook nor gets a webhook there, but its
+        # own channel beside t1, which a refill finds again by 10's webhook
+        http = KeepingHTTP()
         http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
         http.sources["900"] = [{"id": "t1", "type": 0, "name": "general", "parent_id": None}]
         http.hooks["t1"] = [{"id": "5", "name": "general", "token": "x"}]
@@ -1097,16 +1098,22 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         report = await self.engine.fill_copy("5", "900")
-        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0, "replaced": 0})
-        self.assertIn("#general was not wired (it carries the webhook of another channel)", self.notes())
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 0, "replaced": 0})
+        self.assertEqual([b["name"] for b in self.posts(http, "/guilds/900/channels")], ["general", "news"])
         self.assertEqual(self.posts(http, "/channels/t1/webhooks"), [])
         urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
-        self.assertEqual((urls["10"], urls["20"]), ("", own))
+        self.assertEqual(urls["20"], own)
+        self.assertNotIn(urls["10"], ("", own))
+        http.calls.clear()
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 2, "replaced": 0})
+        self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
+        self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, urls)
 
     async def test_a_channel_that_carries_the_webhook_of_an_unticked_row_is_not_taken_for_another_row(self) -> None:
         # 20's own webhook 5/x stands on the loose "general" t1 of 900; the owner unticks 20 (the CLI drops the row,
         # its URL stays in the hooks memory, decision 9l). Desk (5), alone in 900, finds t1 by name: t1 is still 20's
-        # target, so 10 never gets 5/x, and ticking 20 again never puts two rows on one webhook
+        # target, so 10 never gets 5/x but its own channel, and ticking 20 again never puts two rows on one webhook
         http = KeepingHTTP()
         http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
         http.sources["900"] = [{"id": "t1", "type": 0, "name": "general", "parent_id": None}]
@@ -1118,8 +1125,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.store.replace_selection([row("10", name="general"), row("11", name="news")])
         self.assertEqual(self.store.hooks()["20"], own)
         await self.engine.fill_copy("5", "900")
-        self.assertNotEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}["10"], own)
-        self.assertIn("#general was not wired (it carries the webhook of another channel)", self.notes())
+        self.assertNotIn({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}["10"], ("", own))
         self.store.replace_selection(
             [row("10", name="general"), row("11", name="news"), row("20", name="general", guild_id="6") | {"guild_name": "Other"}]
         )
