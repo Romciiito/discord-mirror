@@ -23,6 +23,11 @@ RETRY_CAP = 60.0
 PACE = 0.5
 TEXT_FLOOR = 64
 JSON_HEADERS = {"Content-Type": "application/json"}
+EMBED_TOTAL = 6000
+STICKER_PNG = 1
+STICKER_APNG = 2
+STICKER_LOTTIE = 3
+STICKER_GIF = 4
 
 
 def safe_name(name: str) -> str:
@@ -88,8 +93,18 @@ def reply_line(message: dict[str, Any]) -> str:
     return clip(f"replying to {who}: {snippet}", 180)
 
 
+def embed_chars(item: dict[str, Any]) -> int:
+    count = len(item.get("title") or "") + len(item.get("description") or "")
+    for field in item.get("fields") or []:
+        count += len(field.get("name") or "") + len(field.get("value") or "")
+    footer = item.get("footer") or {}
+    author = item.get("author") or {}
+    return count + len(str(footer.get("text") or "")) + len(str(author.get("name") or ""))
+
+
 def safe_embeds(message: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    total = 0
     for embed in message.get("embeds") or []:
         if not isinstance(embed, dict):
             continue
@@ -124,6 +139,11 @@ def safe_embeds(message: dict[str, Any]) -> list[dict[str, Any]]:
         if fields:
             item["fields"] = fields
         if item:
+            # the title, description, field, footer and author texts of all embeds share 6000 characters
+            used = embed_chars(item)
+            if total + used > EMBED_TOTAL:
+                break
+            total += used
             out.append(item)
         if len(out) == 10:
             break
@@ -131,11 +151,30 @@ def safe_embeds(message: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def sticker_names(message: dict[str, Any]) -> list[str]:
+    """Stickers that have no image to send: Lottie (decision 10a)."""
     names = []
     for sticker in message.get("sticker_items") or []:
-        if isinstance(sticker, dict) and sticker.get("name"):
+        if isinstance(sticker, dict) and sticker.get("name") and sticker.get("format_type") == STICKER_LOTTIE:
             names.append(str(sticker["name"])[:64])
     return names
+
+
+def sticker_files(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """PNG, APNG and GIF stickers as image files from the CDN, uploaded like attachments (decision 10a)."""
+    files: list[dict[str, Any]] = []
+    for sticker in message.get("sticker_items") or []:
+        if not isinstance(sticker, dict) or not sticker.get("id"):
+            continue
+        kind = sticker.get("format_type")
+        name = str(sticker.get("name") or "sticker")[:64]
+        if kind in (STICKER_PNG, STICKER_APNG):
+            url, ext, mime = f"https://cdn.discordapp.com/stickers/{sticker['id']}.png", "png", "image/png"
+        elif kind == STICKER_GIF:
+            url, ext, mime = f"https://media.discordapp.net/stickers/{sticker['id']}.gif", "gif", "image/gif"
+        else:
+            continue
+        files.append({"name": f"{name}.{ext}", "url": url, "content_type": mime, "size": 0, "sticker": True})
+    return files
 
 
 def view_from_message(
@@ -156,6 +195,7 @@ def view_from_message(
                 "size": int(item.get("size") or 0),
             }
         )
+    attachments.extend(sticker_files(message))
     return {
         "id": str(message.get("id") or ""),
         "channel_id": str(message.get("channel_id") or ""),
@@ -197,9 +237,10 @@ def plan_uploads(attachments: list[dict[str, Any]]) -> tuple[list[dict[str, Any]
         if not isinstance(item, dict):
             continue
         size = size_of(item)
+        # a sticker's size is unknown (0); _fetch holds its body to the limit
         if (
             host_of(str(item.get("url") or "")) in CDN_HOSTS
-            and 0 < size <= UPLOAD_LIMIT
+            and (0 < size <= UPLOAD_LIMIT or (size == 0 and item.get("sticker")))
             and len(upload) < UPLOAD_FILES
         ):
             upload.append(item)
@@ -384,6 +425,7 @@ class Relay:
             return
         try:
             body = payload_for(view, prefix)
+            body["embeds"] = view.get("embeds") or []  # always on an edit, so removed embeds go too (issue #6)
             body.pop("username", None)
             body.pop("avatar_url", None)
             url = f"{webhook_url.rstrip('/')}/messages/{webhook_message_id}"
