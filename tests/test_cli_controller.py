@@ -849,11 +849,11 @@ class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ui.picked["c1"]["webhook_url"], HOOK)
         self.assertEqual(engine.calls[-1][1]["channels"][0]["webhook_url"], HOOK)
 
-    async def test_the_url_row_of_a_channel_ticked_before_says_esc_leaves_it(self) -> None:
+    async def test_the_url_row_of_a_channel_ticked_before_says_esc_cancels(self) -> None:
         ui, engine = await self.open_channels()
         await keys(ui, "a", "Enter")
         self.assertEqual((ui.typing, ui.webhook_new), ("webhook", False))
-        self.assertEqual(ui.hint(), "enter keeps the url, empty enter unticks, esc leaves it as before")
+        self.assertEqual(ui.hint(), "enter keeps the url, empty enter unticks, esc cancels")
         await keys(ui, "Escape")
         self.assertEqual(ui.hint(), "enter toggles, a selects all, esc back")
 

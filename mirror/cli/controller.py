@@ -110,10 +110,11 @@ class Controller:
         if self.typing == "token":
             return "enter or esc keeps it"
         if self.typing == "webhook":
-            # Esc unticks a channel the Enter that opened the row ticked, and leaves one ticked before as it was
+            # Esc unticks a channel the Enter that opened the row ticked, and leaves one ticked before as it was;
+            # both fit a 60-column terminal, since the renderer cuts every line to the width
             if self.webhook_new:
                 return "enter keeps the url, empty enter or esc unticks"
-            return "enter keeps the url, empty enter unticks, esc leaves it as before"
+            return "enter keeps the url, empty enter unticks, esc cancels"
         if self.typing:
             return "enter keeps it, esc cancels the edit"
         screen = self.flow["screen"]
