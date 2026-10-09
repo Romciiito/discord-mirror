@@ -507,6 +507,30 @@ class WebhookScreenTests(unittest.IsolatedAsyncioTestCase):
         await keys(ui, "2")
         self.assertEqual(ui.error, "bad webhook")
 
+    async def test_a_failed_save_shows_the_stored_options_again(self) -> None:
+        ui, engine = await self.open_hooks()
+        engine.fail["save_setup"] = ApiError(400, "database is locked")
+        await keys(ui, "2")
+        self.assertEqual(ui.error, "database is locked")
+        self.assertFalse(ui.snap["options"]["include_threads"])
+        self.assertIn("> 2  threads  off", render(ui, 80, 24))
+        await keys(ui, "1")
+        self.assertEqual(ui.snap["options"]["backfill"], 0)
+        self.assertFalse(ui.busy)
+
+    async def test_a_failed_save_keeps_its_error_when_the_state_cannot_be_read_either(self) -> None:
+        ui, engine = await self.open_hooks()
+        engine.fail["save_setup"] = RuntimeError("database is locked")
+
+        def broken() -> dict:
+            raise sqlite3.OperationalError("disk I/O error")
+
+        engine.snapshot = broken
+        with self.assertLogs("mirror.cli", level="ERROR"):
+            await keys(ui, "2")
+        self.assertEqual(ui.error, "database is locked")
+        self.assertFalse(ui.busy)
+
     async def test_save_sends_the_picked_rows_and_the_stored_options(self) -> None:
         picked = {"channel_id": "10", "guild_id": "5", "guild_name": "Src", "channel_name": "general",
                   "webhook_url": "", "enabled": True, "parent": "", "topic": ""}

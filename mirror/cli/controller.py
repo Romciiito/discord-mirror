@@ -472,11 +472,24 @@ class Controller:
             self.error = ""
         except (ApiError, RuntimeError) as exc:
             self.error = str(exc)
+            self._resync()
         except Exception:
             log.exception("save failed")
             self.error = UNEXPECTED
+            self._resync()
         finally:
             self.busy = False
+
+    def _resync(self) -> None:
+        """After a failed engine call: show again the options and ticks the engine and store hold, not the ones
+        the screen changed before the call; the error of the call stays when the state cannot be read either."""
+        try:
+            self.refresh()
+        except (ApiError, RuntimeError) as exc:
+            self.error = self.error or str(exc)
+        except Exception:
+            log.exception("reading the state failed")
+            self.error = self.error or UNEXPECTED
 
     async def _load_guilds(self) -> None:
         self.busy = True
