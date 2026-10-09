@@ -358,9 +358,10 @@ class Engine:
         rows of one name never swap copies. Then a row takes the first free channel of its name under its own
         category (loose for a loose one; `existing` holds only the categories this source may use), and after that
         one elsewhere if the target holds no other source (`alone`), since it may otherwise be another source's
-        channel. An existing channel serves one row only, a category is created only for a channel created under it
-        and recorded for `source_id` as soon as Discord made it, and a channel whose category Discord refuses is
-        skipped, never put loose."""
+        channel. An existing channel serves one row only, and one whose webhooks Discord refuses to list serves none:
+        a row that may have its copy there gets no channel and keeps its URL. A category is created only for a channel
+        created under it and recorded for `source_id` as soon as Discord made it, and a channel whose category Discord
+        refuses is skipped, never put loose."""
         categories: dict[str, str] = {}
         texts: list[dict[str, Any]] = []
         for item in existing:
@@ -380,8 +381,10 @@ class Engine:
         carried: dict[str, str] = {}  # source channel id -> the row's own webhook, found on that channel
         listed: dict[str, list[dict[str, Any]]] = {}  # existing channel id -> its webhooks, once fetched
         unlisted: set[str] = set()  # existing channels whose webhooks Discord refused to list in this fill
+        unproven: set[str] = set()  # source channel ids that may have their copy on an unlisted channel
 
-        def free(name: str, parent: str | None) -> list[str]:
+        def spots(name: str, parent: str | None) -> list[str]:
+            """The unclaimed text channels of the name, under `parent` ("" for loose ones) or anywhere when None."""
             return [
                 str(item["id"])
                 for item in texts
@@ -390,10 +393,14 @@ class Engine:
                 and (parent is None or str(item.get("parent_id") or "") == parent)
             ]
 
+        def free(name: str, parent: str | None) -> list[str]:
+            """The spots a row may take: neither claimed nor unlisted, since an unlisted channel may be a copy."""
+            return [spot for spot in spots(name, parent) if spot not in unlisted]
+
         async def carrier(source: str, spots: list[str]) -> str:
             """The spot whose webhooks hold the row's own webhook (`before`), each spot listed once and kept in
             `listed`, with that webhook kept in `carried`; "" when no spot carries it. A spot whose listing fails is
-            kept out of `listed`, so the webhook step lists it again rather than take it for one without webhooks."""
+            kept in `unlisted`, never in `listed`, and no row takes it in this fill."""
             mine = webhook_parts(before.get(source, ""))
             for spot in spots if mine else []:
                 if spot not in listed and spot not in unlisted:
@@ -428,36 +435,36 @@ class Engine:
 
         # a channel that carries a row's own webhook is that row's copy, wherever it stands: every row with a URL
         # claims it before any row takes a channel by its name, first in its own place, then elsewhere, so a row
-        # without a URL, or a row listed first, never takes another row's copy and history
-        for channel in layout["channels"]:
-            parent = home(channel)
-            if parent is not None:
-                pick = await carrier(channel["source_id"], free(channel["name"], parent))
-                if pick:
-                    found[channel["source_id"]] = pick
-                    claimed.add(pick)
-        for channel in layout["channels"]:
-            source = channel["source_id"]
-            if source not in found:
-                pick = await carrier(source, free(channel["name"], None))
+        # without a URL, or a row listed first, never takes another row's copy and history. Then by name, every
+        # channel in its own place first, so a name found elsewhere never takes a channel another row has there, and
+        # elsewhere only when the target holds no other source (`alone`). A row that meets an unlisted channel of its
+        # name and gets none is `unproven`: its copy may stand there, so it takes none by name and none is created
+        modes = [(True, True), (True, False), (False, True)] + ([(False, False)] if alone else [])
+        for by_webhook, own_place in modes:
+            for channel in layout["channels"]:
+                source = channel["source_id"]
+                parent = home(channel) if own_place else None
+                if (
+                    source in found
+                    or (own_place and parent is None)
+                    or (by_webhook and not webhook_parts(before.get(source, "")))
+                    or (not by_webhook and source in unproven)
+                ):
+                    continue
+                if by_webhook:
+                    pick = await carrier(source, free(channel["name"], parent))
+                else:
+                    pick = next(iter(free(channel["name"], parent)), "")
                 if pick:
                     found[source] = pick
                     claimed.add(pick)
-        # then by name, every channel in its own place first, so a name found elsewhere never takes a channel another
-        # row has there; elsewhere only when the target holds no other source (`alone`)
-        for channel in layout["channels"]:
-            source, parent = channel["source_id"], home(channel)
-            spots = free(channel["name"], parent) if source not in found and parent is not None else []
-            if spots:
-                found[source] = spots[0]
-                claimed.add(spots[0])
-        for channel in layout["channels"] if alone else []:
-            source = channel["source_id"]
-            spots = free(channel["name"], None) if source not in found else []
-            if spots:
-                found[source] = spots[0]
-                claimed.add(spots[0])
-        needed = {channel["category_key"] for channel in layout["channels"] if channel["source_id"] not in found}
+                elif any(spot in unlisted for spot in spots(channel["name"], parent)):
+                    unproven.add(source)
+        needed = {
+            channel["category_key"]
+            for channel in layout["channels"]
+            if channel["source_id"] not in found and channel["source_id"] not in unproven
+        }
         for category in layout["categories"]:
             if category["key"] in parents or category["key"] not in needed:
                 continue
@@ -478,6 +485,10 @@ class Engine:
         for channel in layout["channels"]:
             source = channel["source_id"]
             dest = found.get(source, "")
+            if not dest and source in unproven:
+                # never a channel beside one that may be the row's copy; the stored URL stays (Mando never deletes)
+                self.note(f"#{channel['name']} was not wired (its webhooks could not be listed)")
+                continue
             if not dest:
                 key = channel["category_key"]
                 if key and key not in parents:
