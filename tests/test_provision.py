@@ -46,9 +46,22 @@ class CopyLayoutTests(unittest.TestCase):
         self.assertTrue(same_name("a  b", "a-b"))
         self.assertFalse(same_name("general", "general-2"))
         self.assertFalse(same_name("", "channel"))
+        self.assertFalse(same_name("   ", ""))
         # a channel named "channel" (also the name an empty source name gets) is reused on the next fill (decision 9i)
         self.assertTrue(same_name("Channel", "channel"))
         self.assertFalse(same_name("!!!", "channel"))
+
+    def test_same_name_keeps_emoji_separators_and_underscores_apart(self) -> None:
+        # two source channels that differ only in an emoji, a separator or an underscore are two channels in the copy
+        self.assertFalse(same_name("🔥-general", "💬-general"))
+        self.assertFalse(same_name("📢┃news", "news"))
+        self.assertFalse(same_name("a_b", "a-b"))
+        self.assertFalse(same_name("a_b", "a__b"))
+        self.assertFalse(same_name("🔥", "💬"))
+        # a name without a letter or digit is still found again on the next fill (decision 9i)
+        self.assertTrue(same_name("🔥", "🔥"))
+        self.assertTrue(same_name("📢┃News", "📢┃news"))
+        self.assertTrue(same_name("!!!", "!!!"))
 
 
 class ProvisionTests(unittest.TestCase):

@@ -62,9 +62,11 @@ def destination_layout(selected: list[dict], dest_name: str) -> dict[str, Any]:
 
 def copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict[str, Any]:
     """The categories and channels a fill creates in the target for the ticked rows of one source server
-    (decisions 9b', 9n, 9o). The first source into a target keeps the source's own category names; a
-    source filled into a target that already holds another source gets "<source> / <category>" and a
-    "<source>" category for its loose channels, so two sources never mix in one category."""
+    (decisions 9b', 9n, 9o). `shared` is false for the first source filled into a target, which keeps the
+    source's own category names, and true for a source filled into a target another source was filled into
+    first, which gets "<source> / <category>" and a "<source>" category for its loose channels, so two
+    sources never mix in one category. The caller keeps the flag with the source's link to the target, so a
+    refill gets the layout of the first fill even after a second source arrived."""
     source = " ".join(str(source_name or "").split())[:100] or "server"
     categories: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -92,17 +94,23 @@ def copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict[str, A
 
 
 def same_name(a: str, b: str) -> bool:
-    """Whether Discord shows two text channel names the same way: it lowers the case and turns runs of
-    spaces and punctuation into one dash, so a reused channel is found by that form (decision 9i). A name
-    with no letter or digit matches nothing."""
-    first = _slug(a, "")
-    return bool(first) and first == _slug(b, "")
+    """Whether two text channel names name the same channel for a fill (decision 9i): equal once the case is
+    folded and each run of whitespace is written as one dash. Every other character counts, so emoji,
+    separators such as "┃" and underscores keep two channels apart; the names come from Discord's own
+    channel list, so a channel a fill created carries the source's name again. An empty name matches
+    nothing."""
+    first = _shown(a)
+    return bool(first) and first == _shown(b)
 
 
-def _slug(value: str, blank: str = "channel") -> str:
+def _shown(value: str) -> str:
+    return "-".join(str(value or "").casefold().split())
+
+
+def _slug(value: str) -> str:
     slug = _SLUG.sub("-", value.casefold()).strip("-")
     if not slug:
-        slug = blank
+        slug = "channel"
     return slug[:100]
 
 

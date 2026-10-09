@@ -30,9 +30,10 @@ Inputs the spec implies but no decision names; each line's test is pinned to the
 
 1. **A second fill into the same target** (after a crash mid-fill, or because the owner ticked two more channels): no second channel of the same name and no second webhook on a reused channel. → Task 4 (`test_fill_reuses_channels_and_their_webhooks`).
 2. **A ticked channel that the lists do not show** (decision 9k's row, stored without `parent`): a fill still creates a channel for it from the stored name. → Task 4 (`test_fill_covers_an_unlisted_ticked_channel`).
-3. **Two sources into one target**: the second gets "<source> / <category>" categories and a "<source>" category for loose channels; the first's channels are untouched. → Task 2 (`test_copy_layout_prefixes_only_a_shared_target`) and Task 4 (`test_second_source_into_a_target_gets_prefixed_categories`).
+3. **Two sources into one target**: the second gets "<source> / <category>" categories and a "<source>" category for loose channels; the first's channels are untouched, also when the first source is filled again after the second arrived (no new category, channel or webhook). → Task 2 (`test_copy_layout_prefixes_only_a_shared_target`) and Task 4 (`test_second_source_into_a_target_gets_prefixed_categories`, `test_refill_of_the_first_source_keeps_its_names_after_a_second_source`).
 4. **A fill while the mirror runs**: the new webhook URLs are mirrored to without a restart. → Task 4 (`test_fill_while_running_refreshes`).
 5. **A message with a sticker and a file over 20 MiB**: one post, the sticker uploaded, the file as one line with two links, no second attempt. → Task 8 (`test_sticker_and_oversize_file_in_one_post`).
+6. **Names that differ only in an emoji, a separator such as "┃" or an underscore** (`🔥-general` and `💬-general`): two channels in the copy, never one channel with one webhook for both; an emoji-only name is found again on the next fill. → Task 2 (`test_same_name_keeps_emoji_separators_and_underscores_apart`).
 
 ---
 
@@ -40,7 +41,7 @@ Inputs the spec implies but no decision names; each line's test is pinned to the
 
 | File | Responsibility |
 |---|---|
-| `mirror/store.py` | `targets` table; `options()` without `global_webhook`, `dest_name`, `dest_guild_id`; `set_options(backfill, include_threads, mirror)`; `set_target`, `targets`; `set_dest_guild` and `clear_destination` removed |
+| `mirror/store.py` | `targets` table (its `shared` column from Task 4); `options()` without `global_webhook`, `dest_name`, `dest_guild_id`; `set_options(backfill, include_threads, mirror)`; `set_target`, `targets`; `set_dest_guild` and `clear_destination` removed |
 | `mirror/provision.py` | `copy_layout(source_name, rows, shared)` and `same_name(a, b)` (new, pure); `webhook_name` kept; `destination_layout` removed |
 | `mirror/engine.py` | `owned_guilds()`, `fill_copy()`, `_fill()`, `_webhook_on()`; `_start` with the Start rule; `copy_guild`, `_wire_copy`, `reset_destination`, `_provision`, `_wire_layout`, `GONE` removed; no `global_webhook` anywhere |
 | `mirror/web.py` | `GET /api/targets`, `POST /api/guilds/{guild_id}/fill`; the copy and reset routes removed |
@@ -50,7 +51,7 @@ Inputs the spec implies but no decision names; each line's test is pinned to the
 | `tests/test_core.py`, `tests/test_provision.py`, `tests/test_engine.py`, `tests/test_web.py`, `tests/test_cli_controller.py`, `tests/test_cli_render.py`, `tests/test_relay.py` | extended and pruned |
 | `README.md`, `CONTEXT.md` | the fill, the key `c`, the relay limits |
 
-Names used across tasks: a **target** is `{"id": str, "name": str}`; a **link** in `Store.targets()` is `{"target_id": str, "target_name": str}` keyed by the source server id; a **layout** is `{"categories": [{"key", "name"}], "channels": [{"source_id", "name", "category_key", "topic"}]}`; **pairs** are `list[tuple[source_channel_id, webhook_url]]` as `Store.fill_webhooks` takes them.
+Names used across tasks: a **target** is `{"id": str, "name": str}`; a **link** in `Store.targets()` is `{"target_id": str, "target_name": str}` keyed by the source server id, and from Task 4 on also `"shared": bool` (whether another source was filled into that target before this source, decision 9o); a **layout** is `{"categories": [{"key", "name"}], "channels": [{"source_id", "name", "category_key", "topic"}]}`; **pairs** are `list[tuple[source_channel_id, webhook_url]]` as `Store.fill_webhooks` takes them.
 
 ---
 
@@ -281,8 +282,8 @@ git commit -m "Store one target server per source server and drop the shared-ser
 - Test: `tests/test_provision.py`
 
 **Interfaces:**
-- Produces: `copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict` with `{"categories": [{"key": str, "name": str}], "channels": [{"source_id": str, "name": str, "category_key": str, "topic": str}]}`; `same_name(a: str, b: str) -> bool` (two channel names Discord would show the same way: lower case, runs of non-word characters as one dash); `webhook_name` unchanged. The `destination_layout` tests are removed here; the function itself goes in Task 3.
-- Rules (decisions 9b', 9n, 9o): rows with `enabled` false (`False`, or the `0` that `Store.selection()` returns for an unticked row) or a non-numeric `channel_id` are skipped; a row's `parent` is the source category name (`""` for a loose channel); when `shared` is false the category name is the parent as is and a loose channel has `category_key == ""`; when `shared` is true the category name is `"<source> / <parent>"` and a loose channel goes under a category named `"<source>"`; categories are deduplicated case-insensitively, in order of first appearance, `key` is the folded name; channel `name` is the stored `channel_name` with collapsed whitespace, 100 characters at most, `"channel"` when empty; `topic` collapsed, 1024 at most. `same_name` is true for two names with the same non-empty shown form, so a channel named `channel` (also the name an empty source name gets) is reused on the next fill (decision 9i); a name with no letter or digit matches nothing.
+- Produces: `copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict` with `{"categories": [{"key": str, "name": str}], "channels": [{"source_id": str, "name": str, "category_key": str, "topic": str}]}`; `same_name(a: str, b: str) -> bool` (two names of the same channel: equal after case folding with each run of whitespace written as one dash; every other character, emoji, `┃` and `_` included, counts); `webhook_name` unchanged. `shared` means this source is **not the first** filled into the target: Task 4 stores the flag with the source's link at its first fill into that target and passes the stored value on a refill, so the first source keeps its own category names after a second source arrived (decision 9o). The `destination_layout` tests are removed here; the function itself goes in Task 3.
+- Rules (decisions 9b', 9n, 9o): rows with `enabled` false (`False`, or the `0` that `Store.selection()` returns for an unticked row) or a non-numeric `channel_id` are skipped; a row's `parent` is the source category name (`""` for a loose channel); when `shared` is false the category name is the parent as is and a loose channel has `category_key == ""`; when `shared` is true the category name is `"<source> / <parent>"` and a loose channel goes under a category named `"<source>"`; categories are deduplicated case-insensitively, in order of first appearance, `key` is the folded name; channel `name` is the stored `channel_name` with collapsed whitespace, 100 characters at most, `"channel"` when empty; `topic` collapsed, 1024 at most. `same_name` is true for two names with the same non-empty shown form (`"-".join(name.casefold().split())`), so a channel named `channel` (also the name an empty source name gets) and an emoji-only name such as `🔥` are reused on the next fill (decision 9i), while `🔥-general` and `💬-general`, `📢┃news` and `news`, or `a_b` and `a-b` stay two channels; an empty or whitespace-only name matches nothing. The source names come from Discord's own channel list (`Engine.channels`), so a channel a fill created carries the source's name again and the comparison needs no other folding.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -333,9 +334,22 @@ class CopyLayoutTests(unittest.TestCase):
         self.assertTrue(same_name("a  b", "a-b"))
         self.assertFalse(same_name("general", "general-2"))
         self.assertFalse(same_name("", "channel"))
+        self.assertFalse(same_name("   ", ""))
         # a channel named "channel" (also the name an empty source name gets) is reused on the next fill (decision 9i)
         self.assertTrue(same_name("Channel", "channel"))
         self.assertFalse(same_name("!!!", "channel"))
+
+    def test_same_name_keeps_emoji_separators_and_underscores_apart(self) -> None:
+        # two source channels that differ only in an emoji, a separator or an underscore are two channels in the copy
+        self.assertFalse(same_name("🔥-general", "💬-general"))
+        self.assertFalse(same_name("📢┃news", "news"))
+        self.assertFalse(same_name("a_b", "a-b"))
+        self.assertFalse(same_name("a_b", "a__b"))
+        self.assertFalse(same_name("🔥", "💬"))
+        # a name without a letter or digit is still found again on the next fill (decision 9i)
+        self.assertTrue(same_name("🔥", "🔥"))
+        self.assertTrue(same_name("📢┃News", "📢┃news"))
+        self.assertTrue(same_name("!!!", "!!!"))
 ```
 
 Check the file's existing imports (`unittest`) and keep the `webhook_name` test class.
@@ -352,9 +366,11 @@ In `mirror/provision.py`, add next to `destination_layout` (which stays until Ta
 ```python
 def copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict[str, Any]:
     """The categories and channels a fill creates in the target for the ticked rows of one source server
-    (decisions 9b', 9n, 9o). The first source into a target keeps the source's own category names; a
-    source filled into a target that already holds another source gets "<source> / <category>" and a
-    "<source>" category for its loose channels, so two sources never mix in one category."""
+    (decisions 9b', 9n, 9o). `shared` is false for the first source filled into a target, which keeps the
+    source's own category names, and true for a source filled into a target another source was filled into
+    first, which gets "<source> / <category>" and a "<source>" category for its loose channels, so two
+    sources never mix in one category. The caller keeps the flag with the source's link to the target, so a
+    refill gets the layout of the first fill even after a second source arrived."""
     source = " ".join(str(source_name or "").split())[:100] or "server"
     categories: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -382,21 +398,20 @@ def copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict[str, A
 
 
 def same_name(a: str, b: str) -> bool:
-    """Whether Discord shows two text channel names the same way: it lowers the case and turns runs of
-    spaces and punctuation into one dash, so a reused channel is found by that form (decision 9i). A name
-    with no letter or digit matches nothing."""
-    first = _slug(a, "")
-    return bool(first) and first == _slug(b, "")
+    """Whether two text channel names name the same channel for a fill (decision 9i): equal once the case is
+    folded and each run of whitespace is written as one dash. Every other character counts, so emoji,
+    separators such as "┃" and underscores keep two channels apart; the names come from Discord's own
+    channel list, so a channel a fill created carries the source's name again. An empty name matches
+    nothing."""
+    first = _shown(a)
+    return bool(first) and first == _shown(b)
 
 
-def _slug(value: str, blank: str = "channel") -> str:
-    slug = _SLUG.sub("-", value.casefold()).strip("-")
-    if not slug:
-        slug = blank
-    return slug[:100]
+def _shown(value: str) -> str:
+    return "-".join(str(value or "").casefold().split())
 ```
 
-Keep `webhook_name` and `_fold`; `_slug` gains the `blank` parameter (default `"channel"`, so `destination_layout` is unchanged) and `same_name` passes `""`, so an empty shown form matches nothing while a channel really named `channel` is still found.
+Keep `webhook_name`, `_fold` and `_slug` unchanged; `same_name` does not use `_slug` (its `[\W_]+` rule drops emoji, `┃` and `_`, so `🔥-general` and `💬-general` would be one channel and `🔥` would never be found again), and `_slug` with `_SLUG` stays only for `destination_layout` until Task 3.
 
 - [ ] **Step 4: Run the full suite**
 
@@ -414,7 +429,7 @@ git commit -m "Add copy_layout and same_name for filling a source's ticked chann
 ### Task 3: Start refuses a ticked channel without a webhook; the shared mirror server goes
 
 **Files:**
-- Modify: `mirror/engine.py`, `mirror/provision.py` (delete `destination_layout` and `_slug` users of it — keep `_slug` for `same_name`), `mirror/web.py` (delete the two routes and handlers)
+- Modify: `mirror/engine.py`, `mirror/provision.py` (delete `destination_layout` with `_slug`, `_SLUG` and `import re`, which only it uses — `same_name` has its own `_shown`), `mirror/web.py` (delete the two routes and handlers)
 - Test: `tests/test_engine.py`, `tests/test_web.py`
 
 **Interfaces:**
@@ -579,7 +594,7 @@ In `mirror/engine.py`:
 
 - `_webhook_for`: `return row["webhook_url"]`; `_prefix`: `target = row["webhook_url"]` and `if target and target == url`; `_own_webhook`: drop the `global_webhook` block. Remove every remaining `options[...]` read of the three dead keys (`grep -n "global_webhook\|dest_name\|dest_guild" mirror/` must print nothing afterwards).
 
-In `mirror/provision.py` delete `destination_layout` (keep `_slug`, `copy_layout`, `same_name`, `webhook_name`, `_fold`).
+In `mirror/provision.py` delete `destination_layout`, `_slug`, `_SLUG` and `import re` (nothing else uses them; `grep -n "_slug\|_SLUG\|^import re$" mirror/provision.py` must print nothing afterwards); keep `copy_layout`, `same_name`, `_shown`, `webhook_name`, `_fold`.
 
 In `mirror/web.py` delete the `reset_destination` and `copy_guild` handlers and their two `app.router.add_post` lines.
 
@@ -599,14 +614,14 @@ git commit -m "Refuse Start on a ticked channel without a webhook and remove the
 ### Task 4: `owned_guilds` and `fill_copy` — filling a server the owner owns
 
 **Files:**
-- Modify: `mirror/engine.py`
-- Test: `tests/test_engine.py`
+- Modify: `mirror/engine.py`, `mirror/store.py` (the `shared` flag of a link)
+- Test: `tests/test_engine.py`, `tests/test_core.py` (`test_store_targets_per_source`, new `test_targets_table_without_shared_column_opens`)
 
 **Interfaces:**
-- Produces: `Engine.owned_guilds() -> list[{"id", "name"}]` sorted by folded name, the servers whose `/users/@me/guilds` entry has `owner` true; `Engine.fill_copy(source_id: str, target_id: str) -> {"target": str, "filled": int, "reused": int}`; `Engine._fill(http, target_id, layout, existing) -> tuple[pairs, reused]`; `Engine._webhook_on(http, channel_id, name, look: bool) -> tuple[str, bool]`.
+- Produces: `Engine.owned_guilds() -> list[{"id", "name"}]` sorted by folded name, the servers whose `/users/@me/guilds` entry has `owner` true; `Engine.fill_copy(source_id: str, target_id: str) -> {"target": str, "filled": int, "reused": int}`; `Engine._fill(http, target_id, layout, existing) -> tuple[pairs, reused]`; `Engine._webhook_on(http, channel_id, name, look: bool) -> tuple[str, bool]`. In the store: the `targets` table gains `shared INTEGER NOT NULL DEFAULT 0` (in `SCHEMA`, and in `_migrate` for a file whose `targets` table Task 1 made without it); `Store.set_target(source_guild_id, target_guild_id, target_name, shared: bool = False)` writes the flag on insert and on update; `Store.targets()` links are `{"target_id", "target_name", "shared": bool}`.
 - Errors (`ApiError(400, ...)`): `"unknown server"` (non-numeric id), `"a server cannot be its own copy"`, `"tick the server or some of its channels first"` (no enabled row of the source), `"pick a server you own"` (target not in `owned_guilds()`), `"no webhook could be created"` (no pair at the end). `"add a token first"` (401) comes from `_require_http`.
-- Behaviour: `rows` are every enabled row of the source, with or without a webhook URL (a second fill finds its own webhooks again and keeps the same URLs; a URL the owner typed for another place is replaced by the copy's webhook, because the owner just chose the copy as the target); `shared` is true when another source already links to this target in `store.targets()` (read **before** `set_target`); the layout is `copy_layout(rows[0]["guild_name"], rows, shared)`; `existing = await http.channels(target_id)`; categories are reused by folded name or created (type 4); a channel is reused when an existing text channel has `same_name` and the same `parent_id` as the one wanted (empty for a loose channel), otherwise created (type 0, `parent_id`, `topic` when present); a reused channel's webhooks are listed with `GET /channels/{id}/webhooks` and one whose `name == webhook_name(channel name)` and that has a `token` is reused, otherwise a webhook is created; a created channel gets a new webhook without the listing; paces: `_wait(0.3)` after each category request, `_wait(0.25)` after each channel and webhook request; no `DELETE` ever; a channel or webhook that fails is noted and skipped (`"#<name> was not created (<exc>)"`, `"webhook for #<name> failed (<exc>)"`); then `store.fill_webhooks(pairs)`, `store.set_target(source_id, target_id, target name)`, a note `"webhooks on <n> channel(s) in <target>"` (`", <k> reused"` appended when `k > 0`), and `await self.refresh()` when running. Returns `{"target": name, "filled": len(pairs), "reused": k}` where `k` counts reused webhooks.
-- Consumes: Task 1 `set_target`/`targets`, Task 2 `copy_layout`/`same_name`.
+- Behaviour: `rows` are every enabled row of the source, with or without a webhook URL (a second fill finds its own webhooks again and keeps the same URLs; a URL the owner typed for another place is replaced by the copy's webhook, because the owner just chose the copy as the target); `shared` means this source is not the first filled into the target (decision 9o) and is read from `store.targets()` **before** `set_target`: when the source already links to this same target, it is that link's stored `shared` (a refill gets the categories of its first fill, so the first source keeps its own category names after a second source arrived and no channel is created twice); otherwise (no link yet, or a link to another target) it is true when another source links to this target; the layout is `copy_layout(rows[0]["guild_name"], rows, shared)`; `existing = await http.channels(target_id)`; categories are reused by folded name or created (type 4); a channel is reused when an existing text channel has `same_name` and the same `parent_id` as the one wanted (empty for a loose channel), otherwise created (type 0, `parent_id`, `topic` when present); a reused channel's webhooks are listed with `GET /channels/{id}/webhooks` and one whose `name == webhook_name(channel name)` and that has a `token` is reused, otherwise a webhook is created; a created channel gets a new webhook without the listing; paces: `_wait(0.3)` after each category request, `_wait(0.25)` after each channel and webhook request; no `DELETE` ever; a channel or webhook that fails is noted and skipped (`"#<name> was not created (<exc>)"`, `"webhook for #<name> failed (<exc>)"`); then `store.fill_webhooks(pairs)`, `store.set_target(source_id, target_id, target name, shared)`, a note `"webhooks on <n> channel(s) in <target>"` (`", <k> reused"` appended when `k > 0`), and `await self.refresh()` when running. Returns `{"target": name, "filled": len(pairs), "reused": k}` where `k` counts reused webhooks.
+- Consumes: Task 1 `set_target`/`targets` (extended here with `shared`), Task 2 `copy_layout`/`same_name`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -680,7 +695,7 @@ class FakeHTTP:
         self.assertTrue(hooks["10"].startswith("https://discord.com/api/webhooks/"))
         self.assertTrue(hooks["11"].startswith("https://discord.com/api/webhooks/"))
         self.assertEqual(hooks["20"], "")
-        self.assertEqual(self.store.targets(), {"5": {"target_id": "900", "target_name": "Desk copy"}})
+        self.assertEqual(self.store.targets(), {"5": {"target_id": "900", "target_name": "Desk copy", "shared": False}})
         self.assertIn("webhooks on 2 channel(s) in Desk copy", self.notes())
         self.assertEqual(self.delays, [0.3, 0.25, 0.25, 0.25, 0.25])
 
@@ -732,8 +747,32 @@ class FakeHTTP:
         texts = [b for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 0]
         self.assertEqual([t["name"] for t in texts], ["general", "loose"])
         self.assertTrue(all(t.get("parent_id") for t in texts))
-        self.assertEqual(self.store.targets()["6"], {"target_id": "900", "target_name": "Desk copy"})
-        self.assertEqual(self.store.targets()["5"], {"target_id": "900", "target_name": "Desk copy"})
+        self.assertEqual(self.store.targets()["6"], {"target_id": "900", "target_name": "Desk copy", "shared": True})
+        self.assertEqual(self.store.targets()["5"], {"target_id": "900", "target_name": "Desk copy", "shared": False})
+
+    async def test_refill_of_the_first_source_keeps_its_names_after_a_second_source(self) -> None:
+        # Desk (5) was filled first into 900 and keeps "Talk"; Other (6) came second and got "Other / Talk" (decision 9o).
+        # Filling Desk again must find its own category, channel and webhook, not build "Desk / Talk" beside them.
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [
+            {"id": "c1", "type": 4, "name": "Talk"},
+            {"id": "t1", "type": 0, "name": "general", "parent_id": "c1"},
+            {"id": "c2", "type": 4, "name": "Other / Talk"},
+            {"id": "t2", "type": 0, "name": "general", "parent_id": "c2"},
+        ]
+        http.hooks["t1"] = [{"id": "77", "name": "general", "token": "old"}]
+        self.engine.http = http
+        self.store.set_target("5", "900", "Desk copy", False)
+        self.store.set_target("6", "900", "Desk copy", True)
+        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1})
+        self.assertEqual([path for method, path, body in http.calls if method == "POST"], [])
+        self.assertEqual([path for method, path, body in http.calls if method == "GET"], ["/channels/t1/webhooks"])
+        self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, {"10": "https://discord.com/api/webhooks/77/old"})
+        self.assertEqual(self.store.targets()["5"], {"target_id": "900", "target_name": "Desk copy", "shared": False})
+        self.assertEqual(self.store.targets()["6"], {"target_id": "900", "target_name": "Desk copy", "shared": True})
 
     async def test_fill_refuses_bad_servers(self) -> None:
         http = FakeHTTP()
@@ -783,12 +822,88 @@ class FakeHTTP:
             await self.engine.stop()
 ```
 
+In `tests/test_core.py`, `test_store_targets_per_source` gets the flag (replace its `set_target` lines and its `targets()` assertion; keep the two `hasattr` checks), and a new test opens a file whose `targets` table Task 1 made without the column:
+
+```python
+            store.set_target("5", "900", "Desk copy")
+            store.set_target("6", "900", "Desk copy", True)
+            store.set_target("7", "900", "Desk copy", True)
+            store.set_target("5", "901", "Other")
+            store.set_target("7", "902", "Third", False)
+            self.assertEqual(
+                store.targets(),
+                {
+                    "5": {"target_id": "901", "target_name": "Other", "shared": False},
+                    "6": {"target_id": "900", "target_name": "Desk copy", "shared": True},
+                    "7": {"target_id": "902", "target_name": "Third", "shared": False},
+                },
+            )
+```
+
+```python
+    def test_targets_table_without_shared_column_opens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = sqlite3.connect(Path(tmp) / "state.db")
+            conn.executescript(
+                """
+                CREATE TABLE targets (
+                    source_guild_id TEXT PRIMARY KEY,
+                    target_guild_id TEXT NOT NULL,
+                    target_name TEXT NOT NULL DEFAULT ''
+                );
+                INSERT INTO targets (source_guild_id, target_guild_id, target_name) VALUES ('5', '900', 'Desk copy');
+                """
+            )
+            conn.commit()
+            conn.close()
+            store = Store(tmp)
+            self.assertEqual(store.targets(), {"5": {"target_id": "900", "target_name": "Desk copy", "shared": False}})
+            store.set_target("6", "900", "Desk copy", True)
+            self.assertTrue(store.targets()["6"]["shared"])
+            store.close()
+```
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `PYTHONUTF8=1 python -X utf8 -m unittest tests.test_engine -q`
-Expected: FAIL — `AttributeError: 'Engine' object has no attribute 'owned_guilds'` / `'fill_copy'`.
+Run: `PYTHONUTF8=1 python -X utf8 -m unittest tests.test_engine tests.test_core -q`
+Expected: FAIL — `AttributeError: 'Engine' object has no attribute 'owned_guilds'` / `'fill_copy'`, and in `tests.test_core` `test_store_targets_per_source` with `TypeError: Store.set_target() takes 4 positional arguments but 5 were given` and `test_targets_table_without_shared_column_opens` with an `AssertionError` (the link has no `"shared"` key).
 
 - [ ] **Step 3: Implement**
+
+In `mirror/store.py`, the `targets` table in `SCHEMA` gets `shared INTEGER NOT NULL DEFAULT 0` after `target_name`; `_migrate` adds it to an older file:
+
+```python
+        target_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(targets)")}
+        if "shared" not in target_cols:
+            self.conn.execute("ALTER TABLE targets ADD COLUMN shared INTEGER NOT NULL DEFAULT 0")
+```
+
+and `set_target` / `targets` carry it:
+
+```python
+    def set_target(self, source_guild_id: str, target_guild_id: str, target_name: str, shared: bool = False) -> None:
+        """The server the owner picked as the copy of one source server (decision 9b'); a later pick replaces it.
+        `shared` records whether another source was filled into that target first (decision 9o), so a refill
+        gets the categories of the first fill."""
+        self.conn.execute(
+            "INSERT INTO targets (source_guild_id, target_guild_id, target_name, shared) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(source_guild_id) DO UPDATE SET "
+            "target_guild_id = excluded.target_guild_id, target_name = excluded.target_name, shared = excluded.shared",
+            (str(source_guild_id), str(target_guild_id), str(target_name or "")[:100], int(bool(shared))),
+        )
+        self.conn.commit()
+
+    def targets(self) -> dict[str, dict[str, Any]]:
+        rows = self.conn.execute("SELECT source_guild_id, target_guild_id, target_name, shared FROM targets").fetchall()
+        return {
+            str(row["source_guild_id"]): {
+                "target_id": str(row["target_guild_id"]),
+                "target_name": str(row["target_name"]),
+                "shared": bool(row["shared"]),
+            }
+            for row in rows
+        }
+```
 
 In `mirror/engine.py` (`from .provision import copy_layout, same_name, webhook_name`), after `channels()`:
 
@@ -819,16 +934,20 @@ In `mirror/engine.py` (`from .provision import copy_layout, same_name, webhook_n
         target = next((guild for guild in await self.owned_guilds() if guild["id"] == target_id), None)
         if target is None:
             raise ApiError(400, "pick a server you own")
-        shared = any(
-            source != source_id and link["target_id"] == target_id for source, link in self.store.targets().items()
-        )
+        links = self.store.targets()
+        own = links.get(source_id)
+        if own is not None and own["target_id"] == target_id:
+            # a refill keeps the layout of the first fill into this target (decision 9o)
+            shared = own["shared"]
+        else:
+            shared = any(source != source_id and link["target_id"] == target_id for source, link in links.items())
         source_name = rows[0].get("guild_name") or "server"
         layout = copy_layout(source_name, rows, shared)
         existing = await http.channels(target_id)
         self.note(f"filling {target['name']} from {source_name}")
         pairs, reused = await self._fill(http, target_id, layout, existing)
         self.store.fill_webhooks(pairs)
-        self.store.set_target(source_id, target_id, target["name"])
+        self.store.set_target(source_id, target_id, target["name"], shared)
         text = f"webhooks on {len(pairs)} channel(s) in {target['name']}"
         if reused:
             text += f", {reused} reused"
@@ -949,8 +1068,8 @@ Run the full test command. Expected: OK.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add mirror/engine.py tests/test_engine.py
-git commit -m "Fill a server the owner owns with a source's ticked channels, reusing channels and webhooks of the same name."
+git add mirror/engine.py mirror/store.py tests/test_engine.py tests/test_core.py
+git commit -m "Fill a server the owner owns with a source's ticked channels, reusing channels and webhooks of the same name and keeping the first source's category names on a refill."
 ```
 
 ---
