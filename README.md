@@ -142,7 +142,7 @@ They come in three groups:
 - API: `tests.test_web`
 - CLI: `tests.test_cli_flow`, `tests.test_cli_controller`, `tests.test_cli_render`
 
-CI runs the unit tests on Linux (Python 3.12), Windows x64 (Python 3.10 and 3.12) and Windows x86 (Python 3.12). On Windows it also starts `python -m mirror` without a terminal and checks that the API answers and refuses a request from another website.
+CI runs the unit tests on Linux (Python 3.12), Windows x64 (Python 3.10 and 3.12) and Windows x86 (Python 3.12). On Linux and Windows it also starts `python -m mirror` without a terminal and checks that the API answers and refuses a request from another website.
 
 ## Careful
 
