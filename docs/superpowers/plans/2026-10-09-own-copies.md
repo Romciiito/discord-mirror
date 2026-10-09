@@ -592,7 +592,7 @@ In `mirror/engine.py`:
                 self.note(f"#{row.get('channel_name') or row['channel_id']} has no webhook, not mirrored")
 ```
 
-- `_webhook_for`: `return row["webhook_url"]`; `_prefix`: `target = row["webhook_url"]` and `if target and target == url`; `_own_webhook`: drop the `global_webhook` block. Remove every remaining `options[...]` read of the three dead keys (`grep -n "global_webhook\|dest_name\|dest_guild" mirror/` must print nothing afterwards).
+- `_webhook_for`: `return row["webhook_url"]`; `_prefix`: `target = row["webhook_url"]` and `if target and target == url`; `_own_webhook`: drop the `global_webhook` block. Remove every remaining `options[...]` read of the three dead keys (`grep -n "global_webhook\|dest_name\|dest_guild" mirror/engine.py` must print nothing afterwards; across the package, `grep -rn --include=*.py` on `mirror/` still prints `mirror/cli/controller.py`'s `_save_options` body, which Task 6 changes, and the 9h comment in `mirror/store.py` `_migrate`, measured in the Task 3 run).
 
 In `mirror/provision.py` delete `destination_layout`, `_slug`, `_SLUG` and `import re` (nothing else uses them; `grep -n "_slug\|_SLUG\|^import re$" mirror/provision.py` must print nothing afterwards); keep `copy_layout`, `same_name`, `_shown`, `webhook_name`, `_fold`.
 
@@ -600,7 +600,7 @@ In `mirror/web.py` delete the `reset_destination` and `copy_guild` handlers and 
 
 - [ ] **Step 4: Run the full suite**
 
-Run the full test command. Expected: OK. Also run `grep -rn "global_webhook\|dest_name\|dest_guild\|destination_layout\|copy_guild\|reset_destination\|_provision" mirror/ tests/` — only `tests/test_core.py`'s old-database test and `tests/test_cli_controller.py` (Task 6 cleans the fake) may still mention the dead names.
+Run the full test command. Expected: OK. Also run `grep -rn --include=*.py "global_webhook\|dest_name\|dest_guild\|destination_layout\|copy_guild\|reset_destination\|_provision" mirror/ tests/` — only these may still mention the dead names (measured in the Task 3 run): `mirror/cli/controller.py` `_save_options` and `tests/test_cli_controller.py` (Task 6 cleans both), the 9h comment in `mirror/store.py` `_migrate`, the old-database schemas in `tests/test_core.py` and `tests/test_engine.py` (`OLD_SCHEMA`), the `hasattr` checks in `tests/test_core.py` (`set_dest_guild`) and in `test_prefix_only_when_two_channels_share_a_webhook`, and the dead keys fed to `test_save_setup_keeps_only_the_three_options`.
 
 - [ ] **Step 5: Commit**
 
