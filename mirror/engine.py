@@ -371,12 +371,14 @@ class Engine:
                 categories.setdefault(str(item.get("name") or "").casefold(), str(item["id"]))
             elif item.get("type") in TEXT_TYPES:
                 texts.append(item)
-        # the webhook id of every ticked row, of any source: a channel that carries one is that row's target
+        # the webhook id of every row, of any source, and of every channel the hooks memory keeps a URL for (an
+        # unticked one included, decision 9l): a channel that carries one is that channel's target
         held: dict[str, set[str]] = {}
-        for row in self.store.selection():
-            parts = webhook_parts(str(row.get("webhook_url") or ""))
+        remembered = [(str(row["channel_id"]), str(row.get("webhook_url") or "")) for row in self.store.selection()]
+        for channel_id, url in remembered + list(self.store.hooks().items()):
+            parts = webhook_parts(url)
             if parts:
-                held.setdefault(parts[0], set()).add(str(row["channel_id"]))
+                held.setdefault(parts[0], set()).add(channel_id)
         parents = {
             category["key"]: categories[category["name"].casefold()]
             for category in layout["categories"]
@@ -558,8 +560,8 @@ class Engine:
         (same name, token visible; `listed` when the fill already fetched the channel's webhooks, None when it did
         not or its listing failed), otherwise a new one. ("", False) when Discord refuses, when the webhooks of
         a found channel cannot be listed: it may carry one already, and Mando never deletes the second, and when a
-        found channel carries a webhook in `others`, the webhook ids of the other ticked rows: the channel is that
-        row's target, so the row gets neither that webhook nor a second one beside it."""
+        found channel carries a webhook in `others`, the webhook ids of the other rows and remembered channels: the
+        channel is that channel's target, so the row gets neither that webhook nor a second one beside it."""
         wanted = webhook_name(name)
         if look:
             hooks = listed if listed is not None else await self._hooks_on(http, channel_id)
@@ -567,7 +569,7 @@ class Engine:
                 self.note(f"webhooks of #{name} could not be listed")
                 return "", False
             if any(str(hook.get("id") or "") in (others or set()) for hook in hooks):
-                self.note(f"#{name} was not wired (it carries the webhook of another ticked channel)")
+                self.note(f"#{name} was not wired (it carries the webhook of another channel)")
                 return "", False
             for hook in hooks:
                 if hook.get("token") and hook.get("name") == wanted:

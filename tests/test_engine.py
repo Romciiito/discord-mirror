@@ -1098,10 +1098,35 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         )
         report = await self.engine.fill_copy("5", "900")
         self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0, "replaced": 0})
-        self.assertIn("#general was not wired (it carries the webhook of another ticked channel)", self.notes())
+        self.assertIn("#general was not wired (it carries the webhook of another channel)", self.notes())
         self.assertEqual(self.posts(http, "/channels/t1/webhooks"), [])
         urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
         self.assertEqual((urls["10"], urls["20"]), ("", own))
+
+    async def test_a_channel_that_carries_the_webhook_of_an_unticked_row_is_not_taken_for_another_row(self) -> None:
+        # 20's own webhook 5/x stands on the loose "general" t1 of 900; the owner unticks 20 (the CLI drops the row,
+        # its URL stays in the hooks memory, decision 9l). Desk (5), alone in 900, finds t1 by name: t1 is still 20's
+        # target, so 10 never gets 5/x, and ticking 20 again never puts two rows on one webhook
+        http = KeepingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [{"id": "t1", "type": 0, "name": "general", "parent_id": None}]
+        http.hooks["t1"] = [{"id": "5", "name": "general", "token": "x"}]
+        self.engine.http = http
+        own = "https://discord.com/api/webhooks/5/x"
+        other = row("20", own, name="general", guild_id="6") | {"guild_name": "Other"}
+        self.store.replace_selection([row("10", name="general"), row("11", name="news"), other])
+        self.store.replace_selection([row("10", name="general"), row("11", name="news")])
+        self.assertEqual(self.store.hooks()["20"], own)
+        await self.engine.fill_copy("5", "900")
+        self.assertNotEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}["10"], own)
+        self.assertIn("#general was not wired (it carries the webhook of another channel)", self.notes())
+        self.store.replace_selection(
+            [row("10", name="general"), row("11", name="news"), row("20", name="general", guild_id="6") | {"guild_name": "Other"}]
+        )
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertEqual(urls["20"], own)
+        wired = [url for url in urls.values() if url]
+        self.assertEqual(len(wired), len(set(wired)))
 
     async def test_a_second_source_whose_category_fails_takes_no_loose_channel(self) -> None:
         # Desk (5) holds a loose "general" with its webhook in 900. Other (6) comes second and Discord refuses its
