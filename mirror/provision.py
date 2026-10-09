@@ -37,7 +37,15 @@ def copy_layout(source_name: str, rows: list[dict], shared: bool) -> dict[str, A
             categories.append({"key": key, "name": label})
         name = " ".join(str(row.get("channel_name") or "").split())[:100] or "channel"
         topic = " ".join(str(row.get("topic") or "").split())[:1024]
-        channels.append({"source_id": channel_id, "name": name, "category_key": key if label else "", "topic": topic})
+        channel: dict[str, Any] = {
+            "source_id": channel_id,
+            "name": name,
+            "category_key": key if label else "",
+            "topic": topic,
+        }
+        if row.get("nsfw"):
+            channel["nsfw"] = True  # an age-restricted source channel: its copy is created with the age gate
+        channels.append(channel)
     return {"categories": categories, "channels": channels}
 
 

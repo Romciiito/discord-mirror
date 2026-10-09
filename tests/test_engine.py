@@ -685,6 +685,36 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("webhooks on 2 channel(s) in Desk copy", self.notes())
         self.assertEqual(self.delays, [0.3, 0.25, 0.25, 0.25, 0.25])
 
+    async def test_fill_creates_the_copy_of_an_age_restricted_channel_with_the_age_gate(self) -> None:
+        # the store rows hold no age restriction; the fill reads it from the source server's channel listing, once,
+        # and sets it only on a channel it creates: "rules", found again in the target, is never altered
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["5"] = [
+            {"id": "10", "type": 0, "name": "general", "nsfw": True},
+            {"id": "11", "type": 0, "name": "news", "nsfw": False},
+            {"id": "12", "type": 0, "name": "rules", "nsfw": True},
+        ]
+        http.sources["900"] = [{"id": "t1", "type": 0, "name": "rules", "parent_id": None}]
+        self.engine.http = http
+        self.store.replace_selection([row("10", name="general"), row("11", name="news"), row("12", name="rules")])
+        listed: list[str] = []
+        listing = http.channels
+
+        async def counted(guild_id: str) -> list[dict]:
+            listed.append(guild_id)
+            return await listing(guild_id)
+
+        http.channels = counted
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report["filled"], 3)
+        self.assertEqual(listed.count("5"), 1)
+        texts = {b["name"]: b for b in self.posts(http, "/guilds/900/channels")}
+        self.assertEqual(sorted(texts), ["general", "news"])
+        self.assertIs(texts["general"]["nsfw"], True)
+        self.assertNotIn("nsfw", texts["news"])
+        self.assertEqual({method for method, path, body in http.calls}, {"GET", "POST"})
+
     async def test_fill_reuses_channels_and_their_webhooks(self) -> None:
         http = FakeHTTP()
         http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]

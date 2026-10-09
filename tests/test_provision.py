@@ -22,6 +22,18 @@ class CopyLayoutTests(unittest.TestCase):
             ],
         )
 
+    def test_copy_layout_carries_the_age_restriction(self) -> None:
+        # the fill creates the copy of an age-restricted source channel with the age gate; other channels get no key
+        plan = copy_layout("Desk", [row("10", "general") | {"nsfw": True}, row("11", "news") | {"nsfw": False}, row("12", "dev")], False)
+        self.assertEqual(
+            plan["channels"],
+            [
+                {"source_id": "10", "name": "general", "category_key": "", "topic": "", "nsfw": True},
+                {"source_id": "11", "name": "news", "category_key": "", "topic": ""},
+                {"source_id": "12", "name": "dev", "category_key": "", "topic": ""},
+            ],
+        )
+
     def test_copy_layout_prefixes_only_a_shared_target(self) -> None:
         rows = [row("10", "general", "Talk"), row("12", "news")]
         plan = copy_layout("Desk", rows, True)
