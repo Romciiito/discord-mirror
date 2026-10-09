@@ -86,6 +86,10 @@ class FakeEngine:
         self.options["dest_name"] = str(body.get("dest_name") or "mirror")
         self.selection = [dict(row) for row in body.get("channels") or []]
 
+    async def refresh(self) -> None:
+        self.calls.append(("refresh",))
+        self._maybe_fail("refresh")
+
     async def reset_destination(self) -> None:
         self.calls.append(("reset_destination",))
         self._maybe_fail("reset_destination")
@@ -424,6 +428,120 @@ class TokenScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ui.flow["screen"], "token")
         self.assertEqual(ui.fields["token"], "i" * 40)
         self.assertEqual(ui.error, "request failed")
+        self.assertFalse(ui.busy)
+
+
+class WebhookScreenTests(unittest.IsolatedAsyncioTestCase):
+    async def open_hooks(self) -> tuple[Controller, FakeEngine]:
+        ui, engine = make()
+        await keys(ui, "Enter", "2", "3")
+        self.assertEqual(ui.flow["screen"], "webhooks")
+        return ui, engine
+
+    async def test_right_and_left_step_backfill_and_save(self) -> None:
+        ui, engine = await self.open_hooks()
+        self.assertEqual(ui.hook_index, 0)
+        await keys(ui, "ArrowRight", "ArrowRight")
+        self.assertEqual(ui.snap["options"]["backfill"], 50)
+        self.assertEqual(engine.calls[-1][0], "save_setup")
+        self.assertEqual(engine.calls[-1][1]["backfill"], 50)
+        self.assertEqual(engine.calls[-1][1]["global_webhook"], "")
+        self.assertEqual(engine.calls[-1][1]["dest_name"], "mirror")
+        await keys(ui, "ArrowLeft", "ArrowLeft", "ArrowLeft")
+        self.assertEqual(ui.snap["options"]["backfill"], 0)
+
+    async def test_enter_on_backfill_wraps_and_threads_toggle(self) -> None:
+        ui, engine = await self.open_hooks()
+        for _ in range(6):
+            await keys(ui, "1")
+        self.assertEqual(ui.snap["options"]["backfill"], 0)
+        await keys(ui, "2")
+        self.assertTrue(ui.snap["options"]["include_threads"])
+        await keys(ui, "ArrowLeft")
+        self.assertFalse(ui.snap["options"]["include_threads"])
+
+    async def test_digits_wrap_and_back_returns(self) -> None:
+        ui, engine = await self.open_hooks()
+        await keys(ui, "ArrowUp")
+        self.assertEqual(ui.hook_index, 2)
+        await keys(ui, "ArrowDown")
+        self.assertEqual(ui.hook_index, 0)
+        await keys(ui, "4")
+        self.assertEqual(ui.flow["screen"], "webhooks")
+        await keys(ui, "3")
+        self.assertEqual(ui.flow["screen"], "settings")
+
+    async def test_save_failure_shows_the_error(self) -> None:
+        ui, engine = await self.open_hooks()
+        engine.fail["save_setup"] = ApiError(400, "bad webhook")
+        await keys(ui, "2")
+        self.assertEqual(ui.error, "bad webhook")
+
+    async def test_save_sends_the_picked_rows_and_the_stored_options(self) -> None:
+        picked = {"channel_id": "10", "guild_id": "5", "guild_name": "Src", "channel_name": "general",
+                  "webhook_url": "", "enabled": True, "parent": "", "topic": ""}
+        ui, engine = await self.open_hooks()
+        engine.selection = [dict(picked)]
+        engine.options["mirror"] = True
+        ui.refresh()
+        await keys(ui, "2")
+        body = engine.calls[-1][1]
+        self.assertEqual(body["channels"], [picked])
+        self.assertTrue(body["mirror"])
+        self.assertTrue(body["include_threads"])
+        self.assertEqual(engine.selection, [picked])
+
+    async def test_save_while_running_refreshes_the_running_engine(self) -> None:
+        # PUT /api/setup refreshed a running engine after saving (mirror/web.py save_setup), so the
+        # threads toggle reaches the live gateway; a stopped engine is only saved
+        ui, engine = await self.open_hooks()
+        engine.running = True
+        await keys(ui, "2")
+        self.assertEqual([call[0] for call in engine.calls], ["save_setup", "refresh"])
+        self.assertTrue(ui.snap["options"]["include_threads"])
+        engine.running = False
+        await keys(ui, "ArrowLeft")
+        self.assertEqual([call[0] for call in engine.calls], ["save_setup", "refresh", "save_setup"])
+        self.assertFalse(ui.snap["options"]["include_threads"])
+
+    async def test_refresh_failure_and_network_errors_show_the_error(self) -> None:
+        ui, engine = await self.open_hooks()
+        engine.running = True
+        engine.fail["refresh"] = ApiError(400, "pick at least one channel")
+        await keys(ui, "1")
+        self.assertEqual(ui.error, "pick at least one channel")
+        self.assertFalse(ui.busy)
+        engine.fail["refresh"] = aiohttp.ClientConnectionError("Cannot connect to host discord.com:443")
+        with self.assertLogs("mirror.cli", level="ERROR"):
+            await keys(ui, "2")
+        self.assertEqual(ui.error, "request failed")
+        self.assertFalse(ui.busy)
+        await keys(ui, "ArrowDown")
+        self.assertEqual(ui.error, "request failed")
+        await keys(ui, "Enter")
+        self.assertEqual(ui.flow["screen"], "settings")
+        self.assertEqual(ui.error, "")
+
+    async def test_keys_are_dropped_while_the_running_engine_refreshes(self) -> None:
+        ui, engine = await self.open_hooks()
+        engine.running = True
+        entered, gate = asyncio.Event(), asyncio.Event()
+
+        async def held() -> None:
+            engine.calls.append(("refresh",))
+            entered.set()
+            await gate.wait()
+
+        engine.refresh = held
+        task = asyncio.create_task(keys(ui, "2"))
+        await asyncio.wait_for(entered.wait(), 1)
+        self.assertTrue(ui.busy)
+        await keys(ui, "1", "ArrowRight", "Escape")
+        gate.set()
+        await asyncio.wait_for(task, 1)
+        self.assertEqual([call[0] for call in engine.calls], ["save_setup", "refresh"])
+        self.assertEqual(ui.flow["screen"], "webhooks")
+        self.assertEqual(ui.snap["options"]["backfill"], 0)
         self.assertFalse(ui.busy)
 
 

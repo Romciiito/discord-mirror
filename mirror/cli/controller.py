@@ -321,7 +321,76 @@ class Controller:
             self.busy = False
 
     async def _hook_key(self, key: str) -> None:
-        raise NotImplementedError
+        if key == "ArrowDown":
+            self.hook_index = (self.hook_index + 1) % len(HOOK_ROWS)
+        elif key == "ArrowUp":
+            self.hook_index = (self.hook_index - 1 + len(HOOK_ROWS)) % len(HOOK_ROWS)
+        elif key == "ArrowRight":
+            await self._shift_hook(1)
+        elif key == "ArrowLeft":
+            await self._shift_hook(-1)
+        elif key == "Enter":
+            await self._hook_action()
+        elif key == "Escape":
+            self.flow = reduce(self.flow, {"key": "Escape"}, self.ctx())
+        elif len(key) == 1 and "1" <= key <= str(len(HOOK_ROWS)):
+            self.hook_index = int(key) - 1
+            await self._hook_action()
+
+    async def _hook_action(self) -> None:
+        target = HOOK_ROWS[self.hook_index]
+        self.error = ""
+        if target == "backfill":
+            await self._step_backfill(1, wrap=True)
+        elif target == "threads":
+            self.snap["options"]["include_threads"] = not self.snap["options"].get("include_threads")
+            await self._save_options()
+        elif target == "back":
+            self.flow = reduce(self.flow, {"key": "Escape"}, self.ctx())
+
+    async def _step_backfill(self, direction: int, wrap: bool) -> None:
+        current = int(self.snap["options"].get("backfill") or 0)
+        at = BACKFILL.index(current) if current in BACKFILL else 0
+        if wrap:
+            at = (at + direction + len(BACKFILL)) % len(BACKFILL)
+        else:
+            at = max(0, min(len(BACKFILL) - 1, at + direction))
+        self.snap["options"]["backfill"] = BACKFILL[at]
+        await self._save_options()
+
+    async def _shift_hook(self, direction: int) -> None:
+        target = HOOK_ROWS[self.hook_index]
+        if target == "backfill":
+            await self._step_backfill(direction, wrap=False)
+        elif target == "threads":
+            self.snap["options"]["include_threads"] = direction > 0
+            await self._save_options()
+
+    async def _save_options(self) -> None:
+        """What PUT /api/setup did for the page: save, then refresh a running engine (web.save_setup)."""
+        options = self.snap["options"]
+        body = {
+            "backfill": options.get("backfill", 0),
+            "include_threads": bool(options.get("include_threads")),
+            "mirror": bool(options.get("mirror")),
+            "global_webhook": "",
+            "dest_name": options.get("dest_name") or "mirror",
+            "channels": list(self.picked.values()),
+        }
+        self.busy = True
+        try:
+            self.engine.save_setup(body)
+            if self.engine.running:
+                await self.engine.refresh()
+            self.refresh()
+            self.error = ""
+        except (ApiError, RuntimeError) as exc:
+            self.error = str(exc)
+        except Exception:
+            log.exception("save failed")
+            self.error = UNEXPECTED
+        finally:
+            self.busy = False
 
     async def _server_key(self, key: str) -> None:
         raise NotImplementedError
