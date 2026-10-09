@@ -23,8 +23,9 @@ _Avoid_: setup, config
 ### Targets
 
 **Copy**:
-A new Discord server created by Mando for one ticked source server, named by the
-owner, with the readable categories and channels of the source.
+A Discord server the owner creates and names in Discord and picks for one ticked
+source server; Mando adds the readable categories and channels of the source to it
+and never deletes anything in it.
 _Avoid_: mirror server, destination server, dest
 
 **Own webhook**:
@@ -52,7 +53,7 @@ _Avoid_: history, catch-up
 ### Interface
 
 **Token**:
-The owner's Discord account token, used to read sources and to create copies.
+The owner's Discord account token, used to read sources and to fill copies.
 _Avoid_: key, login
 
 **Feed**:
