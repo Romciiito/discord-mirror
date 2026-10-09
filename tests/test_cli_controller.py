@@ -833,6 +833,59 @@ class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.calls[-1], ("start",))
         self.assertEqual(ui.flow["screen"], "running")
 
+    def stale(self, ui: Controller, engine: FakeEngine, rows: list[dict]) -> None:
+        engine.user = {"id": "1", "username": "sosa", "global_name": "Sosa"}
+        engine.http = object()
+        engine.guild_list = [{"id": "g1", "name": "Qwen", "icon": ""}]
+        engine.channel_lists["g1"] = [{"id": "c2", "name": "dev", "parent": "", "topic": ""}]
+        engine.selection = [dict(row, enabled=True) for row in rows]
+        ui.refresh()
+
+    async def test_start_unticks_a_ticked_channel_that_is_no_longer_listed(self) -> None:
+        # a kept selection (story 26) can hold a channel deleted or hidden since: the channel list has no
+        # row to jump to, so Start unticks it and says so instead of refusing every later Start
+        ui, engine = make()
+        self.stale(ui, engine, [
+            {"channel_id": "c9", "guild_id": "g1", "guild_name": "Qwen", "channel_name": "gone", "webhook_url": ""},
+            {"channel_id": "c2", "guild_id": "g1", "guild_name": "Qwen", "channel_name": "dev", "webhook_url": HOOK},
+        ])
+        await keys(ui, "Enter", "1")
+        self.assertEqual([call[0] for call in engine.calls], ["guilds", "channels", "save_setup"])
+        self.assertEqual([row["channel_id"] for row in engine.selection], ["c2"])
+        self.assertEqual(set(ui.picked), {"c2"})
+        self.assertEqual(ui.error, "#gone is no longer readable, unticked")
+        self.assertEqual(ui.flow["screen"], "menu")
+        self.assertFalse(ui.busy)
+        await keys(ui, "1")
+        self.assertEqual(engine.calls[-1], ("start",))
+        self.assertEqual(ui.flow["screen"], "running")
+
+    async def test_start_unticks_a_ticked_channel_of_a_server_the_account_left(self) -> None:
+        ui, engine = make()
+        self.stale(ui, engine, [
+            {"channel_id": "c7", "guild_id": "g7", "guild_name": "Old", "channel_name": "news", "webhook_url": ""},
+        ])
+        await keys(ui, "Enter", "1")
+        # the server is not in the account's server list, so its channels are not asked for
+        self.assertEqual([call[0] for call in engine.calls], ["guilds", "save_setup"])
+        self.assertEqual(engine.selection, [])
+        self.assertEqual(ui.picked, {})
+        self.assertEqual(ui.error, "#news is no longer readable, unticked")
+        self.assertEqual(ui.flow["screen"], "menu")
+        self.assertFalse(ui.busy)
+
+    async def test_a_failed_save_of_the_unticked_row_shows_the_save_error(self) -> None:
+        ui, engine = make()
+        self.stale(ui, engine, [
+            {"channel_id": "c9", "guild_id": "g1", "guild_name": "Qwen", "channel_name": "gone", "webhook_url": ""},
+        ])
+        engine.fail["save_setup"] = RuntimeError("database is locked")
+        await keys(ui, "Enter", "1")
+        self.assertNotIn(("start",), engine.calls)
+        self.assertEqual(ui.error, "database is locked")
+        self.assertEqual(ui.flow["screen"], "menu")
+        self.assertFalse(ui.busy)
+
 
 if __name__ == "__main__":
     unittest.main()

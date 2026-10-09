@@ -208,25 +208,43 @@ class Controller:
         return None
 
     async def _jump_to(self, row: dict[str, Any]) -> None:
-        self.error = f"#{row.get('channel_name') or row.get('channel_id')} has no webhook"
+        name = f"#{row.get('channel_name') or row.get('channel_id')}"
+        self.error = f"{name} has no webhook"
         self.busy = True
         try:
             self.guilds = list(await self.engine.guilds())
-            guild = next((g for g in self.guilds if g["id"] == row.get("guild_id")), None) or {"id": row.get("guild_id"), "name": row.get("guild_name") or "server"}
-            self.channel_rows = list(await self.engine.channels(guild["id"]))
-            self.active_guild = guild
-            self.depth = "channels"
-            self.local_index = max(0, next((at for at, c in enumerate(self.channel_rows) if c["id"] == row.get("channel_id")), 0))
-            self.flow = _menu_state("servers")
+            guild = next((g for g in self.guilds if g["id"] == row.get("guild_id")), None)
+            listed = list(await self.engine.channels(guild["id"])) if guild else []
         except (ApiError, RuntimeError) as exc:
+            # a list that failed proves nothing about the row: it stays ticked and Start stays refused
             self.error = f"{self.error} ({exc})"
             self.flow = _menu_state()
+            return
         except Exception:
             log.exception("jump to the channel without a webhook failed")
             self.error = f"{self.error} ({UNEXPECTED})"
             self.flow = _menu_state()
+            return
         finally:
             self.busy = False
+        at = next((at for at, channel in enumerate(listed) if channel["id"] == row.get("channel_id")), None)
+        if at is None:
+            # the server is gone from the account's list or the channel from the server's readable
+            # channels: there is no row to jump to and Select servers cannot untick it, so Start does
+            await self._drop_unreadable(row, name)
+            return
+        self.channel_rows = listed
+        self.active_guild = guild
+        self.depth = "channels"
+        self.local_index = at
+        self.flow = _menu_state("servers")
+
+    async def _drop_unreadable(self, row: dict[str, Any], name: str) -> None:
+        self.picked.pop(row.get("channel_id"), None)
+        self.flow = _menu_state()
+        await self._save_options()
+        if not self.error:  # a failed save keeps its own error
+            self.error = f"{name} is no longer readable, unticked"
 
     async def _halt(self) -> None:
         self.busy = True

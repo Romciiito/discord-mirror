@@ -111,6 +111,13 @@ Decisions (owner):
 - **9h.** Upgrade keeps the selection. The old `dest_name` and `dest_guild_id`
   columns are ignored, channels without a webhook follow 9f, and the old shared
   server on Discord is left alone (as in 9e).
+- **Gap in 9f, found in the Task 6b review (2026-10-09; plan A's rule, not an owner
+  decision yet).** A ticked channel without a webhook that the account can no longer
+  list (channel deleted or hidden, or the server left; a selection kept by 9h can hold
+  one) has no row to jump to, and Select servers only unticks listed channels, so 9f as
+  written refuses every Start. Plan A's Task 6b unticks such a row at Start, saves, and
+  says "#x is no longer readable, unticked"; a list call that fails keeps the row and
+  the refusal. Plan B, which moves the Start rule into the engine, inherits the case.
 
 **Measured 2026-10-09: Mando cannot create servers.** The Discord changelog of
 2025-04-15, "Deprecating Guild Creation by Apps", retired `POST /guilds` for
