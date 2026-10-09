@@ -119,14 +119,25 @@ def _body(ui: Any, height: int) -> Body:
                 elif row:
                     label += "  no webhook"
                 rows.append(_row(label, at == ui.local_index))
+        elif ui.depth == "targets" and ui.target_source:
+            title = f"Copy of {ui.target_source.get('name') or 'server'} into"
+            link = (ui.snap.get("targets") or {}).get(ui.target_source.get("id")) or {}
+            for at, target in enumerate(ui.targets):
+                mark = "[x] " if target.get("id") == link.get("target_id") else "[ ] "
+                rows.append(_row(f"{mark}{target.get('name')}", at == ui.local_index))
         else:
             title = "Select servers"
             if not ui.guilds:
                 rows.append("no servers")
             selected = {row.get("guild_id") for row in ui.picked.values()}
+            links = ui.snap.get("targets") or {}
             for at, guild in enumerate(ui.guilds):
                 mark = "[x] " if guild.get("id") in selected else "[ ] "
-                rows.append(_row(f"{mark}{guild.get('name')}", at == ui.local_index))
+                label = f"{mark}{guild.get('name')}"
+                link = links.get(guild.get("id"))
+                if link:
+                    label += f"  copy: {link.get('target_name') or link.get('target_id')}"
+                rows.append(_row(label, at == ui.local_index))
         return [title], rows, focus, _notes(ui)
     return ["Press any key to continue"], [], 0, []
 

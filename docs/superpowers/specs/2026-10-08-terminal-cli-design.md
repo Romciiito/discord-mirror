@@ -151,6 +151,74 @@ Decisions (owner):
 - **9l.** (owner, 2026-10-09) The gap in 9g stays open for plan B: the store keeps the
   `hooks` memory unchanged in plan A, and plan B, which reshapes the store for targets
   per source, decides whether unticking forgets a kept webhook URL.
+- **9m.** (owner, 2026-10-09, plan B) The target picker opens with the letter `c` on a
+  server row of Select servers; Enter keeps its plan A meaning (tick all listed channels,
+  or untick every channel of the server). 9b' said Enter; the two could not both hold.
+- **9n.** (owner, 2026-10-09, plan B) A fill covers the ticked channels of the source,
+  whether the whole server or a few channels are ticked; 9f's "no copy for a partly
+  ticked server" was written for the server Mando created and is dropped. 9f's rule
+  that every ticked channel needs a webhook stays as the Start rule (9k).
+- **9o.** (owner, 2026-10-09, plan B) 9j in practice: the first source filled into a
+  target keeps the source's own category names. A source filled into a target that
+  already holds another source gets its categories as "<source> / <category>" and its
+  loose channels under a category "<source>". A fill reuses a channel of the same name
+  (9i) and a webhook it already created on it, instead of adding a second webhook.
+- **Gap in 9g and 9n, found in the Task 4 review of plan B (2026-10-09; plan B's rule,
+  not an owner decision yet).** A fill covers every ticked channel of the source (9n),
+  so a ticked channel with an own webhook (9g) gets the copy's webhook instead, and the
+  `hooks` memory (9l) follows the row; the engine notes "<n> earlier webhook url(s)
+  replaced" in its log, and the CLI's line after the fill starts with the same words,
+  because the CLI never shows the engine's log (the Task 6 review of plan B measured
+  the note invisible after `c` and Enter). The same holds when a source is filled into
+  another target: every URL of the earlier copy is replaced and counted. The store
+  keeps no mark of who made a URL, so a fill cannot tell an own
+  webhook from a URL an earlier fill made in another target. Two other rules were
+  measured with the engine's fakes and dropped: leaving alone every row with a URL the
+  fill does not find again in the target makes a fill into a second target create
+  channels and webhooks there while every row keeps the first target's URL
+  (`filled: 0`); keeping the old URL in `hooks` makes an untick and a retick send the
+  channel back to it. Keeping an own webhook through a fill needs a mark on each URL a
+  fill made; the owner decides whether it is wanted.
+- **9i and 9o together, found in the Task 4 review of plan B, round 2 (2026-10-09; plan
+  B's rule, not an owner decision yet).** A fill first looks for a channel of the same
+  name under the source channel's own category (loose for a loose one). A channel of the
+  same name elsewhere, such as a fresh server's own `general` under "Text Channels", is
+  reused (9i) when it carries the row's webhook, or, when none does, only while the
+  target holds no other source, because with a second source there it may be that
+  source's channel and the two would mix (9o). Each existing channel serves one source
+  channel only, so two source channels of the same name in one category get two
+  channels. A channel whose category Discord refuses is skipped, never created loose.
+  Measured with the engine's fakes: the same-category rule alone made a second
+  `general` beside the server's own; "the first of them for the first source" gave the
+  first source, refilled after a second source arrived, the second source's webhook.
+- **9o and names, found in the Task 4 review of plan B, round 3 (2026-10-09; plan B's
+  rule, not an owner decision yet).** Names do not tell sources apart: Discord server
+  names are not unique, and a later source's "<source>" or "<source> / <category>" can
+  be a category of the first source or of the server itself. A category therefore
+  belongs to the source a fill made it for: each category a fill creates is recorded for
+  its source as soon as Discord made it, a later source uses only the categories
+  recorded for it, the first source also those no fill made (the server's own, 9i), and
+  no fill uses a category recorded for another source. Two categories of one name can
+  then stand in the target; whether a later source's category should carry a mark that
+  tells the two apart is the owner's open point. Measured with the engine's fakes
+  before the rule: a source named "Trading" with a loose `general`, filled after a source
+  with `general` under "Trading", got the first source's channel and webhook, reported as
+  reused; three sources named "Gaming" gave the third the second's "Gaming / Talk" and
+  webhook; the first source, refilled with a newly ticked category named like a later
+  source's, took that source's channel; a source named "Text Channels" took the server's
+  own `general` that the first source had reused, with its webhook.
+- **The facts a fill copies, found in the Task 4 review of plan B, round 4 (2026-10-09;
+  plan B's rule, not an owner decision yet).** The facts a fill copies for a channel
+  (name, category, topic, age restriction) are those stored when the owner ticked it;
+  re-ticking refreshes them; the owner decides whether a fill should read them live
+  instead. Each selection row takes them from the channel list at the tick, and only the
+  tick writes them: Start and the refresh rewrite no row, and a fill writes only the
+  webhook URL. So a source channel renamed, moved, given another topic or made
+  age-restricted after the tick gets its copy created with the stored values, in the
+  last case without the age gate. A channel the fill finds is never altered.
+- **10e.** (owner, 2026-10-09, plan C) Issue #6 (an edit that removes every embed sends
+  `embeds: []`) and the 6000-character embed total from #8 ship in plan C. The rest of
+  #8 and #4, #5, #7 stay separate.
 
 **Measured 2026-10-09: Mando cannot create servers.** The Discord changelog of
 2025-04-15, "Deprecating Guild Creation by Apps", retired `POST /guilds` for
@@ -169,6 +237,8 @@ therefore reopened and replaced (owner, 2026-10-09):
   `/users/@me/guilds`); the owner picks the target and Mando creates the readable
   categories, channels and webhooks of the source inside it (Create Guild Channel,
   Create Webhook). 9c (name prompt in the CLI) is dropped.
+  Implemented in plan B (`docs/superpowers/plans/2026-10-09-own-copies.md`):
+  `Engine.fill_copy`, the `c` key (9m).
 - **9i.** In the owner's server Mando only adds, never deletes: the leftover
   cleanup in `_wire_copy` (`mirror/engine.py:418-426`) goes. A channel with the
   same name as the source channel is reused and only gets a webhook.
@@ -221,6 +291,9 @@ Decisions (owner):
 
 - **10a.** Stickers: PNG, APNG and GIF are sent as images from the CDN, Lottie
   keeps the name. This is tested on a real webhook before anyone else uses it.
+  Implemented in Task 8 of `docs/superpowers/plans/2026-10-09-own-copies.md`
+  (plans B and C); the real-webhook check is the owner's manual step at the end of
+  that plan.
 - **10b.** Files are re-uploaded 1:1 up to the documented 20 MiB per file (the
   10 MB threshold goes up). A file over the limit is replaced by one line:
   "This message has a file over the upload limit: <name> (<size>)", followed by a

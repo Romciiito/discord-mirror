@@ -16,6 +16,7 @@ from mirror.relay import (
     payload_for,
     plan_uploads,
     safe_name,
+    view_from_message,
 )
 
 HOOK = "https://discord.com/api/webhooks/1/abc"
@@ -113,6 +114,7 @@ def make_view(attachments: list[dict[str, Any]], content: str = "hello") -> dict
         "deleted": False,
         "reactions": {},
         "reply": "",
+        "guild_id": "9",
     }
 
 
@@ -186,6 +188,15 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([name for name, _, _ in files], ["a.png"])
         self.assertEqual(failed, [empty, missing, huge])
 
+    async def test_files_have_no_total_cap(self) -> None:
+        half = UPLOAD_LIMIT // 2 + 1
+        items = [attachment("a.bin", half), attachment("b.bin", half)]
+        for item in items:
+            self.session.downloads[item["url"]] = FakeResp(200, body=b"1" * half)
+        files, failed = await self.relay._files(items)
+        self.assertEqual(failed, [])
+        self.assertEqual([name for name, _, _ in files], ["a.bin", "b.bin"])
+
     def test_plan_uploads_limits(self) -> None:
         many = [attachment(f"f{i}.png", 1_000) for i in range(12)]
         upload, linked = plan_uploads(many)
@@ -197,11 +208,51 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         upload, linked = plan_uploads([big, off, zero])
         self.assertEqual(upload, [])
         self.assertEqual(linked, [big, off, zero])
-        six = [attachment(f"s{i}.bin", 2_000_000) for i in range(6)]
+        six = [attachment(f"s{i}.bin", UPLOAD_LIMIT) for i in range(6)]
         upload, linked = plan_uploads(six)
-        self.assertEqual(upload, six[:5])
-        self.assertLessEqual(sum(item["size"] for item in upload), UPLOAD_LIMIT)
-        self.assertEqual(linked, six[5:])
+        self.assertEqual(upload, six)
+        self.assertEqual(linked, [])
+        self.assertEqual(UPLOAD_LIMIT, 20 * 1024 * 1024)
+
+    def test_oversize_file_becomes_a_line_with_two_links(self) -> None:
+        big = attachment("movie.mp4", 25 * 1024 * 1024 + 1)
+        off = attachment("x.png", 10, "https://example.com/x.png")
+        view = make_view([big, off])
+        body = payload_for(view, False)
+        lines = body["content"].split("\n")
+        self.assertEqual(lines[0], "hello")
+        self.assertEqual(lines[1], "This message has a file over the upload limit: movie.mp4 (25.0 MiB)")
+        self.assertEqual(lines[2], "https://discord.com/channels/9/2/1")
+        self.assertEqual(lines[3], big["url"])
+        self.assertEqual(lines[4], off["url"])
+        self.assertEqual(len(lines), 5)
+        view["guild_id"] = ""
+        self.assertIn("https://discord.com/channels/@me/2/1", payload_for(view, False)["content"])
+
+    def test_oversize_line_survives_a_long_message(self) -> None:
+        big = attachment("movie.mp4", UPLOAD_LIMIT + 1)
+        view = make_view([big], content="x" * 3000)
+        content = payload_for(view, True)["content"]
+        self.assertLessEqual(len(content), 2000)
+        self.assertTrue(content.startswith("Desk / #general\nxxx"))
+        self.assertEqual(
+            content.splitlines()[-3:],
+            [
+                "This message has a file over the upload limit: movie.mp4 (20.0 MiB)",
+                "https://discord.com/channels/9/2/1",
+                big["url"],
+            ],
+        )
+
+    async def test_oversize_file_is_never_downloaded(self) -> None:
+        big = attachment("movie.mp4", UPLOAD_LIMIT + 1)
+        self.session.queue.append(FakeResp(200, {"id": "5"}))
+        sent = await self.relay.create(HOOK, make_view([big]), False)
+        self.assertEqual(sent, "5")
+        self.assertEqual([c for c in self.session.calls if c[0] == "get"], [])
+        method, url, kwargs = self.sends()[0]
+        self.assertIn("json", kwargs)
+        self.assertIn("over the upload limit: movie.mp4", kwargs["json"]["content"])
 
     async def create_with_link(self) -> tuple[dict[str, Any], str, str | None]:
         small = attachment("a.png", 10)
@@ -264,6 +315,28 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(item["url"], content)
             self.assertTrue(content.startswith("Desk / #general"))
             self.assertEqual(view["links"], [item["url"] for item in items])
+
+    async def test_too_large_fallback_keeps_the_oversize_file_out_of_the_links(self) -> None:
+        small = attachment("a.png", 10)
+        big = attachment("movie.mp4", UPLOAD_LIMIT + 1)
+        self.session.downloads[small["url"]] = FakeResp(200, body=b"1" * 10)
+        view = make_view([small, big])
+        self.session.queue.extend([FakeResp(413), FakeResp(200, {"id": "7"})])
+        self.assertEqual(await self.relay.create(HOOK, view, False), "7")
+        sends = self.sends()
+        self.assertEqual(len(sends), 2)
+        lines = sends[1][2]["json"]["content"].split("\n")
+        self.assertEqual(
+            lines,
+            [
+                "hello",
+                "This message has a file over the upload limit: movie.mp4 (20.0 MiB)",
+                "https://discord.com/channels/9/2/1",
+                big["url"],
+                small["url"],
+            ],
+        )
+        self.assertEqual(view["links"], [small["url"]])
 
     async def test_429_retries_with_fresh_formdata(self) -> None:
         item = attachment("a.png", 10)
@@ -380,6 +453,83 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload_for(view, False)["content"], "(attachment)")
         view["links"] = []
         self.assertEqual(payload_for(view, False)["content"], "(attachment)")
+
+    def test_stickers_become_image_uploads_and_lottie_stays_a_name(self) -> None:
+        message = {
+            "id": "1", "channel_id": "2", "author": {"username": "a"},
+            "sticker_items": [
+                {"id": "100", "name": "wave", "format_type": 1},
+                {"id": "101", "name": "spin", "format_type": 2},
+                {"id": "102", "name": "dance", "format_type": 4},
+                {"id": "103", "name": "vector", "format_type": 3},
+            ],
+        }
+        view = view_from_message(message, "general", "Desk")
+        self.assertEqual(view["stickers"], ["vector"])
+        self.assertEqual(
+            [(a["name"], a["url"], a["content_type"]) for a in view["attachments"]],
+            [
+                ("wave.png", "https://cdn.discordapp.com/stickers/100.png", "image/png"),
+                ("spin.png", "https://cdn.discordapp.com/stickers/101.png", "image/png"),
+                ("dance.gif", "https://media.discordapp.net/stickers/102.gif", "image/gif"),
+            ],
+        )
+        upload, linked = plan_uploads(view["attachments"])
+        self.assertEqual(len(upload), 3)
+        self.assertEqual(linked, [])
+        self.assertEqual(payload_for(view, False)["content"], "stickers: vector")
+
+    async def test_sticker_and_oversize_file_in_one_post(self) -> None:
+        big = attachment("movie.mp4", UPLOAD_LIMIT + 1)
+        sticker = {"name": "wave.png", "url": "https://cdn.discordapp.com/stickers/100.png", "content_type": "image/png", "size": 0, "sticker": True}
+        self.session.downloads[sticker["url"]] = FakeResp(200, body=b"\x89PNG")
+        view = make_view([big, sticker])
+        self.session.queue.append(FakeResp(200, {"id": "5"}))
+        sent = await self.relay.create(HOOK, view, False)
+        self.assertEqual(sent, "5")
+        self.assertEqual(len(self.sends()), 1)
+        method, url, kwargs = self.sends()[0]
+        self.assertEqual(form_files(kwargs["data"]), [b"\x89PNG"])
+        content = form_payload(kwargs["data"])["content"]
+        self.assertIn("over the upload limit: movie.mp4", content)
+        self.assertNotIn("wave.png", content)
+        self.assertEqual(view["links"], [])
+
+    async def test_edit_always_sends_the_embeds_key(self) -> None:
+        self.session.queue.append(FakeResp(200, {"id": "5"}))
+        await self.relay.edit(HOOK, "5", make_view([]), False)
+        method, url, kwargs = self.sends()[0]
+        self.assertEqual(method, "patch")
+        self.assertEqual(kwargs["json"]["embeds"], [])
+        self.assertNotIn("username", kwargs["json"])
+
+    async def test_edit_that_removes_every_embed_keeps_the_content_fallback(self) -> None:
+        # the body an edit sent before payload_for kept the embeds key itself (issue #6, decision 10e)
+        for files, fallback in (([], "(empty)"), ([attachment("a.png", 10)], "(attachment)")):
+            self.session.queue.append(FakeResp(200, {"id": "5"}))
+            await self.relay.edit(HOOK, "5", make_view(files, content=""), False)
+            self.assertEqual(
+                self.sends()[-1][2]["json"],
+                {"content": fallback, "allowed_mentions": {"parse": []}, "embeds": []},
+            )
+
+    def test_payload_keeps_an_empty_embeds_key_only_when_asked(self) -> None:
+        view = make_view([], content="")
+        self.assertEqual(payload_for(view, False, keep_embeds=True)["embeds"], [])
+        self.assertEqual(payload_for(view, False, keep_embeds=True)["content"], "(empty)")
+        self.assertNotIn("embeds", payload_for(view, False))
+        self.assertIsNone(payload_for(view | {"embeds": [{"title": "t"}]}, False, keep_embeds=True)["content"])
+
+    def test_embeds_stay_under_the_total(self) -> None:
+        from mirror.relay import safe_embeds
+        embeds = [{"title": "t", "description": "d" * 4000}, {"description": "e" * 1990}, {"description": "f" * 20}, {"title": "g"}]
+        kept = safe_embeds({"embeds": embeds})
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(kept[1]["description"], "e" * 1990)
+        many = [{"title": f"t{i}", "fields": [{"name": "n" * 256, "value": "v" * 1024}]} for i in range(10)]
+        kept = safe_embeds({"embeds": many})
+        self.assertLessEqual(sum(len(e["title"]) + 256 + 1024 for e in kept), 6000)
+        self.assertEqual(len(kept), 4)
 
 
 if __name__ == "__main__":

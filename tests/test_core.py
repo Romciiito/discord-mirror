@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -99,9 +100,8 @@ class CoreTests(unittest.TestCase):
             store = Store(tmp)
             store.set_token("x" * 50, True)
             self.assertEqual(store.token(), "x" * 50)
-            store.set_options(25, True, "https://discord.com/api/webhooks/1/abc", True, "Desk copy")
-            self.assertEqual(store.options()["backfill"], 25)
-            self.assertEqual(store.options()["dest_name"], "Desk copy")
+            store.set_options(25, True, True)
+            self.assertEqual(store.options(), {"backfill": 25, "include_threads": True, "mirror": True})
             store.replace_selection(
                 [
                     {
@@ -119,15 +119,229 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(store.selection()[0]["parent"], "talk")
             store.fill_webhooks([("10", "https://discord.com/api/webhooks/1/abc")])
             self.assertEqual(store.selection()[0]["webhook_url"], "https://discord.com/api/webhooks/1/abc")
-            store.clear_destination()
-            self.assertEqual(store.selection()[0]["webhook_url"], "")
-            self.assertEqual(store.options()["dest_guild_id"], "")
+            self.assertEqual(store.hooks(), {"10": "https://discord.com/api/webhooks/1/abc"})
             store.remember_relay("1", "10", "https://discord.com/api/webhooks/1/abc", "99")
             self.assertEqual(store.relay_row("1")["webhook_message_id"], "99")
             store.forget_token()
             self.assertEqual(store.token(), "")
             if sys.platform != "win32":
                 self.assertEqual((Path(tmp) / "state.db").stat().st_mode & 0o777, 0o600)
+            store.close()
+
+    def test_store_targets_per_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            self.assertEqual(store.targets(), {})
+            store.set_target("5", "900", "Desk copy")
+            store.set_target("6", "900", "Desk copy")
+            store.set_target("7", "900", "Desk copy")
+            store.set_target("5", "901", "Other")
+            store.set_target("7", "902", "Third")
+            # the flag is the fills record's (decision 9o): 900 held 5 first, so 6 came second there
+            self.assertEqual(
+                store.targets(),
+                {
+                    "5": {"target_id": "901", "target_name": "Other", "shared": False},
+                    "6": {"target_id": "900", "target_name": "Desk copy", "shared": True},
+                    "7": {"target_id": "902", "target_name": "Third", "shared": False},
+                },
+            )
+            self.assertFalse(hasattr(store, "set_dest_guild"))
+            self.assertFalse(hasattr(store, "clear_destination"))
+            store.close()
+
+    def test_targets_table_without_shared_column_opens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = sqlite3.connect(Path(tmp) / "state.db")
+            conn.executescript(
+                """
+                CREATE TABLE targets (
+                    source_guild_id TEXT PRIMARY KEY,
+                    target_guild_id TEXT NOT NULL,
+                    target_name TEXT NOT NULL DEFAULT ''
+                );
+                INSERT INTO targets (source_guild_id, target_guild_id, target_name) VALUES ('5', '900', 'Desk copy');
+                """
+            )
+            conn.commit()
+            conn.close()
+            store = Store(tmp)
+            self.assertEqual(store.targets(), {"5": {"target_id": "900", "target_name": "Desk copy", "shared": False}})
+            store.set_target("6", "900", "Desk copy")
+            self.assertTrue(store.targets()["6"]["shared"])
+            # the link stored before the record of fills existed still says that 900 holds 5
+            self.assertFalse(store.record_fill("5", "900"))
+            self.assertTrue(store.record_fill("8", "900"))
+            self.assertEqual(store.category_sources("900"), {})
+            store.close()
+
+    def test_a_new_targets_table_has_no_shared_column(self) -> None:
+        # the fills record alone holds the flag, so a snapshot and a fill never read two answers
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            columns = [row[1] for row in store.conn.execute("PRAGMA table_info(targets)")]
+            self.assertEqual(columns, ["source_guild_id", "target_guild_id", "target_name"])
+            store.close()
+
+    def test_targets_table_with_shared_column_and_no_fills_opens(self) -> None:
+        # a file from before the fills record: the flag sat in the targets column only
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = sqlite3.connect(Path(tmp) / "state.db")
+            conn.executescript(
+                """
+                CREATE TABLE targets (
+                    source_guild_id TEXT PRIMARY KEY,
+                    target_guild_id TEXT NOT NULL,
+                    target_name TEXT NOT NULL DEFAULT '',
+                    shared INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO targets VALUES ('5', '900', 'Desk copy', 0), ('6', '900', 'Desk copy', 1);
+                """
+            )
+            conn.commit()
+            conn.close()
+            store = Store(tmp)
+            self.assertEqual(
+                store.targets(),
+                {
+                    "5": {"target_id": "900", "target_name": "Desk copy", "shared": False},
+                    "6": {"target_id": "900", "target_name": "Desk copy", "shared": True},
+                },
+            )
+            self.assertFalse(store.record_fill("5", "900"))
+            self.assertTrue(store.record_fill("6", "900"))
+            store.close()
+
+    def test_targets_table_with_shared_column_reads_the_fills_record(self) -> None:
+        # a file whose targets column and fills record both hold the flag: the column stays in place unread, as the
+        # old option columns do (9h), so a column that says another answer than the record changes nothing
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = sqlite3.connect(Path(tmp) / "state.db")
+            conn.executescript(
+                """
+                CREATE TABLE targets (
+                    source_guild_id TEXT PRIMARY KEY,
+                    target_guild_id TEXT NOT NULL,
+                    target_name TEXT NOT NULL DEFAULT '',
+                    shared INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE fills (
+                    target_guild_id TEXT NOT NULL,
+                    source_guild_id TEXT NOT NULL,
+                    shared INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (target_guild_id, source_guild_id)
+                );
+                INSERT INTO targets VALUES ('5', '900', 'Desk copy', 0), ('6', '900', 'Desk copy', 0);
+                INSERT INTO fills VALUES ('900', '5', 0), ('900', '6', 1);
+                """
+            )
+            conn.commit()
+            conn.close()
+            store = Store(tmp)
+            self.assertEqual(
+                store.targets(),
+                {
+                    "5": {"target_id": "900", "target_name": "Desk copy", "shared": False},
+                    "6": {"target_id": "900", "target_name": "Desk copy", "shared": True},
+                },
+            )
+            store.set_target("6", "900", "Desk copy")
+            self.assertTrue(store.targets()["6"]["shared"])
+            columns = [row[1] for row in store.conn.execute("PRAGMA table_info(targets)")]
+            self.assertIn("shared", columns)
+            store.close()
+
+    def test_a_target_remembers_every_source_filled_into_it(self) -> None:
+        # decision 9o: the first source in a target keeps its names; nothing is deleted there (9i), so a source moved
+        # to another target is still held by the first one, and a later source there is not the first
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            self.assertFalse(store.record_fill("5", "900"))
+            self.assertTrue(store.record_fill("6", "900"))
+            self.assertFalse(store.record_fill("5", "900"))
+            self.assertFalse(store.record_fill("5", "901"))
+            store.set_target("5", "901", "Spare")
+            self.assertEqual(store.targets()["5"], {"target_id": "901", "target_name": "Spare", "shared": False})
+            self.assertTrue(store.record_fill("7", "900"))
+            self.assertTrue(store.record_fill("6", "900"))
+            self.assertFalse(store.record_fill("5", "900"))
+            self.assertTrue(store.record_fill("7", "901"))
+            store.set_target("8", "902", "Third")
+            self.assertTrue(store.record_fill("9", "902"))
+            store.close()
+            again = Store(tmp)
+            self.assertFalse(again.record_fill("5", "900"))
+            self.assertTrue(again.record_fill("7", "900"))
+            again.close()
+
+    def test_a_target_tells_whether_it_holds_another_source(self) -> None:
+        # the first source keeps shared False after a second one arrived; a fill of it must still know that the
+        # target holds another source, whose channels may carry the same names (decision 9o)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            self.assertFalse(store.holds_another("900", "5"))
+            self.assertFalse(store.record_fill("5", "900"))
+            self.assertFalse(store.holds_another("900", "5"))
+            self.assertTrue(store.holds_another("900", "6"))
+            self.assertTrue(store.record_fill("6", "900"))
+            self.assertTrue(store.holds_another("900", "5"))
+            self.assertFalse(store.holds_another("901", "5"))
+            store.close()
+
+    def test_a_target_remembers_the_categories_made_for_each_source(self) -> None:
+        # names do not tell two sources apart (decision 9o), so each category a fill makes is recorded for its source;
+        # the first record of a category stays
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            self.assertEqual(store.category_sources("900"), {})
+            store.record_category("900", "5", "c1")
+            store.record_category("900", "6", "c2")
+            store.record_category("900", "6", "c1")
+            store.record_category("901", "5", "c3")
+            self.assertEqual(store.category_sources("900"), {"c1": "5", "c2": "6"})
+            store.close()
+            again = Store(tmp)
+            self.assertEqual(again.category_sources("900"), {"c1": "5", "c2": "6"})
+            self.assertEqual(again.category_sources("901"), {"c3": "5"})
+            again.close()
+
+    def test_old_database_opens_and_ignores_the_shared_server_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = sqlite3.connect(Path(tmp) / "state.db")
+            conn.executescript(
+                """
+                CREATE TABLE account (id INTEGER PRIMARY KEY CHECK (id = 1), token TEXT, keep INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE options (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    backfill INTEGER NOT NULL DEFAULT 0,
+                    include_threads INTEGER NOT NULL DEFAULT 0,
+                    global_webhook TEXT NOT NULL DEFAULT '',
+                    mirror INTEGER NOT NULL DEFAULT 0,
+                    dest_name TEXT NOT NULL DEFAULT 'mirror',
+                    dest_guild_id TEXT NOT NULL DEFAULT ''
+                );
+                INSERT INTO options (id, backfill, global_webhook, dest_name, dest_guild_id) VALUES (1, 50, 'https://x', 'Old', '7');
+                CREATE TABLE selection (
+                    channel_id TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    guild_name TEXT NOT NULL DEFAULT '',
+                    channel_name TEXT NOT NULL DEFAULT '',
+                    webhook_url TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1
+                );
+                INSERT INTO selection (channel_id, guild_id, guild_name, channel_name, webhook_url) VALUES ('10', '5', 'Desk', 'general', 'https://discord.com/api/webhooks/1/abc');
+                """
+            )
+            conn.commit()
+            conn.close()
+            store = Store(tmp)
+            self.assertEqual(store.options(), {"backfill": 50, "include_threads": False, "mirror": False})
+            self.assertEqual(store.selection()[0]["webhook_url"], "https://discord.com/api/webhooks/1/abc")
+            self.assertEqual(store.selection()[0]["parent"], "")
+            self.assertEqual(store.hooks(), {"10": "https://discord.com/api/webhooks/1/abc"})
+            self.assertEqual(store.targets(), {})
+            store.set_options(0, True, True)
+            self.assertEqual(store.options(), {"backfill": 0, "include_threads": True, "mirror": True})
             store.close()
 
     def test_only_readable_text_channels_are_copied(self) -> None:

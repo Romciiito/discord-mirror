@@ -26,7 +26,6 @@ CREATE TABLE IF NOT EXISTS options (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     backfill INTEGER NOT NULL DEFAULT 0,
     include_threads INTEGER NOT NULL DEFAULT 0,
-    global_webhook TEXT NOT NULL DEFAULT '',
     mirror INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS selection (
@@ -46,6 +45,23 @@ CREATE TABLE IF NOT EXISTS relayed (
 CREATE TABLE IF NOT EXISTS hooks (
     channel_id TEXT PRIMARY KEY,
     webhook_url TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS targets (
+    source_guild_id TEXT PRIMARY KEY,
+    target_guild_id TEXT NOT NULL,
+    target_name TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS fills (
+    target_guild_id TEXT NOT NULL,
+    source_guild_id TEXT NOT NULL,
+    shared INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (target_guild_id, source_guild_id)
+);
+CREATE TABLE IF NOT EXISTS fill_categories (
+    target_guild_id TEXT NOT NULL,
+    category_id TEXT NOT NULL,
+    source_guild_id TEXT NOT NULL,
+    PRIMARY KEY (target_guild_id, category_id)
 );
 """
 
@@ -134,16 +150,23 @@ class Store:
             os.chmod(self.path, 0o600)
 
     def _migrate(self) -> None:
-        option_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(options)")}
-        if "dest_name" not in option_cols:
-            self.conn.execute("ALTER TABLE options ADD COLUMN dest_name TEXT NOT NULL DEFAULT 'mirror'")
-        if "dest_guild_id" not in option_cols:
-            self.conn.execute("ALTER TABLE options ADD COLUMN dest_guild_id TEXT NOT NULL DEFAULT ''")
+        # old files keep the options columns global_webhook, dest_name and dest_guild_id; nothing reads them (9h)
         picked_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(selection)")}
         if "parent" not in picked_cols:
             self.conn.execute("ALTER TABLE selection ADD COLUMN parent TEXT NOT NULL DEFAULT ''")
         if "topic" not in picked_cols:
             self.conn.execute("ALTER TABLE selection ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
+        if "nsfw" not in picked_cols:
+            # a row stored before this column has no age gate until the owner ticks its channel again
+            self.conn.execute("ALTER TABLE selection ADD COLUMN nsfw INTEGER NOT NULL DEFAULT 0")
+        # a link stored before the fills record existed: its target holds that source. A file whose targets table
+        # has the shared column gives the flag from it here; nothing else reads that column, as with the options above
+        target_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(targets)")}
+        flag = "shared" if "shared" in target_cols else "0"
+        self.conn.execute(
+            "INSERT OR IGNORE INTO fills (target_guild_id, source_guild_id, shared) "
+            f"SELECT target_guild_id, source_guild_id, {flag} FROM targets"
+        )
         self.conn.execute(
             "INSERT OR IGNORE INTO hooks (channel_id, webhook_url) "
             "SELECT channel_id, webhook_url FROM selection WHERE webhook_url != ''"
@@ -174,42 +197,93 @@ class Store:
         self.conn.commit()
 
     def options(self) -> dict:
-        row = self.conn.execute("SELECT * FROM options WHERE id = 1").fetchone()
+        row = self.conn.execute("SELECT backfill, include_threads, mirror FROM options WHERE id = 1").fetchone()
         return {
             "backfill": int(row["backfill"]),
             "include_threads": bool(row["include_threads"]),
-            "global_webhook": row["global_webhook"] or "",
             "mirror": bool(row["mirror"]),
-            "dest_name": row["dest_name"] or "mirror",
-            "dest_guild_id": row["dest_guild_id"] or "",
         }
 
-    def set_options(
-        self,
-        backfill: int,
-        include_threads: bool,
-        global_webhook: str,
-        mirror: bool,
-        dest_name: str | None = None,
-    ) -> None:
-        if dest_name is None:
-            dest_name = self.options()["dest_name"]
-        dest_name = " ".join(str(dest_name or "").split())[:100] or "mirror"
+    def set_options(self, backfill: int, include_threads: bool, mirror: bool) -> None:
         self.conn.execute(
-            "UPDATE options SET backfill = ?, include_threads = ?, global_webhook = ?, mirror = ?, dest_name = ? WHERE id = 1",
-            (int(backfill), int(include_threads), global_webhook, int(mirror), dest_name),
+            "UPDATE options SET backfill = ?, include_threads = ?, mirror = ? WHERE id = 1",
+            (int(backfill), int(include_threads), int(mirror)),
         )
         self.conn.commit()
 
-    def set_dest_guild(self, guild_id: str) -> None:
-        self.conn.execute("UPDATE options SET dest_guild_id = ? WHERE id = 1", (guild_id,))
+    def set_target(self, source_guild_id: str, target_guild_id: str, target_name: str) -> None:
+        """The server the owner picked as the copy of one source server (decision 9b'); a later pick replaces it.
+        The fills record holds the pair from then on, as `record_fill` records it, and keeps it when a later pick
+        moves the link away; the link's `shared` flag is the record's (decision 9o)."""
+        source, target = str(source_guild_id), str(target_guild_id)
+        self.conn.execute(
+            "INSERT INTO targets (source_guild_id, target_guild_id, target_name) VALUES (?, ?, ?) "
+            "ON CONFLICT(source_guild_id) DO UPDATE SET "
+            "target_guild_id = excluded.target_guild_id, target_name = excluded.target_name",
+            (source, target, str(target_name or "")[:100]),
+        )
+        self.record_fill(source, target)
         self.conn.commit()
 
-    def clear_destination(self) -> None:
-        self.conn.execute("UPDATE selection SET webhook_url = ''")
-        self.conn.execute("DELETE FROM hooks")
-        self.conn.execute("UPDATE options SET dest_guild_id = '' WHERE id = 1")
+    def record_fill(self, source_guild_id: str, target_guild_id: str) -> bool:
+        """Record, before a fill writes to the target, that the target holds this source from now on (Mando never
+        deletes there, decision 9i), and return whether another source was in that target first (decision 9o).
+        A source already recorded there gets its first answer again, so a refill keeps the categories of its
+        first fill, also after a second source arrived or after the source was filled into another target."""
+        source, target = str(source_guild_id), str(target_guild_id)
+        found = self.conn.execute(
+            "SELECT shared FROM fills WHERE target_guild_id = ? AND source_guild_id = ?", (target, source)
+        ).fetchone()
+        if found is not None:
+            return bool(found["shared"])
+        shared = self.holds_another(target, source)
+        self.conn.execute(
+            "INSERT INTO fills (target_guild_id, source_guild_id, shared) VALUES (?, ?, ?)",
+            (target, source, int(shared)),
+        )
         self.conn.commit()
+        return shared
+
+    def holds_another(self, target_guild_id: str, source_guild_id: str) -> bool:
+        """Whether the fills record holds a source other than this one in that target, whichever came first
+        (decision 9o): a channel of the same name there may then be the other source's."""
+        other = self.conn.execute(
+            "SELECT 1 FROM fills WHERE target_guild_id = ? AND source_guild_id != ? LIMIT 1",
+            (str(target_guild_id), str(source_guild_id)),
+        ).fetchone()
+        return other is not None
+
+    def record_category(self, target_guild_id: str, source_guild_id: str, category_id: str) -> None:
+        """Record that a fill of this source made that category in the target (decision 9o): it is this source's,
+        whatever its name, since two sources can carry the same name. The first record of a category stays."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO fill_categories (target_guild_id, category_id, source_guild_id) VALUES (?, ?, ?)",
+            (str(target_guild_id), str(category_id), str(source_guild_id)),
+        )
+        self.conn.commit()
+
+    def category_sources(self, target_guild_id: str) -> dict[str, str]:
+        """The categories fills made in the target, each with the source it was made for."""
+        rows = self.conn.execute(
+            "SELECT category_id, source_guild_id FROM fill_categories WHERE target_guild_id = ?",
+            (str(target_guild_id),),
+        ).fetchall()
+        return {str(row["category_id"]): str(row["source_guild_id"]) for row in rows}
+
+    def targets(self) -> dict[str, dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT t.source_guild_id, t.target_guild_id, t.target_name, COALESCE(f.shared, 0) AS shared "
+            "FROM targets t LEFT JOIN fills f "
+            "ON f.target_guild_id = t.target_guild_id AND f.source_guild_id = t.source_guild_id"
+        ).fetchall()
+        return {
+            str(row["source_guild_id"]): {
+                "target_id": str(row["target_guild_id"]),
+                "target_name": str(row["target_name"]),
+                "shared": bool(row["shared"]),
+            }
+            for row in rows
+        }
 
     def fill_webhooks(self, pairs: list[tuple[str, str]]) -> None:
         for source_id, url in pairs:
@@ -232,7 +306,7 @@ class Store:
 
     def selection(self) -> list[dict]:
         rows = self.conn.execute(
-            "SELECT channel_id, guild_id, guild_name, channel_name, webhook_url, enabled, parent, topic "
+            "SELECT channel_id, guild_id, guild_name, channel_name, webhook_url, enabled, parent, topic, nsfw "
             "FROM selection ORDER BY guild_name, channel_name"
         ).fetchall()
         return [dict(row) for row in rows]
@@ -254,12 +328,14 @@ class Store:
                     1 if row.get("enabled", 1) else 0,
                     row.get("parent") or "",
                     str(row.get("topic") or "")[:1024],
+                    1 if row.get("nsfw") else 0,
                 )
             )
         self.conn.execute("DELETE FROM selection")
         self.conn.executemany(
-            "INSERT INTO selection (channel_id, guild_id, guild_name, channel_name, webhook_url, enabled, parent, topic) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO selection "
+            "(channel_id, guild_id, guild_name, channel_name, webhook_url, enabled, parent, topic, nsfw) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             packed,
         )
         for item in packed:

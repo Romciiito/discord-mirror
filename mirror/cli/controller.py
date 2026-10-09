@@ -54,6 +54,8 @@ class Controller:
         self.picked: dict[str, dict[str, Any]] = {}
         self.webhook_channel: dict[str, Any] | None = None  # the channel whose URL row is open (Task 6b)
         self.webhook_new = False  # the Enter that opened the URL row ticked the channel: Esc unticks it again
+        self.targets: list[dict[str, Any]] = []  # the servers the owner owns, offered as the copy (decision 9m)
+        self.target_source: dict[str, Any] | None = None  # the source server the target picker fills
 
     # ---- state -------------------------------------------------------------
 
@@ -122,10 +124,12 @@ class Controller:
             return "press any key"
         if screen == "running":
             return "esc returns to the menu"
+        if screen == "servers" and self.depth == "targets":
+            return "enter fills the copy, esc back"
         if screen == "servers" and self.depth == "channels":
             return "enter toggles, a selects all, esc back"
         if screen == "servers":
-            return "enter toggles the server, right opens channels, esc back"
+            return "enter toggles, c fills copy, right opens channels, esc back"
         if screen == "webhooks":
             return "up and down move, enter or a number opens, left and right change backfill and threads, esc back"
         if screen == "token":
@@ -262,6 +266,7 @@ class Controller:
                 "name": row.get("channel_name") or str(row.get("channel_id") or ""),
                 "parent": row.get("parent") or "",
                 "topic": row.get("topic") or "",
+                "nsfw": bool(row.get("nsfw")),
             })
             at = len(listed) - 1
             self.error = f"{name} has no webhook (not listed)"
@@ -463,8 +468,6 @@ class Controller:
             "backfill": options.get("backfill", 0),
             "include_threads": bool(options.get("include_threads")),
             "mirror": bool(options.get("mirror")),
-            "global_webhook": "",
-            "dest_name": options.get("dest_name") or "mirror",
             "channels": list(self.picked.values()),
         }
         self.busy = True
@@ -518,9 +521,7 @@ class Controller:
                 await self._webhook_key(key)
                 return
             if key == "Escape":
-                self.depth = "guilds"
-                active = self.active_guild["id"] if self.active_guild else None
-                self.local_index = max(0, next((at for at, g in enumerate(self.guilds) if g["id"] == active), 0))
+                self._back_to_guilds(self.active_guild["id"] if self.active_guild else None)
                 return
             if not self.channel_rows:
                 return
@@ -535,6 +536,9 @@ class Controller:
                     self._remember(self.active_guild, channel)
                 await self._save_options()
             return
+        if self.depth == "targets":
+            await self._target_key(key)
+            return
         if key == "Escape":
             self.flow = reduce(self.flow, {"key": "Escape"}, self.ctx())
             return
@@ -548,6 +552,8 @@ class Controller:
             await self._toggle_guild(self.guilds[self.local_index])
         elif key == "ArrowRight":
             await self._open_channels(self.guilds[self.local_index])
+        elif key in ("c", "C"):
+            await self._open_targets(self.guilds[self.local_index])
 
     def _remember(self, guild: dict[str, Any], channel: dict[str, Any]) -> None:
         previous = self.picked.get(channel["id"]) or {}
@@ -558,6 +564,7 @@ class Controller:
             "channel_name": channel.get("name") or "",
             "parent": channel.get("parent") or "",
             "topic": channel.get("topic") or "",
+            "nsfw": bool(channel.get("nsfw")),
             "webhook_url": previous.get("webhook_url") or "",
             "enabled": True,
         }
@@ -634,6 +641,10 @@ class Controller:
             for cid in ours:
                 del self.picked[cid]
             await self._save_options()
+            # the copy stays in the owner's server: Mando never deletes there (decisions 9e, 9i)
+            link = self._target_of(guild["id"])
+            if link and not self.error:
+                self.error = f"copy in {link.get('target_name') or 'the copy'} kept, delete it in Discord if you do not need it"
             return
         self.busy = True
         try:
@@ -670,3 +681,85 @@ class Controller:
             self.error = UNEXPECTED
         finally:
             self.busy = False
+
+    # ---- the copy of a source server: a server the owner owns, filled by Mando (decisions 9b', 9m, 9e) ----
+
+    def _target_of(self, guild_id: str) -> dict[str, Any] | None:
+        return (self.snap.get("targets") or {}).get(guild_id)
+
+    async def _open_targets(self, guild: dict[str, Any]) -> None:
+        self.error = ""
+        if not any(row.get("guild_id") == guild["id"] for row in self.picked.values()):
+            self.error = "tick the server or some of its channels first"
+            return
+        self.busy = True
+        try:
+            owned = [g for g in await self.engine.owned_guilds() if g["id"] != guild["id"]]
+        except (ApiError, RuntimeError) as exc:
+            self.error = str(exc)
+            return
+        except Exception:
+            log.exception("owned server list failed")
+            self.error = UNEXPECTED
+            return
+        finally:
+            self.busy = False
+        if not owned:
+            self.error = "you own no other server, create one in Discord first"
+            return
+        self.targets = owned
+        self.target_source = guild
+        self.depth = "targets"
+        link = self._target_of(guild["id"]) or {}
+        self.local_index = max(0, next((at for at, g in enumerate(owned) if g["id"] == link.get("target_id")), 0))
+
+    async def _target_key(self, key: str) -> None:
+        if key == "Escape":
+            self._leave_targets()
+            return
+        if not self.targets:
+            return
+        if key == "ArrowDown":
+            self.local_index = (self.local_index + 1) % len(self.targets)
+        elif key == "ArrowUp":
+            self.local_index = (self.local_index - 1 + len(self.targets)) % len(self.targets)
+        elif key == "Enter":
+            await self._fill(self.targets[self.local_index])
+
+    def _leave_targets(self) -> None:
+        source = self.target_source["id"] if self.target_source else None
+        self.target_source = None
+        self._back_to_guilds(source)
+
+    def _back_to_guilds(self, guild_id: str | None) -> None:
+        """Back to the server list, on the row of the server just left (the first row when it is not listed)."""
+        self.depth = "guilds"
+        self.local_index = max(0, next((at for at, g in enumerate(self.guilds) if g["id"] == guild_id), 0))
+
+    async def _fill(self, target: dict[str, Any]) -> None:
+        source = self.target_source or {}
+        self.busy = True
+        try:
+            report = await self.engine.fill_copy(str(source.get("id") or ""), target["id"])
+            self.refresh()
+        except (ApiError, RuntimeError) as exc:
+            self.error = str(exc)
+            # Engine.fill_copy can raise after the store holds the copy's URLs and the link (the refresh of a running
+            # mirror): the screen takes the stored rows, or the next save would put the URLs from before back
+            self._resync()
+            return
+        except Exception:
+            log.exception("fill failed")
+            self.error = UNEXPECTED
+            self._resync()
+            return
+        finally:
+            self.busy = False
+        self._leave_targets()
+        text = f"{report.get('filled', 0)} channel(s) ready in {report.get('target') or target.get('name')}"
+        # a fill gives every ticked channel of the source the copy's webhook, an own one (decision 9g) or an earlier
+        # copy's URL included (decision 9n); the engine notes the count in its log, which the CLI does not show, and
+        # reports it, so the line shows the engine's count. The count leads, so a narrow screen that cuts a long
+        # server name never cuts it
+        replaced = int(report.get("replaced") or 0)
+        self.error = f"{replaced} earlier webhook url(s) replaced, {text}" if replaced else text

@@ -201,7 +201,10 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         resp = await client.get("/api/state")
         self.assertEqual(resp.status, 200)
         body = await resp.json()
-        self.assertEqual(set(body), {"user", "running", "status", "has_token", "options", "selection", "log", "mirrored"})
+        self.assertEqual(
+            set(body), {"user", "running", "status", "has_token", "options", "selection", "log", "mirrored", "targets"}
+        )
+        self.assertEqual(body["targets"], {})
         self.assertFalse(body["has_token"])
         self.assertEqual(app["engine"].store.path, Path(data) / "state.db")
         self.assertTrue(os.path.isfile(os.path.join(data, "state.db")))
@@ -214,6 +217,52 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await resp.text(), "UI unavailable now")
         resp = await client.get("/static/app.js")
         self.assertEqual(resp.status, 404)
+
+    async def test_copy_and_reset_routes_are_gone(self) -> None:
+        client = await self.client()
+        resp = await client.post("/api/guilds/5/copy")
+        self.assertEqual(resp.status, 404)
+        resp = await client.post("/api/destination/reset")
+        self.assertEqual(resp.status, 404)
+
+    async def test_targets_and_fill_need_a_token(self) -> None:
+        client = await self.client()
+        resp = await client.get("/api/targets")
+        self.assertEqual(resp.status, 401)
+        self.assertEqual(await resp.json(), {"error": "add a token first"})
+        resp = await client.post("/api/guilds/5/fill", json={"target": "900"})
+        self.assertEqual(resp.status, 401)
+        resp = await client.post("/api/guilds/5/fill", data="x", headers={"Content-Type": "text/plain"})
+        self.assertEqual(resp.status, 415)
+
+    async def test_targets_route_lists_the_owned_servers(self) -> None:
+        client = await self.client()
+        engine = client.server.app["engine"]
+
+        async def owned() -> list[dict]:
+            return [{"id": "901", "name": "Alpha"}, {"id": "900", "name": "zeta copy"}]
+
+        engine.owned_guilds = owned
+        resp = await client.get("/api/targets")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(
+            await resp.json(), {"targets": [{"id": "901", "name": "Alpha"}, {"id": "900", "name": "zeta copy"}]}
+        )
+
+    async def test_fill_route_calls_the_engine_and_returns_the_report(self) -> None:
+        client = await self.client()
+        engine = client.server.app["engine"]
+
+        async def fill(source: str, target: str) -> dict:
+            return {"target": f"{source}->{target}", "filled": 2, "reused": 0, "replaced": 1}
+
+        engine.fill_copy = fill
+        resp = await client.post("/api/guilds/5/fill", json={"target": 900})
+        self.assertEqual(resp.status, 200)
+        body = await resp.json()
+        self.assertEqual(body["report"], {"target": "5->900", "filled": 2, "reused": 0, "replaced": 1})
+        self.assertIn("selection", body)
+        self.assertEqual(body["targets"], {})
 
 
 class MainTests(unittest.TestCase):

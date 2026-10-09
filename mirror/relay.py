@@ -16,12 +16,18 @@ BLOCKED_WORDS = ("discord", "clyde")
 BLOCKED_NAMES = {"everyone", "here"}
 CDN_HOSTS = {"cdn.discordapp.com", "media.discordapp.net"}
 UPLOAD_FILES = 10
-UPLOAD_LIMIT = 10_000_000
+UPLOAD_LIMIT = 20 * 1024 * 1024  # per file, the documented default (decision 10b)
+OVER_LIMIT = "This message has a file over the upload limit"
 ATTEMPTS = 5
 RETRY_CAP = 60.0
 PACE = 0.5
 TEXT_FLOOR = 64
 JSON_HEADERS = {"Content-Type": "application/json"}
+EMBED_TOTAL = 6000
+STICKER_PNG = 1
+STICKER_APNG = 2
+STICKER_LOTTIE = 3
+STICKER_GIF = 4
 
 
 def safe_name(name: str) -> str:
@@ -87,8 +93,18 @@ def reply_line(message: dict[str, Any]) -> str:
     return clip(f"replying to {who}: {snippet}", 180)
 
 
+def embed_chars(item: dict[str, Any]) -> int:
+    count = len(item.get("title") or "") + len(item.get("description") or "")
+    for field in item.get("fields") or []:
+        count += len(field.get("name") or "") + len(field.get("value") or "")
+    footer = item.get("footer") or {}
+    author = item.get("author") or {}
+    return count + len(str(footer.get("text") or "")) + len(str(author.get("name") or ""))
+
+
 def safe_embeds(message: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    total = 0
     for embed in message.get("embeds") or []:
         if not isinstance(embed, dict):
             continue
@@ -123,6 +139,11 @@ def safe_embeds(message: dict[str, Any]) -> list[dict[str, Any]]:
         if fields:
             item["fields"] = fields
         if item:
+            # the title, description, field, footer and author texts of all embeds share 6000 characters
+            used = embed_chars(item)
+            if total + used > EMBED_TOTAL:
+                break
+            total += used
             out.append(item)
         if len(out) == 10:
             break
@@ -130,14 +151,35 @@ def safe_embeds(message: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def sticker_names(message: dict[str, Any]) -> list[str]:
+    """Stickers that have no image to send: Lottie (decision 10a)."""
     names = []
     for sticker in message.get("sticker_items") or []:
-        if isinstance(sticker, dict) and sticker.get("name"):
+        if isinstance(sticker, dict) and sticker.get("name") and sticker.get("format_type") == STICKER_LOTTIE:
             names.append(str(sticker["name"])[:64])
     return names
 
 
-def view_from_message(message: dict[str, Any], channel_name: str, guild_name: str) -> dict[str, Any]:
+def sticker_files(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """PNG, APNG and GIF stickers as image files from the CDN, uploaded like attachments (decision 10a)."""
+    files: list[dict[str, Any]] = []
+    for sticker in message.get("sticker_items") or []:
+        if not isinstance(sticker, dict) or not sticker.get("id"):
+            continue
+        kind = sticker.get("format_type")
+        name = str(sticker.get("name") or "sticker")[:64]
+        if kind in (STICKER_PNG, STICKER_APNG):
+            url, ext, mime = f"https://cdn.discordapp.com/stickers/{sticker['id']}.png", "png", "image/png"
+        elif kind == STICKER_GIF:
+            url, ext, mime = f"https://media.discordapp.net/stickers/{sticker['id']}.gif", "gif", "image/gif"
+        else:
+            continue
+        files.append({"name": f"{name}.{ext}", "url": url, "content_type": mime, "size": 0, "sticker": True})
+    return files
+
+
+def view_from_message(
+    message: dict[str, Any], channel_name: str, guild_name: str, guild_id: str = ""
+) -> dict[str, Any]:
     attachments = []
     for item in message.get("attachments") or []:
         if not isinstance(item, dict):
@@ -153,6 +195,7 @@ def view_from_message(message: dict[str, Any], channel_name: str, guild_name: st
                 "size": int(item.get("size") or 0),
             }
         )
+    attachments.extend(sticker_files(message))
     return {
         "id": str(message.get("id") or ""),
         "channel_id": str(message.get("channel_id") or ""),
@@ -169,6 +212,7 @@ def view_from_message(message: dict[str, Any], channel_name: str, guild_name: st
         "deleted": False,
         "reactions": {},
         "reply": reply_line(message),
+        "guild_id": str(message.get("guild_id") or guild_id or ""),
     }
 
 
@@ -189,28 +233,47 @@ def size_of(item: dict[str, Any]) -> int:
 def plan_uploads(attachments: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     upload: list[dict[str, Any]] = []
     linked: list[dict[str, Any]] = []
-    total = 0
     for item in attachments or []:
         if not isinstance(item, dict):
             continue
         size = size_of(item)
+        # a sticker's size is unknown (0); _fetch holds its body to the limit
         if (
             host_of(str(item.get("url") or "")) in CDN_HOSTS
-            and 0 < size <= UPLOAD_LIMIT
+            and (0 < size <= UPLOAD_LIMIT or (size == 0 and item.get("sticker")))
             and len(upload) < UPLOAD_FILES
-            and total + size <= UPLOAD_LIMIT
         ):
             upload.append(item)
-            total += size
         else:
             linked.append(item)
     return upload, linked
 
 
+def oversize(item: dict[str, Any]) -> bool:
+    return size_of(item) > UPLOAD_LIMIT
+
+
+def message_link(view: dict[str, Any]) -> str:
+    guild = str(view.get("guild_id") or "") or "@me"
+    return f"https://discord.com/channels/{guild}/{view.get('channel_id')}/{view.get('id')}"
+
+
+def oversize_lines(view: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for item in view.get("attachments") or []:
+        if isinstance(item, dict) and oversize(item):
+            size = f"{size_of(item) / 1048576:.1f} MiB"
+            lines.append(f"{OVER_LIMIT}: {item.get('name') or 'file'} ({size})")
+            lines.append(message_link(view))
+            if item.get("url"):
+                lines.append(str(item["url"]))
+    return lines
+
+
 def link_urls(view: dict[str, Any]) -> list[str]:
     links = view.get("links")
     if not isinstance(links, list):
-        links = [item.get("url") for item in plan_uploads(view.get("attachments") or [])[1]]
+        links = [item.get("url") for item in plan_uploads(view.get("attachments") or [])[1] if not oversize(item)]
     return [str(url) for url in links if url]
 
 
@@ -227,7 +290,9 @@ def fit_content(text: str, urls: list[str]) -> str:
     return clip(text, 2000 - len(block) - 1) + "\n" + block
 
 
-def payload_for(view: dict[str, Any], prefix: bool) -> dict[str, Any]:
+def payload_for(view: dict[str, Any], prefix: bool, keep_embeds: bool = False) -> dict[str, Any]:
+    """The webhook body of a message. `keep_embeds` keeps the embeds key when the message has none, as an edit
+    needs it so that removed embeds go in the copy too (issue #6, decision 10e)."""
     lines: list[str] = []
     if prefix and view.get("channel_name"):
         guild = view.get("guild_name") or ""
@@ -242,7 +307,8 @@ def payload_for(view: dict[str, Any], prefix: bool) -> dict[str, Any]:
     if view.get("deleted"):
         lines.append("(deleted)")
     text = "\n".join(line for line in lines if line).strip()
-    content = fit_content(text, link_urls(view))
+    # the over-limit lines lead the block fit_content keeps, so a long message cannot clip a file away
+    content = fit_content(text, oversize_lines(view) + link_urls(view))
     body: dict[str, Any] = {
         "content": content or None,
         "username": safe_name(str(view.get("author") or "")),
@@ -251,9 +317,9 @@ def payload_for(view: dict[str, Any], prefix: bool) -> dict[str, Any]:
     }
     if view.get("avatar"):
         body["avatar_url"] = view["avatar"]
-    if not body["embeds"]:
+    if not body["embeds"] and not keep_embeds:
         body.pop("embeds")
-    if body["content"] is None and "embeds" not in body:
+    if body["content"] is None and not body.get("embeds"):
         body["content"] = "(attachment)" if view.get("attachments") else "(empty)"
     return body
 
@@ -360,7 +426,7 @@ class Relay:
         if webhook_parts(webhook_url) is None:
             return
         try:
-            body = payload_for(view, prefix)
+            body = payload_for(view, prefix, keep_embeds=True)
             body.pop("username", None)
             body.pop("avatar_url", None)
             url = f"{webhook_url.rstrip('/')}/messages/{webhook_message_id}"
@@ -392,7 +458,11 @@ class Relay:
         upload, _ = plan_uploads(attachments)
         files, failed = await self._files(upload)
         sent = {id(item) for item in upload} - {id(item) for item in failed}
-        links = [str(item.get("url")) for item in attachments if id(item) not in sent and item.get("url")]
+        links = [
+            str(item.get("url"))
+            for item in attachments
+            if id(item) not in sent and item.get("url") and not oversize(item)
+        ]
         url = webhook_url.rstrip("/") + "?wait=true"
         body = payload_for({**view, "links": links}, prefix)
         plain = not files
@@ -415,7 +485,7 @@ class Relay:
             status, data = await self._send(webhook_url, "post", url, make, 120)
             if too_large(status, data):
                 log.info("webhook upload too large, sending links")
-                links = [str(item.get("url")) for item in attachments if item.get("url")]
+                links = [str(item.get("url")) for item in attachments if item.get("url") and not oversize(item)]
                 body = payload_for({**view, "links": links}, prefix)
                 plain = True
         if plain:
@@ -434,15 +504,13 @@ class Relay:
     ) -> tuple[list[tuple[str, bytes, str]], list[dict[str, Any]]]:
         files: list[tuple[str, bytes, str]] = []
         failed: list[dict[str, Any]] = []
-        total = 0
         for item in attachments:
             data = None
             if len(files) < UPLOAD_FILES:
                 data = await self._fetch(str(item.get("url") or ""), size_of(item))
-            if data is None or total + len(data) > UPLOAD_LIMIT:
+            if data is None:
                 failed.append(item)
                 continue
-            total += len(data)
             files.append((str(item.get("name") or "file")[:80], data, str(item.get("content_type") or "")))
         return files, failed
 

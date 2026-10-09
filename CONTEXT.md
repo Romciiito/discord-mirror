@@ -23,15 +23,23 @@ _Avoid_: setup, config
 ### Targets
 
 **Copy**:
-A Discord server the owner creates and names in Discord and picks for one ticked
-source server; Mando adds the readable categories and channels of the source to it
-and never deletes anything in it.
+A Discord server the owner owns and picks for one ticked source server; a fill adds the
+source's ticked channels, their categories and one webhook per channel to it and never
+deletes anything in it. Several sources may share one copy.
 _Avoid_: mirror server, destination server, dest
+
+**Fill**:
+Mando creating, inside a copy, the categories, channels and webhooks that the ticked
+channels of one source still lack there, reusing what is already there; each ticked
+channel the fill gives a webhook in the copy then posts there.
+_Avoid_: provision, sync, deploy
 
 **Own webhook**:
 A webhook URL the owner supplies for one ticked source channel; messages from that
 channel are posted there. It belongs to whoever created it, not to the account that
 reads the source, so the target can be any server, including one the account is not in.
+A fill of its source server replaces it with the copy's webhook when the fill fills
+that channel, and leaves it when the fill skips the channel.
 _Avoid_: global webhook, custom webhook
 
 **Target**:
