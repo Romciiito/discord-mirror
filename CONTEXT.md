@@ -29,7 +29,8 @@ _Avoid_: mirror server, destination server, dest
 
 **Own webhook**:
 A webhook URL the owner supplies for one ticked source channel; messages from that
-channel are posted there.
+channel are posted there. It belongs to whoever created it, not to the account that
+reads the source, so the target can be any server, including one the account is not in.
 _Avoid_: global webhook, custom webhook
 
 **Target**:

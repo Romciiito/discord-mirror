@@ -103,6 +103,7 @@ Decisions (owner):
 - **9g.** In the channel list, Enter ticks a channel and opens the webhook URL row
   at once; Esc without a URL unticks it again. The URL is checked on entry with
   the existing `clean_webhook`.
+- **9g'.** (2026-10-09) 9g and the CLI side of 9f ship in plan A (`docs/superpowers/plans/2026-10-09-cli-shell.md`, Task 6b), because an own webhook is independent of the reading account and the engine already mirrors when every ticked row has a URL. Plan A's Webhook settings screen keeps only backfill, threads and back. Plan B moves the Start rule into the engine.
 - **9h.** Upgrade keeps the selection. The old `dest_name` and `dest_guild_id`
   columns are ignored, channels without a webhook follow 9f, and the old shared
   server on Discord is left alone (as in 9e).
