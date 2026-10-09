@@ -141,6 +141,26 @@ class RenderTests(unittest.TestCase):
         ui.webhook_new = True
         self.assertEqual(render(ui, 60, 8)[-1], "enter keeps the url, empty enter or esc unticks")
 
+    def test_target_picker_and_the_copy_mark(self) -> None:
+        ui = ui_on("servers", targets={"g1": {"target_id": "t2", "target_name": "Spare"}})
+        ui.guilds = [{"id": "g1", "name": "Qwen", "icon": ""}, {"id": "g2", "name": "Moody", "icon": ""}]
+        ui.picked = {"c1": {"channel_id": "c1", "guild_id": "g1", "webhook_url": ""}}
+        lines = render(ui, 60, 8)
+        self.assertEqual(lines[1], "Select servers")
+        self.assertEqual(lines[2], "> [x] Qwen  copy: Spare")
+        self.assertEqual(lines[3], "  [ ] Moody")
+        ui.depth = "targets"
+        ui.target_source = ui.guilds[0]
+        ui.targets = [{"id": "t1", "name": "Qwen copy"}, {"id": "t2", "name": "Spare"}]
+        ui.local_index = 1
+        lines = render(ui, 60, 8)
+        self.assertEqual(lines[1], "Copy of Qwen into")
+        self.assertEqual(lines[2], "  [ ] Qwen copy")
+        self.assertEqual(lines[3], "> [x] Spare")
+        self.assertEqual(lines[-1], "enter fills the copy, esc back")
+        ui.targets = []
+        self.assertIn("no servers you own", render(ui, 60, 8))
+
     def test_webhook_settings_rows(self) -> None:
         ui = ui_on("webhooks")
         lines = render(ui, 60, 8)
@@ -209,7 +229,7 @@ class RenderTests(unittest.TestCase):
     def test_long_list_keeps_the_cursor_row_in_view(self) -> None:
         ui = ui_on("servers")
         ui.guilds = [{"id": f"g{n}", "name": f"Server {n}"} for n in range(40)]
-        hint = "enter toggles the server, right opens channels, esc back"
+        hint = "enter toggles, c fills copy, right opens channels, esc back"
         for height, index in ((12, 25), (10, 25), (12, 39), (12, 0), (4, 17)):
             ui.local_index = index
             lines = render(ui, 60, height)

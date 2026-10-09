@@ -1745,7 +1745,7 @@ Update `FakeEngine` in `tests/test_cli_controller.py`: `self.options = {"backfil
         return {"target": name, "filled": 2, "reused": 0}
 ```
 
-Change the assertions at lines 494–495 (the `_save_options` body) to `self.assertNotIn("global_webhook", engine.calls[-1][1])` and `self.assertNotIn("dest_name", engine.calls[-1][1])`. Add to `ServersScreenTests`:
+Change the assertions at lines 494–495 (the `_save_options` body) to `self.assertNotIn("global_webhook", engine.calls[-1][1])` and `self.assertNotIn("dest_name", engine.calls[-1][1])`. Two existing tests pin the old guilds hint and take the new one, `"enter toggles, c fills copy, right opens channels, esc back"`: `test_channels_stop_at_the_list_ends_and_escape_returns_to_their_server` in `tests/test_cli_controller.py` and the `hint = ...` line of `test_long_list_keeps_the_cursor_row_in_view` in `tests/test_cli_render.py`. Add to `ServersScreenTests`:
 
 ```python
     async def test_c_opens_the_target_picker_and_enter_fills(self) -> None:
@@ -1973,12 +1973,12 @@ and in the guild list loop:
 
 - [ ] **Step 4: Run the full suite**
 
-Run the full test command. Expected: OK. Also `grep -n "dest_name\|global_webhook\|reset_destination" mirror/ tests/test_cli_controller.py tests/test_cli_render.py` prints nothing.
+Run the full test command. Expected: OK. Also `grep -rn --include=*.py "dest_name\|global_webhook\|reset_destination" mirror/ tests/test_cli_controller.py tests/test_cli_render.py` prints only the `mirror/store.py` comment on the old options columns (Task 1, decision 9h) and the two `assertNotIn` lines of Step 1.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add mirror/cli/controller.py mirror/cli/render.py tests/test_cli_controller.py tests/test_cli_render.py
+git add mirror/cli/controller.py mirror/cli/render.py tests/test_cli_controller.py tests/test_cli_render.py docs/superpowers/plans/2026-10-09-own-copies.md
 git commit -m "Pick the copy of a source server with c and fill it from the CLI."
 ```
 

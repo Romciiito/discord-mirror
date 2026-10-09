@@ -21,7 +21,9 @@ class FakeEngine:
         self.running = False
         self.status = "idle"
         self.http = None
-        self.options = {"backfill": 0, "include_threads": False, "dest_name": "mirror", "mirror": False, "global_webhook": ""}
+        self.options = {"backfill": 0, "include_threads": False, "mirror": False}
+        self.targets: dict = {}
+        self.owned: list[dict] = []
         self.selection: list[dict] = []
         self.log: list[str] = []
         self.feed: list[dict] = []
@@ -39,6 +41,7 @@ class FakeEngine:
             "user": self.user, "running": self.running, "status": self.status,
             "has_token": self.http is not None, "options": dict(self.options),
             "selection": list(self.selection), "log": list(self.log), "mirrored": self.mirrored,
+            "targets": dict(self.targets),
         }
 
     def feed_items(self) -> list[dict]:
@@ -88,16 +91,26 @@ class FakeEngine:
         self._maybe_fail("save_setup")
         self.options["backfill"] = int(body.get("backfill") or 0)
         self.options["include_threads"] = bool(body.get("include_threads"))
-        self.options["dest_name"] = str(body.get("dest_name") or "mirror")
         self.selection = [dict(row) for row in body.get("channels") or []]
 
     async def refresh(self) -> None:
         self.calls.append(("refresh",))
         self._maybe_fail("refresh")
 
-    async def reset_destination(self) -> None:
-        self.calls.append(("reset_destination",))
-        self._maybe_fail("reset_destination")
+    async def owned_guilds(self) -> list[dict]:
+        self.calls.append(("owned_guilds",))
+        self._maybe_fail("owned_guilds")
+        return list(self.owned)
+
+    async def fill_copy(self, source_id: str, target_id: str) -> dict:
+        self.calls.append(("fill_copy", source_id, target_id))
+        self._maybe_fail("fill_copy")
+        name = next(g["name"] for g in self.owned if g["id"] == target_id)
+        self.targets[source_id] = {"target_id": target_id, "target_name": name}
+        for row in self.selection:
+            if row["guild_id"] == source_id and not row["webhook_url"]:
+                row["webhook_url"] = f"https://discord.com/api/webhooks/{row['channel_id']}/t"
+        return {"target": name, "filled": 2, "reused": 0}
 
 
 async def read_keychain_fake(service: str, account: str) -> str:
@@ -491,8 +504,8 @@ class WebhookScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ui.snap["options"]["backfill"], 50)
         self.assertEqual(engine.calls[-1][0], "save_setup")
         self.assertEqual(engine.calls[-1][1]["backfill"], 50)
-        self.assertEqual(engine.calls[-1][1]["global_webhook"], "")
-        self.assertEqual(engine.calls[-1][1]["dest_name"], "mirror")
+        self.assertNotIn("global_webhook", engine.calls[-1][1])
+        self.assertNotIn("dest_name", engine.calls[-1][1])
         await keys(ui, "ArrowLeft", "ArrowLeft", "ArrowLeft")
         self.assertEqual(ui.snap["options"]["backfill"], 0)
 
@@ -678,7 +691,7 @@ class ServersScreenTests(unittest.IsolatedAsyncioTestCase):
     async def test_channels_stop_at_the_list_ends_and_escape_returns_to_their_server(self) -> None:
         # no Enter on a channel here: Task 6b changes what it does (the own webhook URL row)
         ui, engine = await self.open_servers()
-        self.assertEqual(ui.hint(), "enter toggles the server, right opens channels, esc back")
+        self.assertEqual(ui.hint(), "enter toggles, c fills copy, right opens channels, esc back")
         await keys(ui, "ArrowDown", "ArrowRight")
         self.assertEqual(ui.depth, "channels")
         self.assertEqual(ui.active_guild["id"], "g2")
@@ -816,8 +829,78 @@ class ServersScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((ui.flow["screen"], ui.depth, ui.local_index), ("servers", "guilds", 0))
         self.assertFalse(ui.busy)
 
+    async def test_c_opens_the_target_picker_and_enter_fills(self) -> None:
+        ui, engine = await self.open_servers()
+        engine.owned = [{"id": "g1", "name": "Qwen"}, {"id": "t1", "name": "Qwen copy"}, {"id": "t2", "name": "Spare"}]
+        await keys(ui, "c")
+        self.assertEqual(ui.error, "tick the server or some of its channels first")
+        self.assertEqual(ui.depth, "guilds")
+        await keys(ui, "Enter", "c")
+        self.assertEqual(ui.depth, "targets")
+        self.assertEqual([t["id"] for t in ui.targets], ["t1", "t2"])
+        self.assertEqual(ui.target_source["id"], "g1")
+        self.assertEqual(ui.hint(), "enter fills the copy, esc back")
+        await keys(ui, "ArrowDown", "Enter")
+        self.assertEqual(engine.calls[-1], ("fill_copy", "g1", "t2"))
+        self.assertEqual(ui.depth, "guilds")
+        self.assertEqual(ui.local_index, 0)
+        self.assertEqual(ui.error, "2 channel(s) ready in Spare")
+        self.assertEqual(ui.snap["targets"]["g1"]["target_name"], "Spare")
+        self.assertTrue(all(row["webhook_url"] for row in ui.picked.values()))
+        self.assertEqual(ui.hint(), "enter toggles, c fills copy, right opens channels, esc back")
+        self.assertLessEqual(len(ui.hint()), 60)
 
-HOOK = "https://discord.com/api/webhooks/123/abc"
+    async def test_target_picker_starts_on_the_linked_target_and_escape_returns(self) -> None:
+        ui, engine = await self.open_servers()
+        engine.owned = [{"id": "t1", "name": "Qwen copy"}, {"id": "t2", "name": "Spare"}]
+        engine.targets["g1"] = {"target_id": "t2", "target_name": "Spare"}
+        ui.refresh()
+        await keys(ui, "Enter", "c")
+        self.assertEqual(ui.local_index, 1)
+        await keys(ui, "ArrowDown")
+        self.assertEqual(ui.local_index, 0)
+        await keys(ui, "Escape")
+        self.assertEqual(ui.depth, "guilds")
+        self.assertEqual(ui.local_index, 0)
+        self.assertEqual(ui.error, "")
+
+    async def test_fill_errors_keep_the_picker_open(self) -> None:
+        ui, engine = await self.open_servers()
+        engine.owned = [{"id": "t1", "name": "Qwen copy"}]
+        engine.fail["fill_copy"] = ApiError(400, "no webhook could be created")
+        await keys(ui, "Enter", "c", "Enter")
+        self.assertEqual(ui.depth, "targets")
+        self.assertEqual(ui.error, "no webhook could be created")
+        engine.fail["fill_copy"] = aiohttp.ClientError("boom")
+        with self.assertLogs("mirror.cli", level="ERROR"):
+            await keys(ui, "Enter")
+        self.assertEqual(ui.error, "request failed")
+        self.assertFalse(ui.busy)
+
+    async def test_no_owned_server_and_a_failed_list_show_errors(self) -> None:
+        ui, engine = await self.open_servers()
+        engine.owned = [{"id": "g1", "name": "Qwen"}]
+        await keys(ui, "Enter", "c")
+        self.assertEqual(ui.depth, "guilds")
+        self.assertEqual(ui.error, "you own no other server, create one in Discord first")
+        engine.fail["owned_guilds"] = ApiError(401, "add a token first")
+        await keys(ui, "c")
+        self.assertEqual(ui.error, "add a token first")
+        self.assertEqual(ui.depth, "guilds")
+
+    async def test_unticking_a_server_with_a_copy_says_the_copy_is_kept(self) -> None:
+        ui, engine = await self.open_servers()
+        engine.targets["g1"] = {"target_id": "t2", "target_name": "Spare"}
+        ui.refresh()
+        await keys(ui, "Enter")
+        self.assertEqual(ui.error, "")
+        await keys(ui, "Enter")
+        self.assertEqual(ui.picked, {})
+        self.assertEqual(ui.error, "copy in Spare kept, delete it in Discord if you do not need it")
+        self.assertEqual(engine.calls[-1][0], "save_setup")
+
+
+HOOK ="https://discord.com/api/webhooks/123/abc"
 
 
 class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
