@@ -696,12 +696,17 @@ class ServeAndCliTests(unittest.TestCase):
 
 
 class GracefulExitTests(unittest.TestCase):
-    """SIGINT/SIGTERM on POSIX: the headless server stops gracefully the way web.run_app did; next to the CLI
-    prompt_toolkit keeps SIGINT. Windows has no loop signal handlers, so the signal itself is not sent here."""
+    """How _run ends: the headless server (handle_signals=True) stops gracefully on SIGINT/SIGTERM the way
+    web.run_app did and, on Windows where the loop has no signal handlers, takes SIGINT the way asyncio.Runner
+    does; next to the CLI prompt_toolkit keeps SIGINT. POSIX signals are not sent here: their loop handlers are
+    stood in for by a GracefulExit from a loop callback. SIGINT is sent with signal.raise_signal."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        # _run installs its SIGINT handler only over Python's default one, as asyncio.Runner does
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
 
     def _runner_kwargs(self, run: Callable[[web.Application, int], None]) -> dict[str, Any]:
         port = _free_port()
@@ -870,16 +875,26 @@ class GracefulExitTests(unittest.TestCase):
         return seen
 
     def test_a_graceful_exit_with_a_running_gateway_still_closes_the_session_and_the_store(self) -> None:
-        # what a POSIX loop does with SIGINT or SIGTERM under handle_signals=True
+        """The headless server (handle_signals=True) with a running gateway task gets GracefulExit from a loop
+        callback, which is how a POSIX loop delivers SIGINT or SIGTERM under the runner's handlers; the gateway
+        task ends and Engine.close still closes the session and the store, with no asyncio warning. No signal is
+        sent and no HTTP connection is open."""
         from aiohttp.web_runner import _raise_graceful_exit
 
-        self._ends_with_the_engine_fully_closed(_raise_graceful_exit)
+        self._ends_with_the_engine_fully_closed(_raise_graceful_exit, handle_signals=True)
 
     def test_ctrl_c_with_a_running_gateway_still_closes_the_session_and_the_store(self) -> None:
+        """A KeyboardInterrupt raised from a loop callback, outside any task step, while a gateway task runs: next
+        to the CLI (handle_signals=False) that is Ctrl+C before prompt_toolkit took SIGINT; on the headless server
+        (handle_signals=True) a KeyboardInterrupt raised any other way than through the SIGINT handler. Either way
+        the gateway task ends and Engine.close still closes the session and the store."""
+
         def ctrl_c() -> None:
             raise KeyboardInterrupt
 
-        self._ends_with_the_engine_fully_closed(ctrl_c)
+        for handle_signals in (False, True):
+            with self.subTest(handle_signals=handle_signals):
+                self._ends_with_the_engine_fully_closed(ctrl_c, handle_signals=handle_signals)
 
     def test_sigint_inside_the_gateway_task_cancels_the_server_task_and_the_gateway_stops_normally(self) -> None:
         # the headless server on Windows, where the loop has no signal handlers: Ctrl+C is a SIGINT the Python
@@ -887,9 +902,6 @@ class GracefulExitTests(unittest.TestCase):
         # it must cancel the server task instead of raising KeyboardInterrupt into that task, so Gateway.stop
         # ends the gateway task normally. On POSIX the runner's loop handler takes SIGINT and the exit is the
         # graceful one; both end the same way here.
-        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
-        self.addCleanup(signal.signal, signal.SIGINT, previous)
-
         seen = self._ends_with_the_engine_fully_closed(
             None, handle_signals=True, in_gateway=lambda: signal.raise_signal(signal.SIGINT)
         )
