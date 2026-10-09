@@ -1011,14 +1011,33 @@ class GracefulExitTests(unittest.TestCase):
         self,
     ) -> None:
         # runner.cleanup waits up to shutdown_timeout for in-flight handlers, twice over, before the app's cleanup
-        # runs Engine.close; an /api/events client that stays connected must not hold the exit for that long
+        # runs Engine.close; an /api/events client that stays connected must not hold the exit for that long. The
+        # mechanism is pinned, not the clock: _end_streams ends the idle handler, which returns on its own (it is
+        # not cancelled) before Engine.close reaches store.close
         from aiohttp.web_runner import _raise_graceful_exit
 
         shutdown_timeout = 3.0
         port = _free_port()
-        app = create_app(self.tmp.name, "127.0.0.1", port)
-        engine = app["engine"]
         seen: dict[str, Any] = {}
+        real_events = webmod.events
+
+        async def recording_events(request: web.Request) -> web.StreamResponse:
+            try:
+                response = await real_events(request)
+            except BaseException as exc:
+                seen["stream_end"] = type(exc).__name__
+                raise
+            seen["stream_end"] = "returned"
+            return response
+
+        with mock.patch.object(webmod, "events", recording_events):
+            app = create_app(self.tmp.name, "127.0.0.1", port)
+        engine = app["engine"]
+        real_store_close = engine.store.close
+
+        def store_close() -> None:
+            seen["at_store_close"] = (seen.get("stream_end"), len(app["streams"]), len(engine.listeners))
+            real_store_close()
 
         def subscribe() -> None:
             # a raw socket the test keeps open until _run returned, so only the server can end the stream
@@ -1041,14 +1060,19 @@ class GracefulExitTests(unittest.TestCase):
             await asyncio.Event().wait()
 
         try:
-            with mock.patch.object(entry, "SHUTDOWN_TIMEOUT", shutdown_timeout):
+            with mock.patch.object(entry, "SHUTDOWN_TIMEOUT", shutdown_timeout), mock.patch.object(
+                engine.store, "close", store_close
+            ):
                 entry._run(app, "127.0.0.1", port, body, handle_signals=True)
             elapsed = time.monotonic() - seen["interrupted"]
         finally:
             if "sock" in seen:
                 seen["sock"].close()
         self.assertEqual(seen["listeners"], 1)
-        self.assertLess(elapsed, shutdown_timeout / 2, f"the exit took {elapsed:.2f} s")
+        # (how the stream handler ended, open streams, engine listeners) when Engine.close closed the store
+        self.assertEqual(seen.get("at_store_close"), ("returned", 0, 0))
+        # only a generous upper guard: the shutdown wait this test is about would take twice shutdown_timeout
+        self.assertLess(elapsed, shutdown_timeout, f"the exit took {elapsed:.2f} s")
         self.assertIsNone(engine.session)
         with self.assertRaises(sqlite3.ProgrammingError):
             engine.store.conn.execute("SELECT 1")
