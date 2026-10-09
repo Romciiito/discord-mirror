@@ -451,7 +451,8 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
     async def test_checked_token_reports_the_user_and_keeps_nothing(self) -> None:
         discord = FakeDiscord()
         self.engine.session = discord
-        report = await self.engine.check_token(' "' + TOKEN + '"\n')
+        with self.assertNoLogs("mirror.engine", "WARNING"):
+            report = await self.engine.check_token(' "' + TOKEN + '"\n')
         self.assertEqual(report, {"result": "works", "user": {"id": "7", "username": "ada", "global_name": ""}})
         self.assertEqual(discord.sent, [("https://discord.com/api/v9/users/@me", TOKEN)])
         self.assertEqual(self.store.token(), "")
@@ -468,20 +469,76 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(caught.exception.status, 400)
         self.assertEqual(discord.sent, [])
 
-    async def test_checked_token_refused_by_discord_is_rejected(self) -> None:
-        for answer in (
-            FakeResp('{"message": "401: Unauthorized"}', 401),
-            FakeResp('{"message": "Forbidden"}', 403),
-            FakeResp("{}"),
+    async def test_checked_token_refused_by_discord_is_rejected_with_its_reason(self) -> None:
+        verify = "You need to verify your account in order to perform this action"
+        for answer, status, reason in (
+            (FakeResp('{"message": "401: Unauthorized", "code": 0}', 401), 401, "401: Unauthorized"),
+            (FakeResp('{"message": "%s", "code": 40002}' % verify, 403), 403, f"403: {verify} (code 40002)"),
+            (FakeResp('{"message": "Forbidden"}', 403), 403, "403: Forbidden"),
         ):
             with self.subTest(status=answer.status, body=answer.body):
                 self.engine.session = FakeDiscord(answer)
-                self.assertEqual(await self.engine.check_token(TOKEN), {"result": "rejected"})
+                report = await self.engine.check_token(TOKEN)
+                self.assertEqual(report, {"result": "rejected", "status": status, "reason": reason})
+
+    async def test_checked_token_answered_by_something_else_than_discord_is_blocked(self) -> None:
+        page = "<html><head><title>Access denied</title></head><body>error code: 1020</body></html>"
+        for answer, status, reason in (
+            (FakeResp(page, 403), 403, "HTTP 403, Cloudflare error code 1020"),
+            (FakeResp("<html><body>Forbidden</body></html>", 403), 403, "HTTP 403, not a Discord answer"),
+            (FakeResp("<html><body>Discord</body></html>"), 200, "HTTP 200, not a Discord answer"),
+            (FakeResp("{}"), 200, "HTTP 200, not a Discord answer"),
+            (FakeResp("error code: 1015", 429), 429, "HTTP 429, Cloudflare error code 1015"),
+        ):
+            with self.subTest(status=answer.status, body=answer.body):
+                discord = FakeDiscord(answer)
+                self.engine.session = discord
+                with mock.patch.object(discord_api.asyncio, "sleep", mock.AsyncMock()):
+                    report = await self.engine.check_token(TOKEN)
+                self.assertEqual(report, {"result": "blocked", "status": status, "reason": reason})
+                self.assertEqual(len(discord.sent), 5 if status == 429 else 1)
+
+    async def test_checked_token_that_stays_rate_limited_by_discord_still_raises(self) -> None:
+        self.engine.session = FakeDiscord(FakeResp('{"retry_after": 0.5}', 429))
+        with mock.patch.object(discord_api.asyncio, "sleep", mock.AsyncMock()):
+            with self.assertRaises(ApiError) as caught:
+                await self.engine.check_token(TOKEN)
+        self.assertEqual((caught.exception.status, str(caught.exception)), (429, "GET /users/@me stayed rate limited"))
+
+    async def test_a_token_check_that_does_not_work_is_logged_without_the_token(self) -> None:
+        page = "<html><body>error code: 1020</body></html>"
+        for answer, line in (
+            (FakeResp('{"message": "401: Unauthorized", "code": 0}', 401), "token check rejected (HTTP 401): 401: Unauthorized"),
+            (FakeResp(page, 403), "token check blocked (HTTP 403): HTTP 403, Cloudflare error code 1020"),
+            (FakeResp("bad gateway", 502), "token check unreachable (HTTP 502): GET /users/@me failed (HTTP 502)"),
+            (aiohttp.ClientConnectionError("connection refused"), "token check unreachable: connection refused"),
+            (FakeResp('{"message": "404: Not Found", "code": 0}', 404), "token check failed (HTTP 404): 404: Not Found"),
+        ):
+            with self.subTest(line=line):
+                self.engine.session = FakeDiscord(answer)
+                with self.assertLogs("mirror.engine", "WARNING") as logs:
+                    try:
+                        await self.engine.check_token(TOKEN)
+                    except ApiError:
+                        pass
+                self.assertEqual([(item.levelname, item.getMessage()) for item in logs.records], [("WARNING", line)])
+                self.assertNotIn(TOKEN, "\n".join(logs.output))
 
     async def test_checked_token_on_discord_5xx_is_unreachable(self) -> None:
         self.engine.session = FakeDiscord(FakeResp("bad gateway", 502))
         report = await self.engine.check_token(TOKEN)
         self.assertEqual(report, {"result": "unreachable", "reason": "GET /users/@me failed (HTTP 502)"})
+
+    async def test_an_answer_without_a_user_is_not_a_discord_answer(self) -> None:
+        for body, status, detail in (
+            ("<html><body>error code: 1020</body></html>", 200, "GET /users/@me failed (HTTP 200, Cloudflare error code 1020)"),
+            ("", 204, "GET /users/@me failed (HTTP 204, not a Discord answer)"),
+        ):
+            with self.subTest(body=body):
+                http = DiscordHTTP(FakeDiscord(FakeResp(body, status)), TOKEN, build_properties(1, 131))
+                with self.assertRaises(discord_api.NotDiscordAnswer) as caught:
+                    await http.me()
+                self.assertEqual((caught.exception.status, str(caught.exception)), (status, detail))
 
     async def test_a_request_that_stays_rate_limited_names_the_cloudflare_code(self) -> None:
         for body, detail in (

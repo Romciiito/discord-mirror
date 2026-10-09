@@ -10,7 +10,15 @@ import aiohttp
 
 from .access import TEXT_TYPES, readable_plan
 from .provision import copy_layout, same_name, webhook_name
-from .discord_api import ApiError, DiscordHTTP, clean_token, clean_webhook, load_properties, webhook_parts
+from .discord_api import (
+    ApiError,
+    DiscordHTTP,
+    NotDiscordAnswer,
+    clean_token,
+    clean_webhook,
+    load_properties,
+    webhook_parts,
+)
 from .gateway import Gateway
 from .relay import Relay, safe_embeds, view_from_message
 from .store import Store
@@ -164,16 +172,25 @@ class Engine:
             raise ApiError(400, "token looks too short")
         if self._properties is None:
             self._properties = await load_properties(self.session)
+        # mando.log gets the status and the reason of every check that does not work, never the token
         try:
             me = await DiscordHTTP(self.session, token, self._properties).me()
         except ApiError as exc:
-            if exc.status in (401, 403):
-                return {"result": "rejected"}
             if exc.status >= 500:
-                return {"result": "unreachable", "reason": str(exc)}
-            raise
+                report = {"result": "unreachable", "reason": str(exc)}
+            elif isinstance(exc, NotDiscordAnswer):
+                report = {"result": "blocked", "status": exc.status, "reason": exc.reason}
+            elif exc.status in (401, 403):
+                report = {"result": "rejected", "status": exc.status, "reason": exc.reason}
+            else:
+                log.warning("token check failed (HTTP %s): %s", exc.status, exc)
+                raise
+            log.warning("token check %s (HTTP %s): %s", report["result"], exc.status, report["reason"])
+            return report
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            return {"result": "unreachable", "reason": str(exc) or "network error"}
+            reason = str(exc) or "network error"
+            log.warning("token check unreachable: %s", reason)
+            return {"result": "unreachable", "reason": reason}
         user = {
             "id": str(me.get("id") or ""),
             "username": me.get("username") or "",
