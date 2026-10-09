@@ -218,6 +218,13 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         resp = await client.get("/static/app.js")
         self.assertEqual(resp.status, 404)
 
+    async def test_copy_and_reset_routes_are_gone(self) -> None:
+        client = await self.client()
+        resp = await client.post("/api/guilds/5/copy")
+        self.assertEqual(resp.status, 404)
+        resp = await client.post("/api/destination/reset")
+        self.assertEqual(resp.status, 404)
+
 
 class MainTests(unittest.TestCase):
     """configure_logging opens a file under DATA_DIR; every test closes the handlers it added, or

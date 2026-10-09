@@ -9,7 +9,7 @@ from typing import Any
 import aiohttp
 
 from .access import TEXT_TYPES, readable_plan
-from .provision import destination_layout, webhook_name
+from .provision import webhook_name
 from .discord_api import ApiError, DiscordHTTP, clean_token, clean_webhook, load_properties, webhook_parts
 from .gateway import Gateway
 from .relay import Relay, safe_embeds, view_from_message
@@ -17,8 +17,6 @@ from .store import Store
 
 log = logging.getLogger("mirror.engine")
 WINDOWS = sys.platform == "win32"
-
-GONE = 'the mirror server is gone or cannot be used, pick "new server on next start"'
 
 
 class Engine:
@@ -282,154 +280,6 @@ class Engine:
             return []
         return [str(role) for role in member.get("roles") or []]
 
-    async def copy_guild(self, guild_id: str) -> dict[str, Any]:
-        if not guild_id.isdigit():
-            raise ApiError(400, "unknown server")
-        http = self._require_http()
-        listed = None
-        for guild in await http.guilds():
-            if str(guild.get("id")) == guild_id:
-                listed = guild
-                break
-        if listed is None:
-            raise ApiError(404, "server not found")
-        raw = await http.channels(guild_id)
-        role_ids: list[str] = []
-        try:
-            member = await http.call("GET", f"/users/@me/guilds/{guild_id}/member")
-            if isinstance(member, dict):
-                role_ids = [str(role) for role in member.get("roles") or []]
-        except ApiError:
-            role_ids = []
-        user_id = self.user["id"] if self.user else ""
-        try:
-            base = int(listed.get("permissions") or 0)
-        except (TypeError, ValueError):
-            base = 0
-        plan = readable_plan(
-            raw,
-            base=base,
-            owner=bool(listed.get("owner")),
-            user_id=user_id,
-            guild_id=guild_id,
-            role_ids=role_ids,
-        )
-        if not plan["channels"]:
-            raise ApiError(400, "no channel in that server can be read")
-        name = str(listed.get("name") or "server")[:100]
-        self.note(f"copying {name}")
-        for item in plan["skipped"]:
-            self.note(f"skip #{item['name']} ({item['reason']})")
-        if plan["other"]:
-            self.note(f"left out {plan['other']} channel(s) that are not text")
-        if any(item.get("type") == 5 for item in plan["channels"]):
-            self.note("announcement channels are created as text channels")
-        created = await http.call("POST", "/guilds", json={"name": name})
-        if not isinstance(created, dict) or not created.get("id"):
-            raise ApiError(500, "server was not created")
-        dest_id = str(created["id"])
-        self.note("server created")
-        wired = await self._wire_copy(http, dest_id, plan)
-        options = self.store.options()
-        rows = [
-            {
-                "channel_id": item["source_id"],
-                "guild_id": guild_id,
-                "guild_name": name,
-                "channel_name": item["name"],
-                "webhook_url": item["webhook_url"],
-                "enabled": True,
-            }
-            for item in wired
-        ]
-        self.store.set_options(options["backfill"], options["include_threads"], True)
-        self.store.replace_selection(rows)
-        self.note(f"webhooks on {len(rows)} channel(s)")
-        if self.running:
-            await self.refresh()
-        else:
-            await self.start()
-        return {
-            "server": name,
-            "destination_id": dest_id,
-            "copied": len(rows),
-            "skipped": plan["skipped"],
-            "other": plan["other"],
-        }
-
-    async def _wire_copy(self, http: DiscordHTTP, dest_id: str, plan: dict[str, Any]) -> list[dict[str, str]]:
-        parents: dict[str, str] = {}
-        made: set[str] = set()
-        for category in plan["categories"]:
-            body = {"name": str(category.get("name") or "category")[:100], "type": 4}
-            try:
-                created = await http.call("POST", f"/guilds/{dest_id}/channels", json=body)
-            except ApiError as exc:
-                self.note(f"category {body['name']} was not created ({exc})")
-                created = None
-            if isinstance(created, dict) and created.get("id"):
-                parents[str(category.get("id"))] = str(created["id"])
-                made.add(str(created["id"]))
-            await self._wait(0.3)
-        wired: list[dict[str, str]] = []
-        for channel in plan["channels"]:
-            source_name = str(channel.get("name") or "channel")
-            body: dict[str, Any] = {"name": source_name[:100], "type": 0}
-            parent = parents.get(str(channel.get("parent_id") or ""))
-            if parent:
-                body["parent_id"] = parent
-            topic = str(channel.get("topic") or "").strip()
-            if topic:
-                body["topic"] = topic[:1024]
-            if channel.get("nsfw"):
-                body["nsfw"] = True
-            try:
-                created = await http.call("POST", f"/guilds/{dest_id}/channels", json=body)
-            except ApiError as exc:
-                self.note(f"#{source_name} was not created ({exc})")
-                continue
-            if not isinstance(created, dict) or not created.get("id"):
-                self.note(f"#{source_name} was not created")
-                continue
-            dest_channel = str(created["id"])
-            made.add(dest_channel)
-            await self._wait(0.25)
-            try:
-                hook = await http.call(
-                    "POST",
-                    f"/channels/{dest_channel}/webhooks",
-                    json={"name": webhook_name(source_name)},
-                )
-            except ApiError as exc:
-                self.note(f"webhook for #{source_name} failed ({exc})")
-                continue
-            if not isinstance(hook, dict) or not hook.get("id") or not hook.get("token"):
-                self.note(f"webhook for #{source_name} failed")
-                continue
-            try:
-                url = clean_webhook(f"https://discord.com/api/webhooks/{hook['id']}/{hook['token']}")
-            except ApiError as exc:
-                self.note(f"webhook for #{source_name} failed ({exc})")
-                continue
-            wired.append({"source_id": str(channel.get("id")), "name": source_name[:80], "webhook_url": url})
-            self.note(f"#{source_name}")
-            await self._wait(0.25)
-        if not wired:
-            raise ApiError(400, "no webhook could be created")
-        try:
-            leftovers = await http.channels(dest_id)
-        except ApiError:
-            leftovers = []
-        for channel in leftovers:
-            channel_id = str(channel.get("id") or "")
-            if channel_id and channel_id not in made:
-                try:
-                    await http.call("DELETE", f"/channels/{channel_id}")
-                    await self._wait(0.2)
-                except ApiError:
-                    self.note(f"left default #{channel.get('name') or channel_id}")
-        return wired
-
     def save_setup(self, body: dict[str, Any]) -> None:
         try:
             backfill = int(body.get("backfill") or 0)
@@ -438,8 +288,6 @@ class Engine:
         backfill = max(0, min(backfill, 500))
         mirror = bool(body.get("mirror"))
         include_threads = bool(body.get("include_threads"))
-        global_webhook = clean_webhook(str(body.get("global_webhook") or ""))
-        dest_name = body.get("dest_name")
         cleaned = []
         for row in body.get("channels") or []:
             channel_id = str(row.get("channel_id") or row.get("id") or "")
@@ -462,11 +310,6 @@ class Engine:
         self.store.set_options(backfill, include_threads, mirror)
         self.store.replace_selection(cleaned)
 
-    async def reset_destination(self) -> None:
-        if self.running:
-            await self.stop()
-        self.note("next start creates a new server")
-
     async def start(self) -> None:
         async with self._setup:
             await self._start()
@@ -476,20 +319,17 @@ class Engine:
         rows = [row for row in self.store.selection() if row["enabled"]]
         if not rows:
             raise ApiError(400, "select servers first")
-        was_running = self.running
-        if any(not str(row.get("webhook_url") or "").strip() for row in rows):
-            await self._provision(rows)
-            rows = [row for row in self.store.selection() if row["enabled"] and str(row.get("webhook_url") or "").strip()]
-        if not rows:
-            raise ApiError(400, "the mirror server could not be created")
+        # the Start rule (decisions 9f, 9k): Mando never creates a webhook at Start; the CLI jumps to this row
+        missing = next((row for row in rows if not str(row.get("webhook_url") or "").strip()), None)
+        if missing is not None:
+            raise ApiError(400, f"#{missing.get('channel_name') or missing['channel_id']} has no webhook")
+        if self.running:
+            await self.refresh()
+            return
         options = self.store.options()
         if not options["mirror"]:
             self.store.set_options(options["backfill"], options["include_threads"], True)
             options = self.store.options()
-        if was_running:
-            if self.running:
-                await self.refresh()
-            return
         self._index(rows, options["include_threads"])
         if options["include_threads"]:
             await self._load_threads(http, rows)
@@ -509,128 +349,6 @@ class Engine:
             self._backfill_task = asyncio.create_task(self._backfill(rows, options["backfill"]))
         self._emit({"kind": "status", "running": True, "status": self.status, "mirrored": self.mirrored})
 
-    async def _provision(self, rows: list[dict[str, Any]]) -> None:
-        http = self._require_http()
-        missing = [row for row in rows if not str(row.get("webhook_url") or "").strip()]
-        options = self.store.options()
-        layout = destination_layout(missing, options.get("dest_name", ""))
-        if not layout["channels"]:
-            raise ApiError(400, "select servers first")
-        dest_id = options.get("dest_guild_id", "")
-        fresh = False
-        existing: list[dict[str, Any]] = []
-        if not dest_id:
-            created = await http.call("POST", "/guilds", json={"name": layout["name"]})
-            if not isinstance(created, dict) or not created.get("id"):
-                raise ApiError(500, "server was not created")
-            dest_id = str(created["id"])
-            fresh = True
-            self.note(f"server created: {layout['name']}")
-        else:
-            try:
-                existing = await http.channels(dest_id)
-            except ApiError as exc:
-                if exc.status in (403, 404):
-                    raise ApiError(400, GONE) from exc
-                raise
-            self.note("adding channels to the mirror server")
-        pairs = await self._wire_layout(http, dest_id, layout, fresh, existing)
-        self.store.fill_webhooks(pairs)
-        self.note(f"webhooks on {len(pairs)} channel(s)")
-
-    async def _wire_layout(
-        self,
-        http: DiscordHTTP,
-        dest_id: str,
-        layout: dict[str, Any],
-        fresh: bool,
-        existing: list[dict[str, Any]] | None = None,
-    ) -> list[tuple[str, str]]:
-        parents: dict[str, str] = {}
-        made: set[str] = set()
-        known: dict[str, str] = {}
-        for item in existing or []:
-            if isinstance(item, dict) and item.get("type") == 4 and item.get("id"):
-                known.setdefault(str(item.get("name") or "").casefold(), str(item["id"]))
-        for category in layout["categories"]:
-            name = str(category["name"])
-            found = known.get(name.casefold())
-            if found:
-                parents[str(category["key"])] = found
-                continue
-            try:
-                created = await http.call(
-                    "POST",
-                    f"/guilds/{dest_id}/channels",
-                    json={"name": name, "type": 4},
-                )
-            except ApiError as exc:
-                self.note(f"category {name} was not created ({exc})")
-                await self._wait(0.3)
-                continue
-            if isinstance(created, dict) and created.get("id"):
-                parents[str(category["key"])] = str(created["id"])
-                made.add(str(created["id"]))
-                known[name.casefold()] = str(created["id"])
-            else:
-                self.note(f"category {name} was not created")
-            await self._wait(0.3)
-        pairs: list[tuple[str, str]] = []
-        for channel in layout["channels"]:
-            body: dict[str, Any] = {"name": channel["name"], "type": 0}
-            parent = parents.get(channel["category_key"])
-            if parent:
-                body["parent_id"] = parent
-            if channel.get("topic"):
-                body["topic"] = channel["topic"]
-            try:
-                created = await http.call("POST", f"/guilds/{dest_id}/channels", json=body)
-            except ApiError as exc:
-                self.note(f"#{channel['name']} was not created ({exc})")
-                continue
-            if not isinstance(created, dict) or not created.get("id"):
-                self.note(f"#{channel['name']} was not created")
-                continue
-            dest_channel = str(created["id"])
-            made.add(dest_channel)
-            await self._wait(0.25)
-            try:
-                hook = await http.call(
-                    "POST",
-                    f"/channels/{dest_channel}/webhooks",
-                    json={"name": webhook_name(channel["name"])},
-                )
-            except ApiError as exc:
-                self.note(f"webhook for #{channel['name']} failed ({exc})")
-                continue
-            if not isinstance(hook, dict) or not hook.get("id") or not hook.get("token"):
-                self.note(f"webhook for #{channel['name']} failed")
-                continue
-            try:
-                url = clean_webhook(f"https://discord.com/api/webhooks/{hook['id']}/{hook['token']}")
-            except ApiError as exc:
-                self.note(f"webhook for #{channel['name']} failed ({exc})")
-                continue
-            pairs.append((channel["source_id"], url))
-            self.note(f"#{channel['name']}")
-            await self._wait(0.25)
-        if fresh:
-            try:
-                leftovers = await http.channels(dest_id)
-            except ApiError:
-                leftovers = []
-            for channel in leftovers:
-                channel_id = str(channel.get("id") or "")
-                if channel_id and channel_id not in made:
-                    try:
-                        await http.call("DELETE", f"/channels/{channel_id}")
-                        await self._wait(0.2)
-                    except ApiError:
-                        self.note(f"left default #{channel.get('name') or channel_id}")
-        if not pairs:
-            raise ApiError(400, "no webhook could be created")
-        return pairs
-
     async def refresh(self) -> None:
         if not self.running or self.gateway is None or self.http is None:
             return
@@ -641,12 +359,15 @@ class Engine:
         self._index(rows, options["include_threads"])
         if options["include_threads"]:
             await self._load_threads(self.http, rows)
-        self.gateway.set_subscriptions(self._guild_map(rows), options["include_threads"])
-        await self.gateway.resubscribe()
+        gateway = self.gateway
+        if gateway is None or not self.running:
+            return  # stopped while the threads were listed
+        gateway.set_subscriptions(self._guild_map(rows), options["include_threads"])
+        await gateway.resubscribe()
         self.note(f"selection updated, {len(rows)} channel(s)")
-        missing = [row for row in rows if not str(row.get("webhook_url") or "").strip()]
-        if missing:
-            self.note(f"{len(missing)} channel(s) need start/resume")
+        for row in rows:
+            if not str(row.get("webhook_url") or "").strip():
+                self.note(f"#{row.get('channel_name') or row['channel_id']} has no webhook, not mirrored")
 
     async def stop(self) -> None:
         self.running = False
@@ -868,20 +589,18 @@ class Engine:
 
     def _webhook_for(self, channel_id: str) -> str:
         parent = self.threads.get(channel_id, channel_id)
-        options = self.store.options()
         for row in self.store.selection():
             if row["channel_id"] == parent and row["enabled"]:
-                return row["webhook_url"] or options.get("global_webhook", "")
+                return row["webhook_url"]
         return ""
 
     def _prefix(self, url: str) -> bool:
         users = 0
-        options = self.store.options()
         for row in self.store.selection():
             if not row["enabled"]:
                 continue
-            target = row["webhook_url"] or options.get("global_webhook", "")
-            if target == url:
+            target = row["webhook_url"]
+            if target and target == url:
                 users += 1
         return users > 1
 
@@ -889,12 +608,7 @@ class Engine:
         hook = str(message.get("webhook_id") or "")
         if not hook:
             return False
-        options = self.store.options()
         known = set()
-        if options.get("global_webhook", ""):
-            parts = webhook_parts(options.get("global_webhook", ""))
-            if parts:
-                known.add(parts[0])
         for row in self.store.selection():
             parts = webhook_parts(row.get("webhook_url") or "")
             if parts:

@@ -103,20 +103,6 @@ async def channels(request: web.Request) -> web.Response:
     return web.json_response({"channels": await request.app["engine"].channels(request.match_info["guild_id"])})
 
 
-async def reset_destination(request: web.Request) -> web.Response:
-    engine: Engine = request.app["engine"]
-    await engine.reset_destination()
-    return web.json_response(engine.snapshot())
-
-
-async def copy_guild(request: web.Request) -> web.Response:
-    engine: Engine = request.app["engine"]
-    report = await engine.copy_guild(request.match_info["guild_id"])
-    body = engine.snapshot()
-    body["report"] = report
-    return web.json_response(body)
-
-
 async def save_setup(request: web.Request) -> web.Response:
     engine: Engine = request.app["engine"]
     engine.save_setup(await _json(request))
@@ -223,8 +209,6 @@ def create_app(data_dir: str, host: str = "127.0.0.1", port: int = 8765) -> web.
     app.router.add_delete("/api/session", close_session)
     app.router.add_get("/api/guilds", guilds)
     app.router.add_get("/api/guilds/{guild_id}/channels", channels)
-    app.router.add_post("/api/guilds/{guild_id}/copy", copy_guild)
-    app.router.add_post("/api/destination/reset", reset_destination)
     app.router.add_put("/api/setup", save_setup)
     app.router.add_post("/api/start", start)
     app.router.add_post("/api/stop", stop)

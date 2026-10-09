@@ -14,7 +14,6 @@ import aiohttp
 from mirror import access, engine as engine_mod
 from mirror.discord_api import ApiError
 from mirror.engine import Engine
-from mirror.provision import destination_layout
 from mirror.store import Store
 
 HOOK = "https://discord.com/api/webhooks/111/aaa"
@@ -532,84 +531,85 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.engine.holding, [])
         self.assertFalse(self.engine.backfilling)
 
-    async def test_wire_layout_reuses_category_and_survives_failure(self) -> None:
-        http = FakeHTTP(existing=[{"id": "c1", "type": 4, "name": "desk"}], fail=("Other",))
-        layout = destination_layout(
-            [row("10", name="discord-updates"), row("11", name="lobby", guild_id="6") | {"guild_name": "Other"}],
-            "mirror",
-        )
-        pairs = await self.engine._wire_layout(http, "500", layout, False, http.existing)
-        posts = [(path, body) for method, path, body in http.calls if method == "POST"]
-        names = [body.get("name") for path, body in posts if path == "/guilds/500/channels"]
-        self.assertNotIn("Desk", names)
-        self.assertIn("Other", names)
-        created = {body["name"]: body for path, body in posts if path == "/guilds/500/channels" and body.get("type") == 0}
-        self.assertEqual(created["discord-updates"]["parent_id"], "c1")
-        self.assertNotIn("parent_id", created["lobby"])
-        self.assertEqual([source for source, url in pairs], ["10", "11"])
-        self.assertTrue(any("category Other was not created" in note for note in self.notes()))
-        hooks = [body["name"] for path, body in posts if path.endswith("/webhooks")]
-        self.assertEqual(len(hooks), 2)
-        for name in hooks:
-            self.assertNotIn("discord", name.casefold())
-            self.assertNotIn("clyde", name.casefold())
-        self.assertFalse(any(method == "DELETE" for method, path, body in http.calls))
-
-    async def test_start_while_running_provisions_and_refreshes(self) -> None:
+    async def test_start_refuses_the_first_ticked_channel_without_a_webhook(self) -> None:
         http = FakeHTTP()
         self.engine.http = http
-        self.store.replace_selection([row("10", HOOK)])
+        self.store.replace_selection([row("11", name="lobby"), row("10", HOOK, name="general")])
         with mock.patch.object(engine_mod, "Gateway", FakeGateway):
-            await self.engine.start()
-            self.assertTrue(self.engine.running)
-            self.assertEqual(len(FakeGateway.made), 1)
-            self.store.replace_selection([row("10"), row("11", name="lobby")])
-            await self.engine.start()
-            gateway = FakeGateway.made[0]
-            self.assertEqual(len(FakeGateway.made), 1)
-            self.assertTrue(self.engine.running)
-            hooks = {item["channel_id"]: item["webhook_url"] for item in self.store.selection()}
-            self.assertEqual(hooks["10"], HOOK)
-            self.assertTrue(hooks["11"].startswith("https://discord.com/api/webhooks/"))
-            self.assertEqual(sorted(gateway.subs[-1]["5"]), ["10", "11"])
-            self.assertEqual(gateway.resubscribed, 1)
-            self.assertNotIn("need start/resume", " ".join(self.notes()))
-            await self.engine.stop()
+            with self.assertRaises(ApiError) as caught:
+                await self.engine.start()
+        self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(str(caught.exception), "#lobby has no webhook")
+        self.assertFalse(self.engine.running)
+        self.assertEqual(FakeGateway.made, [])
+        self.assertFalse(any(method == "POST" for method, path, body in http.calls))
+        self.assertFalse(self.store.options()["mirror"])
 
-    async def test_stop_during_running_start_is_respected(self) -> None:
+    async def test_start_while_running_refreshes_instead_of_starting_again(self) -> None:
         self.engine.http = FakeHTTP()
         self.store.replace_selection([row("10", HOOK)])
         with mock.patch.object(engine_mod, "Gateway", FakeGateway):
             await self.engine.start()
             self.assertTrue(self.engine.running)
-            self.store.replace_selection([row("10"), row("11", name="lobby")])
-            gate = asyncio.Event()
-            entered = asyncio.Event()
+            self.store.replace_selection([row("10", HOOK), row("11", HOOK_B, name="lobby")])
+            await self.engine.start()
+            gateway = FakeGateway.made[0]
+            self.assertEqual(len(FakeGateway.made), 1)
+            self.assertEqual(sorted(gateway.subs[-1]["5"]), ["10", "11"])
+            self.assertEqual(gateway.resubscribed, 1)
+            await self.engine.stop()
 
-            async def held(seconds: float) -> None:
-                entered.set()
-                await gate.wait()
+    async def test_stop_during_a_running_refresh_is_respected(self) -> None:
+        http = FakeHTTP()
+        gate = asyncio.Event()
+        entered = asyncio.Event()
 
-            self.engine._wait = held
+        async def held(guild_id: str) -> list[dict]:
+            entered.set()
+            await gate.wait()
+            return []
+
+        self.engine.http = http
+        self.store.replace_selection([row("10", HOOK)])
+        self.store.set_options(0, True, True)
+        with mock.patch.object(engine_mod, "Gateway", FakeGateway):
+            await self.engine.start()
+            http.active_threads = held
+            self.store.replace_selection([row("10", HOOK), row("11", HOOK_B, name="lobby")])
             task = asyncio.create_task(self.engine.start())
             await asyncio.wait_for(entered.wait(), 1)
             await self.engine.stop()
-            self.assertFalse(self.engine.running)
             gate.set()
             await asyncio.wait_for(task, 1)
             self.assertFalse(self.engine.running)
             self.assertEqual(len(FakeGateway.made), 1)
+            self.assertEqual(FakeGateway.made[0].resubscribed, 0)
 
-    async def test_refresh_notes_missing_webhooks(self) -> None:
+    async def test_refresh_notes_a_ticked_channel_without_a_webhook(self) -> None:
         self.engine.http = FakeHTTP()
         self.store.replace_selection([row("10", HOOK)])
         with mock.patch.object(engine_mod, "Gateway", FakeGateway):
             await self.engine.start()
-            self.store.replace_selection([row("10"), row("11", name="lobby")])
+            self.store.replace_selection([row("10", HOOK), row("11", name="lobby")])
             await self.engine.refresh()
-            self.assertTrue(any("1 channel(s) need start/resume" in note for note in self.notes()))
+            self.assertIn("#lobby has no webhook, not mirrored", self.notes())
             self.assertEqual(sorted(FakeGateway.made[0].subs[-1]["5"]), ["10", "11"])
             await self.engine.stop()
+
+    def test_save_setup_keeps_only_the_three_options(self) -> None:
+        self.engine.save_setup({"backfill": 999, "include_threads": True, "mirror": True, "global_webhook": HOOK, "dest_name": "x", "channels": [row("10", HOOK)]})
+        self.assertEqual(self.store.options(), {"backfill": 500, "include_threads": True, "mirror": True})
+        self.assertEqual(self.store.selection()[0]["webhook_url"], HOOK)
+
+    def test_prefix_only_when_two_channels_share_a_webhook(self) -> None:
+        self.store.replace_selection([row("10", HOOK), row("11", HOOK_B, name="lobby"), row("12", "", name="quiet")])
+        self.assertFalse(self.engine._prefix(HOOK))
+        self.assertFalse(self.engine._prefix(""))
+        self.store.replace_selection([row("10", HOOK), row("11", HOOK, name="lobby")])
+        self.assertTrue(self.engine._prefix(HOOK))
+        self.assertFalse(hasattr(self.engine, "copy_guild"))
+        self.assertFalse(hasattr(self.engine, "reset_destination"))
+        self.assertFalse(hasattr(self.engine, "_provision"))
 
     def test_text_types_consistent(self) -> None:
         self.assertIs(engine_mod.TEXT_TYPES, access.TEXT_TYPES)
