@@ -591,7 +591,9 @@ class Controller:
         if key == "Enter":
             url = self.draft.strip()
             if not url:
-                await self._close_webhook_row(untick=True)
+                # a channel this Enter ticked lived in memory only, so unticking it restores the stored selection and
+                # nothing is saved; a channel ticked before was stored, so unticking it is saved
+                await self._close_webhook_row(untick=True, save=not self.webhook_new)
                 return
             try:
                 cleaned = clean_webhook(url)

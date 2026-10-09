@@ -874,7 +874,9 @@ class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("c1", ui.picked)
         await keys(ui, "Enter", "Escape")
         self.assertNotIn("c1", ui.picked)
-        self.assertEqual(engine.calls[-1][1]["channels"], [])
+        # both ticks lived in memory only, so the stored selection never changed and nothing was saved
+        self.assertNotIn("save_setup", [call[0] for call in engine.calls])
+        self.assertEqual(engine.selection, [])
 
     async def test_escape_with_text_cancels_the_edit(self) -> None:
         # Esc puts the channel back as it was before Enter: a channel this Enter ticked is unticked again (the
@@ -945,6 +947,21 @@ class OwnWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((ui.typing, ui.webhook_channel["id"], ui.webhook_new), ("webhook", "c1", True))
         await ui.paste("https://")
         await keys(ui, "Escape")
+        self.assertIsNone(ui.typing)
+        self.assertEqual(engine.calls, before)
+        self.assertEqual(set(ui.picked), {"c2"})
+
+    async def test_empty_enter_on_a_channel_its_enter_ticked_saves_and_refreshes_nothing(self) -> None:
+        # the empty Enter unticks what the first Enter ticked in memory only, so the selection is the stored one
+        ui, engine = await self.open_channels()
+        engine.selection = [{"channel_id": "c2", "guild_id": "g1", "guild_name": "Qwen", "channel_name": "dev",
+                             "parent": "", "topic": "", "webhook_url": HOOK, "enabled": True}]
+        engine.running = True
+        ui.refresh()
+        before = list(engine.calls)
+        await keys(ui, "Enter")
+        self.assertEqual((ui.typing, ui.webhook_channel["id"], ui.webhook_new), ("webhook", "c1", True))
+        await keys(ui, "Enter")
         self.assertIsNone(ui.typing)
         self.assertEqual(engine.calls, before)
         self.assertEqual(set(ui.picked), {"c2"})
