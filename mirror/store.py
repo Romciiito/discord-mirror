@@ -231,16 +231,22 @@ class Store:
         ).fetchone()
         if found is not None:
             return bool(found["shared"])
-        other = self.conn.execute(
-            "SELECT 1 FROM fills WHERE target_guild_id = ? AND source_guild_id != ? LIMIT 1", (target, source)
-        ).fetchone()
-        shared = other is not None
+        shared = self.holds_another(target, source)
         self.conn.execute(
             "INSERT INTO fills (target_guild_id, source_guild_id, shared) VALUES (?, ?, ?)",
             (target, source, int(shared)),
         )
         self.conn.commit()
         return shared
+
+    def holds_another(self, target_guild_id: str, source_guild_id: str) -> bool:
+        """Whether the fills record holds a source other than this one in that target, whichever came first
+        (decision 9o): a channel of the same name there may then be the other source's."""
+        other = self.conn.execute(
+            "SELECT 1 FROM fills WHERE target_guild_id = ? AND source_guild_id != ? LIMIT 1",
+            (str(target_guild_id), str(source_guild_id)),
+        ).fetchone()
+        return other is not None
 
     def targets(self) -> dict[str, dict[str, Any]]:
         rows = self.conn.execute("SELECT source_guild_id, target_guild_id, target_name, shared FROM targets").fetchall()

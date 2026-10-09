@@ -195,6 +195,20 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(again.record_fill("7", "900"))
             again.close()
 
+    def test_a_target_tells_whether_it_holds_another_source(self) -> None:
+        # the first source keeps shared False after a second one arrived; a fill of it must still know that the
+        # target holds another source, whose channels may carry the same names (decision 9o)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            self.assertFalse(store.holds_another("900", "5"))
+            self.assertFalse(store.record_fill("5", "900"))
+            self.assertFalse(store.holds_another("900", "5"))
+            self.assertTrue(store.holds_another("900", "6"))
+            self.assertTrue(store.record_fill("6", "900"))
+            self.assertTrue(store.holds_another("900", "5"))
+            self.assertFalse(store.holds_another("901", "5"))
+            store.close()
+
     def test_old_database_opens_and_ignores_the_shared_server_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conn = sqlite3.connect(Path(tmp) / "state.db")

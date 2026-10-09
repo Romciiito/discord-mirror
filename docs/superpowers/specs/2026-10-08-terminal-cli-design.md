@@ -175,6 +175,18 @@ Decisions (owner):
   (`filled: 0`); keeping the old URL in `hooks` makes an untick and a retick send the
   channel back to it. Keeping an own webhook through a fill needs a mark on each URL a
   fill made; the owner decides whether it is wanted.
+- **9i and 9o together, found in the Task 4 review of plan B, round 2 (2026-10-09; plan
+  B's rule, not an owner decision yet).** A fill first looks for a channel of the same
+  name under the source channel's own category (loose for a loose one). A channel of the
+  same name elsewhere, such as a fresh server's own `general` under "Text Channels", is
+  reused (9i) when it carries the row's webhook, or, when none does, only while the
+  target holds no other source, because with a second source there it may be that
+  source's channel and the two would mix (9o). Each existing channel serves one source
+  channel only, so two source channels of the same name in one category get two
+  channels. A channel whose category Discord refuses is skipped, never created loose.
+  Measured with the engine's fakes: the same-category rule alone made a second
+  `general` beside the server's own; "the first of them for the first source" gave the
+  first source, refilled after a second source arrived, the second source's webhook.
 - **10e.** (owner, 2026-10-09, plan C) Issue #6 (an edit that removes every embed sends
   `embeds: []`) and the 6000-character embed total from #8 ship in plan C. The rest of
   #8 and #4, #5, #7 stay separate.

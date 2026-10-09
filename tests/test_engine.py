@@ -692,6 +692,103 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(b["type"], b["name"]) for b in self.posts(http, "/guilds/900/channels")], [(4, "Talk"), (0, "general"), (0, "news")])
         self.assertEqual(len(self.posts(http, "/webhooks")), 2)
 
+    async def test_first_source_reuses_channels_of_the_same_name_in_other_categories(self) -> None:
+        # decision 9i: a channel with the source channel's name is reused. A fresh server has "general" under
+        # "Text Channels"; the first source in a target, with no other source there to mix with (9o), reuses it for
+        # a loose "general", and the loose "rules" for "rules" under "Info", which is then not created empty
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [
+            {"id": "c1", "type": 4, "name": "Text Channels"},
+            {"id": "t1", "type": 0, "name": "general", "parent_id": "c1"},
+            {"id": "c2", "type": 4, "name": "Voice Channels"},
+            {"id": "v1", "type": 2, "name": "General", "parent_id": "c2"},
+            {"id": "t2", "type": 0, "name": "rules", "parent_id": None},
+        ]
+        self.engine.http = http
+        self.store.replace_selection([row("10", name="general"), row("11", name="rules") | {"parent": "Info"}, row("12", name="news") | {"parent": "Chat"}])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 3, "reused": 0})
+        self.assertEqual([(b["type"], b["name"]) for b in self.posts(http, "/guilds/900/channels")], [(4, "Chat"), (0, "news")])
+        hooked = [path for method, path, body in http.calls if method == "POST" and path.endswith("/webhooks")]
+        self.assertIn("/channels/t1/webhooks", hooked)
+        self.assertIn("/channels/t2/webhooks", hooked)
+        self.assertNotIn("/channels/v1/webhooks", hooked)
+
+    async def test_fill_gives_two_channels_of_the_same_name_their_own_copies(self) -> None:
+        # Discord allows two "general" in one category: each gets its own channel and webhook in the copy, never one
+        # channel with one webhook for both (Review Focus 6), and a refill finds each of them again
+        http = KeepingHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = []
+        self.engine.http = http
+        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}, row("11", name="general") | {"parent": "Talk"}])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 0})
+        self.assertEqual([(b["type"], b["name"]) for b in self.posts(http, "/guilds/900/channels")], [(4, "Talk"), (0, "general"), (0, "general")])
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertNotEqual(urls["10"], urls["11"])
+        http.calls.clear()
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 2, "reused": 2})
+        self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
+        self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, urls)
+
+    async def test_a_second_source_whose_category_fails_takes_no_loose_channel(self) -> None:
+        # Desk (5) holds a loose "general" with its webhook in 900. Other (6) comes second and Discord refuses its
+        # "Other / Talk": its "general" is skipped, never put loose beside Desk's and never given Desk's webhook (9o)
+        http = FakeHTTP(fail=("Other / Talk",))
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [{"id": "t1", "type": 0, "name": "general", "parent_id": None}]
+        http.hooks["t1"] = [{"id": "77", "name": "general", "token": "old"}]
+        self.engine.http = http
+        self.store.set_target("5", "900", "Desk copy")
+        self.store.replace_selection(
+            [
+                row("10", "https://discord.com/api/webhooks/77/old", name="general"),
+                row("20", name="general", guild_id="6") | {"guild_name": "Other", "parent": "Talk"},
+                row("21", name="news", guild_id="6") | {"guild_name": "Other"},
+            ]
+        )
+        report = await self.engine.fill_copy("6", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0})
+        self.assertIn("#general was not created (its category failed)", self.notes())
+        self.assertEqual([(b["type"], b["name"]) for b in self.posts(http, "/guilds/900/channels")], [(4, "Other / Talk"), (4, "Other"), (0, "news")])
+        self.assertFalse(any(path == "/channels/t1/webhooks" for method, path, body in http.calls))
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertEqual(urls["20"], "")
+        self.assertEqual(urls["10"], "https://discord.com/api/webhooks/77/old")
+
+    async def test_a_first_source_finds_its_channel_by_its_webhook_after_a_second_source(self) -> None:
+        # Desk (5) was alone in 900 and its loose "general" reused the server's "general" under "Text Channels" (9i).
+        # Other (6) came second with its own "general" under "Other". Filling Desk again takes the channel that
+        # carries Desk's webhook, wherever Discord lists it, and never Other's channel of the same name (9o)
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [
+            {"id": "c3", "type": 4, "name": "Other"},
+            {"id": "t3", "type": 0, "name": "general", "parent_id": "c3"},
+            {"id": "c1", "type": 4, "name": "Text Channels"},
+            {"id": "t1", "type": 0, "name": "general", "parent_id": "c1"},
+        ]
+        http.hooks["t3"] = [{"id": "88", "name": "general", "token": "other"}]
+        http.hooks["t1"] = [{"id": "77", "name": "general", "token": "old"}]
+        self.engine.http = http
+        self.store.set_target("5", "900", "Desk copy", False)
+        self.store.set_target("6", "900", "Desk copy", True)
+        self.store.replace_selection(
+            [
+                row("10", "https://discord.com/api/webhooks/77/old", name="general"),
+                row("20", "https://discord.com/api/webhooks/88/other", name="general", guild_id="6") | {"guild_name": "Other"},
+            ]
+        )
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1})
+        self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
+        urls = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
+        self.assertEqual(urls, {"10": "https://discord.com/api/webhooks/77/old", "20": "https://discord.com/api/webhooks/88/other"})
+        self.assertFalse(any("replaced" in line for line in self.notes()))
+
     async def test_fill_replaces_an_own_webhook_of_a_ticked_channel_and_notes_it(self) -> None:
         # a fill covers every ticked channel of the source (decision 9n), so a channel with an own webhook goes to the
         # copy from now on; the note keeps the change visible, and the hooks memory follows the row
@@ -830,13 +927,14 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
         http.sources["900"] = []
         self.engine.http = http
-        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}, row("11", name="news")])
+        self.store.replace_selection([row("10", name="general") | {"parent": "Talk"}, row("11", name="news"), row("12", name="lobby")])
         report = await self.engine.fill_copy("5", "900")
         self.assertEqual(report["filled"], 1)
         self.assertIn("category Talk was not created (no)", self.notes())
         self.assertIn("#news was not created (no)", self.notes())
-        created = [b for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 0]
-        self.assertNotIn("parent_id", created[0])
+        # a channel whose category Discord refused is skipped, never put loose (decision 9o)
+        self.assertIn("#general was not created (its category failed)", self.notes())
+        self.assertEqual([b["name"] for b in self.posts(http, "/guilds/900/channels") if b.get("type") == 0], ["lobby", "news"])
         http = FakeHTTP(fail=("general",))
         http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
         http.sources["900"] = []
