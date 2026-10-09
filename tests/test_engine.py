@@ -974,8 +974,9 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 1, "replaced": 0})
         self.assertEqual([c for c in http.calls if c[0] == "POST"], [])
         self.assertIn("#general was not wired (its webhooks could not be listed)", self.notes())
-        # listed once while looking for 10's webhook, never cached as empty and never taken by name afterwards
-        self.assertEqual([path for method, path, body in http.calls if method == "GET"].count("/channels/t10/webhooks"), 1)
+        # listed while looking for 10's webhook, once more after a second, never cached as empty and never taken by
+        # name afterwards
+        self.assertEqual([path for method, path, body in http.calls if method == "GET"].count("/channels/t10/webhooks"), 2)
         self.assertEqual({r["channel_id"]: r["webhook_url"] for r in self.store.selection()}, urls | {"12": ""})
         http.refused.clear()
         http.calls.clear()
@@ -1051,8 +1052,9 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.selection()[0]["webhook_url"], "https://discord.com/api/webhooks/1/a")
 
     async def test_a_passing_listing_failure_gives_no_row_another_rows_webhook(self) -> None:
-        # the listing of t10's webhooks fails once and then works: 12, without a URL and first in the store, never
-        # walks off with 10's webhook from t10, and 10 and 11 stay on their own webhooks
+        # the listing of t10's webhooks fails once and then works: the fill lists t10 again after a second, so 10 and
+        # 11 stay on their own webhooks and 12, without a URL and first in the store, never walks off with 10's
+        # webhook from t10 but gets its own channel; no row is left unwired by a passing 5xx
         http = OnceRefusingHTTP()
         http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
         http.sources["900"] = [
@@ -1072,12 +1074,64 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
                 row("11", urls["11"], name="general") | {"parent": "Talk"},
             ]
         )
-        await self.engine.fill_copy("5", "900")
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 3, "reused": 2, "replaced": 0})
+        self.assertEqual([path for method, path, body in http.calls if method == "GET"].count("/channels/t10/webhooks"), 2)
+        self.assertIn(1.0, self.delays)
         after = {r["channel_id"]: r["webhook_url"] for r in self.store.selection()}
         self.assertEqual((after["10"], after["11"]), (urls["10"], urls["11"]))
-        self.assertNotEqual(after["12"], urls["10"])
-        self.assertEqual(self.posts(http, "/webhooks"), [])
+        self.assertNotIn(after["12"], ("", urls["10"], urls["11"]))
+        self.assertEqual(self.posts(http, "/channels/t10/webhooks") + self.posts(http, "/channels/t11/webhooks"), [])
         self.assertFalse(any("replaced" in line for line in self.notes()))
+
+    async def test_a_row_without_a_url_is_not_held_back_by_an_unlisted_channel_outside_its_own_place(self) -> None:
+        # 11, without a URL, is "general" under Talk, which holds no "general"; the loose "general" t10 cannot be
+        # listed (500). 11 never had a copy outside its own place, so t10 cannot be its copy: Desk (5), alone in 900,
+        # takes no channel by name there and creates 11's channel under Talk
+        http = FakeHTTP()
+        http.listed = [{"id": "900", "name": "Desk copy", "owner": True}]
+        http.sources["900"] = [
+            {"id": "c1", "type": 4, "name": "Talk"},
+            {"id": "t10", "type": 0, "name": "general", "parent_id": None},
+        ]
+        http.refused.add(("GET", "/channels/t10/webhooks"))
+        self.engine.http = http
+        self.store.replace_selection([row("11", name="general") | {"parent": "Talk"}])
+        report = await self.engine.fill_copy("5", "900")
+        self.assertEqual(report, {"target": "Desk copy", "filled": 1, "reused": 0, "replaced": 0})
+        self.assertEqual(self.posts(http, "/guilds/900/channels"), [{"name": "general", "type": 0, "parent_id": "c1"}])
+        self.assertEqual(self.posts(http, "/channels/t10/webhooks"), [])
+
+    async def test_a_webhook_listing_is_tried_once_more_after_a_5xx_or_a_network_error(self) -> None:
+        # DiscordHTTP.call retries a 429 itself and raises at once on any other refusal or a network error; the
+        # listing tries once more after a second on a 5xx or a network error, and never on another refusal
+        class Scripted:
+            def __init__(self, *answers: Any) -> None:
+                self.answers = list(answers)
+                self.calls = 0
+
+            async def call(self, method: str, path: str, **kw: Any) -> Any:
+                self.calls += 1
+                answer = self.answers.pop(0)
+                if isinstance(answer, BaseException):
+                    raise answer
+                return answer
+
+        hook = {"id": "1", "name": "general", "token": "a"}
+        cases = [
+            ((ApiError(502, "bad gateway"), [hook]), [hook], 2, [1.0]),
+            ((aiohttp.ClientConnectionError("reset"), [hook]), [hook], 2, [1.0]),
+            ((asyncio.TimeoutError(), [hook]), [hook], 2, [1.0]),
+            ((ApiError(500, "no"), ApiError(500, "no")), None, 2, [1.0]),
+            ((aiohttp.ClientConnectionError("reset"), aiohttp.ClientConnectionError("reset")), None, 2, [1.0]),
+            ((ApiError(403, "missing permissions"),), None, 1, []),
+            (([hook],), [hook], 1, []),
+        ]
+        for answers, result, calls, delays in cases:
+            http = Scripted(*answers)
+            self.delays.clear()
+            self.assertEqual(await self.engine._hooks_on(http, "t10"), result)
+            self.assertEqual((http.calls, self.delays), (calls, delays))
 
     async def test_a_channel_found_by_name_that_carries_another_rows_webhook_is_passed_over(self) -> None:
         # Other (6) was never filled; the owner gave its "general" an own webhook (decision 9g), 5/x, made on the loose

@@ -468,16 +468,18 @@ class Engine:
         # channel in its own place first, so a name found elsewhere never takes a channel another row has there, and
         # elsewhere only when the target holds no other source (`alone`), never one that carries another channel's
         # webhook. A row that meets an unlisted channel of its name and gets none is `unproven`: its copy may stand
-        # there, so it takes none by name and none is created
+        # there, so it takes none by name and none is created. A row without a URL never had a copy outside its own
+        # place, so only an unlisted channel there holds it back
         modes = [(True, True), (True, False), (False, True)] + ([(False, False)] if alone else [])
         for by_webhook, own_place in modes:
             for channel in layout["channels"]:
                 source = channel["source_id"]
                 parent = home(channel) if own_place else None
+                mine = webhook_parts(before.get(source, ""))
                 if (
                     source in found
                     or (own_place and parent is None)
-                    or (by_webhook and not webhook_parts(before.get(source, "")))
+                    or (by_webhook and not mine)
                     or (not by_webhook and source in unproven)
                 ):
                     continue
@@ -488,7 +490,7 @@ class Engine:
                 if pick:
                     found[source] = pick
                     claimed.add(pick)
-                else:
+                elif mine or own_place:
                     blocker = next((spot for spot in spots(channel["name"], parent) if spot in unlisted), "")
                     if blocker:
                         unproven.setdefault(source, blocker)
@@ -566,12 +568,20 @@ class Engine:
         return pairs, reused
 
     async def _hooks_on(self, http: DiscordHTTP, channel_id: str) -> list[dict[str, Any]] | None:
-        """The webhooks Discord lists on a channel; None when it refuses, which says nothing about them."""
-        try:
-            listed = await http.call("GET", f"/channels/{channel_id}/webhooks")
-        except ApiError:
-            return None
-        return [hook for hook in listed if isinstance(hook, dict)] if isinstance(listed, list) else []
+        """The webhooks Discord lists on a channel; None when it refuses, which says nothing about them. A 5xx or a
+        network error is tried once more after a second (`DiscordHTTP.call` retries only a 429 itself)."""
+        for attempt in (1, 2):
+            try:
+                listed = await http.call("GET", f"/channels/{channel_id}/webhooks")
+                return [hook for hook in listed if isinstance(hook, dict)] if isinstance(listed, list) else []
+            except ApiError as exc:
+                if exc.status < 500:
+                    return None
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                pass
+            if attempt == 1:
+                await self._wait(1.0)
+        return None
 
     async def _webhook_on(
         self, http: DiscordHTTP, channel_id: str, name: str, hooks: list[dict[str, Any]] | None, others: set[str]
