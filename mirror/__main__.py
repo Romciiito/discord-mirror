@@ -1,22 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import errno
 import logging
 import logging.handlers
 import os
 import sys
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from aiohttp import web
 
 from .web import create_app
-
-# the errnos of a bind that failed: a port in use, a port the OS refuses (Winsock reports WSAEACCES, not EACCES),
-# an address not on this machine; None because Python 3.12+ asyncio drops EADDRNOTAVAIL and raises
-# "could not bind on any address" without an errno
-LISTEN_ERRNOS = (None, errno.EADDRINUSE, errno.EACCES, getattr(errno, "WSAEACCES", errno.EACCES), errno.EADDRNOTAVAIL)
-
 
 class ListenError(OSError):
     """The API server could not listen on host:port; any other OSError is not reported as one."""
@@ -81,26 +75,42 @@ def has_console() -> bool:
     return bool(kernel32.GetConsoleMode(handle, ctypes.byref(wintypes.DWORD())))
 
 
+async def _serve(app: web.Application, host: str, port: int, body: Callable[[], Awaitable[None]]) -> None:
+    """The API server on host:port while body runs. Only a failed listen becomes a ListenError; any other
+    OSError, from the app's startup or from body, keeps its traceback."""
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    try:
+        # inside the try as in web.run_app: a port in use still closes the engine
+        try:
+            await web.TCPSite(runner, host, port).start()
+        except OSError as exc:
+            raise ListenError(exc.errno, exc.strerror or str(exc)) from exc
+        await body()
+    finally:
+        await runner.cleanup()
+
+
+def _run(app: web.Application, host: str, port: int, body: Callable[[], Awaitable[None]]) -> None:
+    try:
+        asyncio.run(_serve(app, host, port, body))
+    except KeyboardInterrupt:
+        pass  # Ctrl+C before the CLI took the terminal, or on the server alone; web.run_app ends the same way
+
+
+async def _forever() -> None:
+    await asyncio.Event().wait()
+
+
+def serve(app: web.Application, host: str, port: int) -> None:
+    """The API server alone, until the process is stopped."""
+    _run(app, host, port, _forever)
+
+
 def serve_and_cli(app: web.Application, host: str, port: int) -> None:
     from .cli.app import run_cli
 
-    async def run() -> None:
-        runner = web.AppRunner(app, access_log=None)
-        await runner.setup()
-        try:
-            # inside the try as in web.run_app: a port in use still closes the engine
-            try:
-                await web.TCPSite(runner, host, port).start()
-            except OSError as exc:
-                raise ListenError(exc.errno, exc.strerror or str(exc)) from exc
-            await run_cli(app["engine"])
-        finally:
-            await runner.cleanup()
-
-    try:
-        asyncio.run(run())
-    except KeyboardInterrupt:
-        pass  # Ctrl+C before the CLI took the terminal; web.run_app ends the same way
+    _run(app, host, port, lambda: run_cli(app["engine"]))
 
 
 def main() -> None:
@@ -115,14 +125,9 @@ def main() -> None:
         if wants_cli():
             serve_and_cli(app, host, port)
         else:
-            try:
-                web.run_app(app, host=host, port=port, print=None, access_log=None)
-            except OSError as exc:
-                if exc.errno not in LISTEN_ERRNOS:
-                    raise
-                raise ListenError(exc.errno, exc.strerror or str(exc)) from exc
+            serve(app, host, port)
     except ListenError as exc:
-        # a port in use: one line instead of a traceback, after the engine was closed
+        # a failed listen: one line instead of a traceback, after the engine was closed
         message = f"could not listen on {host}:{port}: {exc.strerror or exc}"
         logging.getLogger("mirror").error(message)
         print(message, file=sys.stderr)

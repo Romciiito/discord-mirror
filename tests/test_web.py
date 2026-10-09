@@ -220,15 +220,11 @@ class MainTests(unittest.TestCase):
             env = {"HOST": "0.0.0.0", "PORT": "9000", "DATA_DIR": tmp}
             with mock.patch.dict(os.environ, env), mock.patch.object(entry, "wants_cli", return_value=False), mock.patch.object(
                 entry, "create_app"
-            ) as make, mock.patch.object(entry.web, "run_app") as run, mock.patch.object(entry, "serve_and_cli") as both:
+            ) as make, mock.patch.object(entry, "serve") as run, mock.patch.object(entry, "serve_and_cli") as both:
                 entry.main()
             make.assert_called_once_with(tmp, "0.0.0.0", 9000)
-            run.assert_called_once()
+            run.assert_called_once_with(make.return_value, "0.0.0.0", 9000)
             both.assert_not_called()
-            self.assertIs(run.call_args.args[0], make.return_value)
-            self.assertEqual(run.call_args.kwargs["host"], "0.0.0.0")
-            self.assertEqual(run.call_args.kwargs["port"], 9000)
-            self.assertIsNone(run.call_args.kwargs["access_log"])
             self.assertTrue(os.path.isfile(os.path.join(tmp, "mando.log")))
             self.tearDown()
 
@@ -237,61 +233,119 @@ class MainTests(unittest.TestCase):
             env = {"DATA_DIR": tmp}
             with mock.patch.dict(os.environ, env), mock.patch.object(entry, "wants_cli", return_value=True), mock.patch.object(
                 entry, "create_app"
-            ) as make, mock.patch.object(entry.web, "run_app") as run, mock.patch.object(entry, "serve_and_cli") as both:
+            ) as make, mock.patch.object(entry, "serve") as run, mock.patch.object(entry, "serve_and_cli") as both:
                 entry.main()
             both.assert_called_once_with(make.return_value, "127.0.0.1", 8765)
             run.assert_not_called()
             self.tearDown()
 
-    def test_a_port_in_use_without_a_tty_ends_with_one_line_and_code_1(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            env = {"HOST": "127.0.0.1", "PORT": "9000", "DATA_DIR": tmp}
-            taken = OSError(errno.EADDRINUSE, "address already in use")
-            err = io.StringIO()
-            with mock.patch.dict(os.environ, env), mock.patch.object(entry, "wants_cli", return_value=False), mock.patch.object(
-                entry, "create_app"
-            ), mock.patch.object(entry.web, "run_app", side_effect=taken), contextlib.redirect_stderr(err), self.assertLogs(
-                "mirror", "ERROR"
-            ) as logs:
-                with self.assertRaises(SystemExit) as ended:
-                    entry.main()
-            self.assertEqual(ended.exception.code, 1)
-            self.assertEqual(err.getvalue(), "could not listen on 127.0.0.1:9000: address already in use\n")
-            self.assertEqual(logs.records[0].getMessage(), "could not listen on 127.0.0.1:9000: address already in use")
+    def _headless(self, host: str, port: int, *patches: Any) -> tuple[Any, str, Any]:
+        """main() without a terminal on a real app: (what it raised, its stderr, the engine's wrapped close)."""
+        made: dict[str, Any] = {}
+        err = io.StringIO()
+        raised: Any = None
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+
+            def make(*args: Any) -> Any:
+                app = create_app(*args)
+                made["close"] = stack.enter_context(
+                    mock.patch.object(app["engine"], "close", wraps=app["engine"].close)
+                )
+                made["app"] = app
+                return app
+
+            env = {"HOST": host, "PORT": str(port), "DATA_DIR": tmp}
+            stack.enter_context(mock.patch.dict(os.environ, env))
+            stack.enter_context(mock.patch.object(entry, "wants_cli", return_value=False))
+            stack.enter_context(mock.patch.object(entry, "create_app", side_effect=make))
+            for patch in patches:
+                stack.enter_context(patch(made))
+            stack.enter_context(contextlib.redirect_stderr(err))
+            # unittest shows aiohttp's NotAppKeyWarning from create_app on stderr; `python -m mirror` does not
+            stack.enter_context(warnings.catch_warnings())
+            warnings.simplefilter("ignore")
+            try:
+                entry.main()
+            except BaseException as exc:  # noqa: BLE001 - the test inspects what main() ended with
+                raised = exc
+            if "app" in made:
+                # a failed on_startup hook skips the cleanup, as in web.run_app: close the store for Windows
+                made["app"]["engine"].store.close()
             self.tearDown()
+        return raised, err.getvalue(), made.get("close")
+
+    def test_a_port_in_use_without_a_tty_ends_with_one_line_and_code_1(self) -> None:
+        with socket.socket() as taken:
+            taken.bind(("127.0.0.1", 0))
+            taken.listen()
+            port = taken.getsockname()[1]
+            with self.assertLogs("mirror", "ERROR") as logs:
+                raised, err, close = self._headless("127.0.0.1", port)
+        self.assertIsInstance(raised, SystemExit)
+        self.assertEqual(raised.code, 1)
+        lines = err.splitlines()
+        self.assertEqual(len(lines), 1, err)
+        self.assertTrue(lines[0].startswith(f"could not listen on 127.0.0.1:{port}: "), err)
+        self.assertEqual(logs.records[-1].getMessage(), lines[0])
+        close.assert_awaited_once()
+
+    def test_an_unknown_host_without_a_tty_ends_with_one_line_and_code_1(self) -> None:
+        # getaddrinfo fails with socket.gaierror, errno 11001 on Windows and -2 on Linux
+        unknown = socket.gaierror(11001, "getaddrinfo failed")
+        start = lambda made: mock.patch.object(entry.web.TCPSite, "start", side_effect=unknown)  # noqa: E731
+        raised, err, close = self._headless("nosuch.invalid", 9000, start)
+        self.assertIsInstance(raised, SystemExit)
+        self.assertEqual(raised.code, 1)
+        self.assertEqual(err, "could not listen on nosuch.invalid:9000: getaddrinfo failed\n")
+        close.assert_awaited_once()
 
     def test_an_unbindable_address_without_a_tty_ends_with_one_line_and_code_1(self) -> None:
         # Python 3.12+ asyncio skips EADDRNOTAVAIL and raises an OSError without an errno (measured on 3.14)
-        with tempfile.TemporaryDirectory() as tmp:
-            env = {"HOST": "10.255.255.1", "PORT": "9000", "DATA_DIR": tmp}
-            missing = OSError("could not bind on any address out of [('10.255.255.1', 9000)]")
-            err = io.StringIO()
-            with mock.patch.dict(os.environ, env), mock.patch.object(entry, "wants_cli", return_value=False), mock.patch.object(
-                entry, "create_app"
-            ), mock.patch.object(entry.web, "run_app", side_effect=missing), contextlib.redirect_stderr(err), self.assertLogs(
-                "mirror", "ERROR"
-            ):
-                with self.assertRaises(SystemExit) as ended:
-                    entry.main()
-            self.assertEqual(ended.exception.code, 1)
-            self.assertEqual(
-                err.getvalue(),
-                "could not listen on 10.255.255.1:9000: could not bind on any address out of [('10.255.255.1', 9000)]\n",
-            )
-            self.tearDown()
+        missing = OSError("could not bind on any address out of [('10.255.255.1', 9000)]")
+        start = lambda made: mock.patch.object(entry.web.TCPSite, "start", side_effect=missing)  # noqa: E731
+        raised, err, _close = self._headless("10.255.255.1", 9000, start)
+        self.assertIsInstance(raised, SystemExit)
+        self.assertEqual(raised.code, 1)
+        self.assertEqual(
+            err, "could not listen on 10.255.255.1:9000: could not bind on any address out of [('10.255.255.1', 9000)]\n"
+        )
 
-    def test_another_os_error_without_a_tty_is_not_reported_as_a_port_in_use(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            env = {"HOST": "127.0.0.1", "PORT": "9000", "DATA_DIR": tmp}
-            err = io.StringIO()
-            with mock.patch.dict(os.environ, env), mock.patch.object(entry, "wants_cli", return_value=False), mock.patch.object(
-                entry, "create_app"
-            ), mock.patch.object(entry.web, "run_app", side_effect=OSError(errno.EIO, "boom")), contextlib.redirect_stderr(err):
-                with self.assertRaises(OSError) as raised:
-                    entry.main()
-            self.assertEqual(raised.exception.errno, errno.EIO)
-            self.assertNotIn("could not listen", err.getvalue())
-            self.tearDown()
+    def test_an_os_error_from_the_server_startup_without_a_tty_is_not_reported_as_could_not_listen(self) -> None:
+        # an errno-less OSError (TimeoutError on 3.11+) from an on_startup hook keeps its traceback
+        late = TimeoutError("open timed out")
+        opening = lambda made: mock.patch("mirror.engine.Engine.open", side_effect=late)  # noqa: E731
+        raised, err, _close = self._headless("127.0.0.1", _free_port(), opening)
+        self.assertIs(raised, late)
+        self.assertNotIn("could not listen", err)
+
+    def test_an_os_error_while_serving_without_a_tty_is_not_reported_as_could_not_listen(self) -> None:
+        async def broken() -> None:
+            raise OSError(errno.EIO, "boom")
+
+        body = lambda made: mock.patch.object(entry, "_forever", broken)  # noqa: E731
+        raised, err, close = self._headless("127.0.0.1", _free_port(), body)
+        self.assertIsInstance(raised, OSError)
+        self.assertNotIsInstance(raised, entry.ListenError)
+        self.assertEqual(raised.errno, errno.EIO)
+        self.assertNotIn("could not listen", err)
+        close.assert_awaited_once()
+
+    def test_without_a_tty_the_api_answers_and_the_engine_closes_after(self) -> None:
+        port = _free_port()
+        seen: dict[str, Any] = {}
+
+        async def ask() -> None:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"http://127.0.0.1:{port}/api/state") as resp:
+                    seen["state"] = resp.status
+
+        body = lambda made: mock.patch.object(entry, "_forever", ask)  # noqa: E731
+        with self.assertNoLogs("aiohttp.access"):
+            raised, err, close = self._headless("127.0.0.1", port, body)
+        self.assertIsNone(raised)
+        self.assertEqual(seen["state"], 200)
+        self.assertEqual(err, "")
+        close.assert_awaited_once()
 
     def test_wants_cli_needs_both_ttys(self) -> None:
         with mock.patch("sys.stdin") as stdin, mock.patch("sys.stdout") as stdout, mock.patch.object(
@@ -359,6 +413,31 @@ class MainTests(unittest.TestCase):
         with open(err_path, "rb") as err:
             self.assertEqual(status, 200, err.read().decode("utf-8", "replace")[-2000:])
 
+    def test_with_output_redirected_the_api_server_keeps_serving_until_killed(self) -> None:
+        # the CI smoke step: stdout and stderr redirected to files, then a hard kill
+        port = _free_port()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(_remove_when_free, tmp)
+        env = dict(os.environ, HOST="127.0.0.1", DATA_DIR=os.path.join(tmp, "data"), PORT=str(port), PYTHONUTF8="1")
+        out_path, err_path = os.path.join(tmp, "out.txt"), os.path.join(tmp, "err.txt")
+        with open(out_path, "wb") as out, open(err_path, "wb") as err:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "mirror"], cwd=ROOT, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+            )
+        try:
+            first = asyncio.run(_poll_state(port, proc, 30.0))
+            time.sleep(1.0)
+            second = asyncio.run(_poll_state(port, proc, 5.0))
+            alive = proc.poll() is None
+        finally:
+            proc.kill()
+            proc.wait(5)
+        with open(err_path, "rb") as err:
+            detail = err.read().decode("utf-8", "replace")[-2000:]
+        self.assertEqual((first, second, alive), (200, 200, True), detail)
+        with open(out_path, "rb") as out:
+            self.assertEqual(out.read(), b"")
+
     def test_wants_cli_without_stdin_is_false(self) -> None:
         # Python sets sys.stdin to None when fd 0 is closed (`python -m mirror <&-`); the server
         # must still start, as it did before the CLI existed
@@ -416,7 +495,7 @@ class MainTests(unittest.TestCase):
             "sys.modules['prompt_toolkit'] = None\n"
             "from unittest import mock\n"
             "import mirror.__main__ as entry\n"
-            "with mock.patch.object(entry.web, 'run_app') as run:\n"
+            "with mock.patch.object(entry, 'serve') as run:\n"
             "    entry.main()\n"
             "print(run.call_count)\n"
         )
