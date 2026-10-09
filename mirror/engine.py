@@ -379,6 +379,7 @@ class Engine:
         found: dict[str, str] = {}  # source channel id -> the existing channel it gets
         carried: dict[str, str] = {}  # source channel id -> the row's own webhook, found on that channel
         listed: dict[str, list[dict[str, Any]]] = {}  # existing channel id -> its webhooks, once fetched
+        unlisted: set[str] = set()  # existing channels whose webhooks Discord refused to list in this fill
 
         def free(name: str, parent: str | None) -> list[str]:
             return [
@@ -391,14 +392,24 @@ class Engine:
 
         async def carrier(source: str, spots: list[str]) -> str:
             """The spot whose webhooks hold the row's own webhook (`before`), each spot listed once and kept in
-            `listed`, with that webhook kept in `carried`; "" when no spot carries it."""
+            `listed`, with that webhook kept in `carried`; "" when no spot carries it. A spot whose listing fails is
+            kept out of `listed`, so the webhook step lists it again rather than take it for one without webhooks."""
             mine = webhook_parts(before.get(source, ""))
             for spot in spots if mine else []:
-                if spot not in listed:
-                    listed[spot] = await self._hooks_on(http, spot)
+                if spot not in listed and spot not in unlisted:
+                    hooks = await self._hooks_on(http, spot)
                     await self._wait(0.25)
+                    if hooks is None:
+                        unlisted.add(spot)
+                    else:
+                        listed[spot] = hooks
                 own = next(
-                    (hook for hook in listed[spot] if str(hook.get("id") or "") == mine[0] and hook.get("token")), None
+                    (
+                        hook
+                        for hook in listed.get(spot, [])
+                        if str(hook.get("id") or "") == mine[0] and hook.get("token")
+                    ),
+                    None,
                 )
                 if own is None:
                     continue
@@ -507,23 +518,28 @@ class Engine:
             raise ApiError(400, "no webhook could be created")
         return pairs, reused
 
-    async def _hooks_on(self, http: DiscordHTTP, channel_id: str) -> list[dict[str, Any]]:
-        """The webhooks Discord lists on a channel; none when it refuses."""
+    async def _hooks_on(self, http: DiscordHTTP, channel_id: str) -> list[dict[str, Any]] | None:
+        """The webhooks Discord lists on a channel; None when it refuses, which says nothing about them."""
         try:
             listed = await http.call("GET", f"/channels/{channel_id}/webhooks")
         except ApiError:
-            return []
+            return None
         return [hook for hook in listed if isinstance(hook, dict)] if isinstance(listed, list) else []
 
     async def _webhook_on(
         self, http: DiscordHTTP, channel_id: str, name: str, look: bool, listed: list[dict[str, Any]] | None = None
     ) -> tuple[str, bool]:
         """The URL of a webhook on the channel: one this fill made before, when `look` and it is still there
-        (same name, token visible; `listed` when the fill already fetched the channel's webhooks), otherwise a new
-        one. ("", False) when Discord refuses."""
+        (same name, token visible; `listed` when the fill already fetched the channel's webhooks, None when it did
+        not or its listing failed), otherwise a new one. ("", False) when Discord refuses, and when the webhooks of
+        a found channel cannot be listed: it may carry one already, and Mando never deletes the second."""
         wanted = webhook_name(name)
         if look:
-            for hook in listed if listed is not None else await self._hooks_on(http, channel_id):
+            hooks = listed if listed is not None else await self._hooks_on(http, channel_id)
+            if hooks is None:
+                self.note(f"webhooks of #{name} could not be listed")
+                return "", False
+            for hook in hooks:
                 if hook.get("token") and hook.get("name") == wanted:
                     try:
                         return clean_webhook(f"https://discord.com/api/webhooks/{hook['id']}/{hook['token']}"), True
