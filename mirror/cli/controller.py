@@ -269,7 +269,6 @@ class Controller:
         self.busy = True
         try:
             await self.engine.stop()
-            self.refresh()
         except (ApiError, RuntimeError) as exc:
             self.error = str(exc)
         except Exception:
@@ -278,6 +277,8 @@ class Controller:
         finally:
             self.busy = False
             self.flow = _menu_state("exit")
+            # on both paths: a stop that raised has already cleared Engine.running before gateway.stop()
+            self._resync()
 
     # ---- token, webhooks and servers screens: Tasks 3, 4 and 6 -------------
 

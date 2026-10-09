@@ -9,7 +9,7 @@ from typing import Any
 import aiohttp
 
 from mirror.cli.controller import Controller
-from mirror.cli.render import render
+from mirror.cli.render import render, status_line
 from mirror.discord_api import ApiError, clean_token
 from mirror.engine import Engine
 from mirror.store import Store
@@ -240,6 +240,22 @@ class NetworkErrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.calls, [("stop",)])
         self.assertEqual(ui.flow["screen"], "exit")
         self.assertEqual(ui.error, "request failed")
+        self.assertFalse(ui.busy)
+
+    async def test_a_failed_stop_shows_the_engine_stopped_on_the_status_line(self) -> None:
+        ui, engine = make()
+        engine.running = True
+        ui.refresh()
+
+        async def stop() -> None:
+            engine.calls.append(("stop",))
+            engine.running = False  # Engine.stop clears running before it awaits gateway.stop()
+            raise RuntimeError("gateway timeout")
+
+        engine.stop = stop
+        await keys(ui, "Enter", "3")
+        self.assertEqual(ui.flow["screen"], "exit")
+        self.assertEqual(status_line(ui), "signed out · stopped · 0 mirrored · gateway timeout")
         self.assertFalse(ui.busy)
 
 
