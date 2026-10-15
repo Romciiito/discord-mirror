@@ -280,13 +280,14 @@ class Engine:
             self._properties = await load_properties(self.session)
         http = DiscordHTTP(self.session, token, self._properties)
         me = await http.me()
+        # saved first: a write state.db refuses leaves the engine signed out, so a retry at start still runs
+        self.store.set_token(token, keep)
         self.http = http
         self.user = {
             "id": str(me.get("id") or ""),
             "username": me.get("username") or "",
             "global_name": me.get("global_name") or "",
         }
-        self.store.set_token(token, keep)
         self.status = "ready"
         return self.user
 

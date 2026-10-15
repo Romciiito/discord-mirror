@@ -636,6 +636,34 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse((folder / "token.txt").exists())
                     self.assertEqual(self.notes()[1:], ["token from token.txt accepted and saved, token.txt deleted"])
 
+    async def test_a_sign_in_whose_token_cannot_be_saved_is_tried_again(self) -> None:
+        # state.db refuses the write (locked, disk full): the engine is not signed in, so the retry the note announces
+        # runs, and token.txt stays until a sign-in is saved
+        folder = self.mando(file=TOKEN.encode())
+        discord = FakeDiscord()
+        self.engine.session = discord
+        save = self.store.set_token
+        calls: list[str] = []
+
+        def flaky(token: str, keep: bool) -> None:
+            calls.append(token)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("database is locked")
+            save(token, keep)
+
+        with mock.patch.object(self.store, "set_token", flaky):
+            await self.engine.restore()
+            self.assertIsNone(self.engine.http)
+            self.assertIsNone(self.engine.user)
+            self.assertEqual(self.notes(), ["token in token.txt check failed (database is locked), retrying"])
+            self.assertTrue((folder / "token.txt").exists())
+            await self.engine._restore_task
+        self.assertEqual(discord.sent, [(ME, TOKEN)] * 2)
+        self.assertEqual(self.store.token(), TOKEN)
+        self.assertIsNotNone(self.engine.http)
+        self.assertFalse((folder / "token.txt").exists())
+        self.assertEqual(self.notes()[1:], ["token from token.txt accepted and saved, token.txt deleted"])
+
     async def test_a_token_txt_refused_on_a_retry_falls_back_to_the_saved_token(self) -> None:
         page = FakeResp("<html><body>error code: 1020</body></html>", 403)
         refused = FakeResp('{"message": "401: Unauthorized", "code": 0}', 401)
