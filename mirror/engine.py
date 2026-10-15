@@ -38,6 +38,20 @@ def _rejected(exc: ApiError) -> bool:
     return exc.status in (401, 403) and not isinstance(exc, NotDiscordAnswer)
 
 
+def _shaped_token(raw: str) -> str:
+    """The cleaned token, or ApiError(400) before any request when it cannot be one: the one rule of the token check
+    (check_token) and the sign-in (use_token). A token is letters, digits, dots, dashes and underscores; a line end or
+    another control character never reaches Discord (aiohttp refuses the header), so it is no network failure."""
+    token = clean_token(raw)
+    if len(token) < 40:
+        raise ApiError(400, "token looks too short")
+    if len(token) > TOKEN_LONGEST:
+        raise ApiError(400, "token looks too long")
+    if not all("!" <= char <= "~" for char in token):
+        raise ApiError(400, "token has characters a token cannot have")
+    return token
+
+
 class _TooLarge(ValueError):
     """A token file larger than TOKEN_FILE_LIMIT, left unread."""
 
@@ -282,15 +296,7 @@ class Engine:
 
     async def use_token(self, token: str, keep: bool) -> dict[str, Any]:
         await self._cancel_restore()
-        token = clean_token(token)
-        if len(token) < 40:
-            raise ApiError(400, "token looks too short")
-        if len(token) > TOKEN_LONGEST:
-            raise ApiError(400, "token looks too long")
-        if not all("!" <= char <= "~" for char in token):
-            # a token is letters, digits, dots, dashes and underscores; a line end or another control character
-            # never reaches Discord (aiohttp refuses the header), so it is no network failure to retry
-            raise ApiError(400, "token has characters a token cannot have")
+        token = _shaped_token(token)
         if self.session is None:
             raise ApiError(500, "session is not ready")
         if self._properties is None:
@@ -309,9 +315,7 @@ class Engine:
         return self.user
 
     async def check_token(self, raw: str) -> dict[str, Any]:
-        token = clean_token(raw)
-        if len(token) < 40:
-            raise ApiError(400, "token looks too short")
+        token = _shaped_token(raw)
         if self._properties is None:
             self._properties = await load_properties(self.session)
         # mando.log gets the status and the reason of every check that does not work, never the token

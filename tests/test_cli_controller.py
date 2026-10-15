@@ -1391,6 +1391,51 @@ class RoleGatedHTTP:
         raise ApiError(403, f"{method} {path} is not expected")
 
 
+class HeaderCheckingSession:
+    """The wire as the real Engine meets it, without a network: aiohttp refuses a header with a control character
+    before it sends anything, with this ValueError (measured), and any other request finds no network."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def get(self, url: str, **kw: Any) -> Any:
+        raise aiohttp.ClientConnectionError("no network in this test")
+
+    def request(self, method: str, url: str, **kw: Any) -> Any:
+        token = kw["headers"]["Authorization"]
+        if any(char < " " or char == "\x7f" for char in token):
+            raise ValueError("Forbidden control character detected in headers. Potential header injection attack.")
+        self.sent.append(token)
+        raise aiohttp.ClientConnectionError("no network in this test")
+
+
+class RealEngineTokenCheckTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(self.tmp.name)
+        self.engine = Engine(self.store)
+        self.session = HeaderCheckingSession()
+        self.engine.session = self.session
+
+    async def asyncTearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+
+    async def test_a_pasted_token_with_an_inner_line_end_says_why_it_is_no_token(self) -> None:
+        # a token copied across a line break: the real Engine.check_token refuses it before any request, so the line
+        # under the list names the cause instead of the unexpected-error path
+        ui = Controller(self.engine, read_keychain=read_keychain_fake)
+        ui.refresh()
+        await keys(ui, "Enter", "2", "1")
+        self.assertEqual(ui.flow["screen"], "token")
+        await ui.paste("a" * 30 + "\r\n" + "b" * 30)
+        await keys(ui, "Enter")
+        self.assertEqual(ui.token_check, "✗ token has characters a token cannot have")
+        self.assertEqual(ui.error, "")
+        self.assertEqual(self.session.sent, [])
+        self.assertIsNone(self.engine.http)
+
+
 class RealEngineStartTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

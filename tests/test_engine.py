@@ -874,6 +874,29 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(caught.exception.status, 400)
         self.assertEqual(discord.sent, [])
 
+    async def test_check_and_sign_in_refuse_the_same_tokens_before_discord(self) -> None:
+        # one rule for both: what the token check refuses, save token refuses with the same words, and neither
+        # sends a request
+        half = len(TOKEN) // 2
+        for raw, reason in (
+            ("MTIz.Gx_y-Z", "token looks too short"),
+            ("a" * 257, "token looks too long"),
+            (TOKEN[:half] + "\r\n" + TOKEN[half:], "token has characters a token cannot have"),
+            (TOKEN[:half] + "\x00" + TOKEN[half:], "token has characters a token cannot have"),
+            (TOKEN[:half] + " " + TOKEN[half:], "token has characters a token cannot have"),
+            (TOKEN[:half] + "ž" + TOKEN[half:], "token has characters a token cannot have"),
+        ):
+            for name in ("check_token", "use_token"):
+                with self.subTest(raw=raw[half - 1 : half + 3], via=name):
+                    discord = FakeDiscord()
+                    self.engine.session = discord
+                    attempt = getattr(self.engine, name)
+                    with self.assertRaises(ApiError) as caught:
+                        await (attempt(raw) if name == "check_token" else attempt(raw, True))
+                    self.assertEqual((caught.exception.status, str(caught.exception)), (400, reason))
+                    self.assertEqual(discord.sent, [])
+        self.assertEqual(self.store.token(), "")
+
     async def test_checked_token_refused_by_discord_is_rejected_with_its_reason(self) -> None:
         verify = "You need to verify your account in order to perform this action"
         for answer, status, reason in (
