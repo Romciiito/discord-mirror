@@ -645,6 +645,39 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((folder / "token.txt").exists())
         self.assertIsNone(self.engine._restore_task)
 
+    async def test_a_token_with_characters_a_token_cannot_have_is_refused_before_discord(self) -> None:
+        # aiohttp refuses a header with a line end or another control character before any request, so such a token
+        # is no network failure to retry; real tokens are letters, digits, dots, dashes and underscores
+        discord = FakeDiscord()
+        self.engine.session = discord
+        half = len(TOKEN) // 2
+        for inside in ("\n", "\x00", "\t", " ", "ž"):
+            with self.subTest(inside=repr(inside)):
+                with self.assertRaises(ApiError) as caught:
+                    await self.engine.use_token(TOKEN[:half] + inside + TOKEN[half:], True)
+                self.assertEqual(
+                    (caught.exception.status, str(caught.exception)), (400, "token has characters a token cannot have")
+                )
+        self.assertEqual(discord.sent, [])
+        self.assertEqual(self.store.token(), "")
+        self.assertIsNone(self.engine.http)
+
+    async def test_a_token_txt_broken_over_two_lines_is_not_used_and_the_saved_token_is(self) -> None:
+        self.store.set_token(SAVED, True)
+        half = len(TOKEN) // 2
+        content = (TOKEN[:half] + "\r\n" + TOKEN[half:] + "\r\n").encode()
+        folder = self.mando(file=content)
+        discord = FakeDiscord()
+        self.engine.session = discord
+        await self.engine.restore()
+        self.assertEqual(discord.sent, [(ME, SAVED)])
+        self.assertEqual(
+            self.notes(),
+            ["token in token.txt was not used (token has characters a token cannot have)", "saved token accepted"],
+        )
+        self.assertEqual((folder / "token.txt").read_bytes(), content)
+        self.assertIsNone(self.engine._restore_task)
+
     async def test_a_token_txt_that_cannot_be_read_is_not_used_and_the_saved_token_is(self) -> None:
         for name, make, note in (
             ("utf-16", lambda path: path.write_bytes(TOKEN.encode("utf-16")), "token.txt could not be read (not UTF-8 text)"),

@@ -252,6 +252,10 @@ class Engine:
         token = clean_token(token)
         if len(token) < 40:
             raise ApiError(400, "token looks too short")
+        if not all("!" <= char <= "~" for char in token):
+            # a token is letters, digits, dots, dashes and underscores; a line end or another control character
+            # never reaches Discord (aiohttp refuses the header), so it is no network failure to retry
+            raise ApiError(400, "token has characters a token cannot have")
         if self.session is None:
             raise ApiError(500, "session is not ready")
         if self._properties is None:
