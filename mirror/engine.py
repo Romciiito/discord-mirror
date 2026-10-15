@@ -36,6 +36,12 @@ def _rejected(exc: ApiError) -> bool:
     return exc.status in (401, 403) and not isinstance(exc, NotDiscordAnswer)
 
 
+def _file_token(path: Path) -> str:
+    """The token in a token file, cleaned like a pasted one: clean_token strips spaces and line ends, then a pair of
+    quotes, and Notepad's UTF-8 BOM is dropped. Raises OSError, or UnicodeDecodeError for a file that is not UTF-8."""
+    return clean_token(path.read_text(encoding="utf-8-sig"))
+
+
 class _Outside(NamedTuple):
     """A token given at start from outside state.db: `name` is where it came from (MANDO_TOKEN or token.txt), `path`
     the file to delete once a sign-in with it works (None for the environment variable)."""
@@ -134,7 +140,7 @@ class Engine:
             return _Outside(token, TOKEN_ENV, None)
         path = self.home / TOKEN_FILE
         try:
-            text = path.read_text(encoding="utf-8-sig")
+            token = _file_token(path)
         except FileNotFoundError:
             return None
         except UnicodeDecodeError:
@@ -143,7 +149,6 @@ class Engine:
         except OSError as exc:
             self._said(f"{TOKEN_FILE} could not be read ({exc.strerror or type(exc).__name__})")
             return None
-        token = clean_token(text)
         return _Outside(token, TOKEN_FILE, path) if token else None
 
     async def _start_token(self, token: str, outside: _Outside | None) -> bool:
@@ -185,6 +190,19 @@ class Engine:
         elif outside.path is None:
             self._said(f"token from {outside.name} accepted", logging.INFO)
         else:
+            # the owner may have written another token into the file while a retry waited: only the file that still
+            # holds the token that signed in is deleted
+            try:
+                now = _file_token(outside.path)
+            except FileNotFoundError:
+                now = outside.token
+            except (OSError, ValueError):
+                now = ""
+            if now != outside.token:
+                self._said(
+                    f"token from {outside.name} accepted and saved, {outside.name} changed meanwhile and was kept"
+                )
+                return
             # state.db now keeps the token protected; the plain-text copy must not stay on disk
             try:
                 outside.path.unlink(missing_ok=True)

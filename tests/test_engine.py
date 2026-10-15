@@ -608,6 +608,34 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.notes()[1:], ["token from token.txt accepted and saved, token.txt deleted"])
         self.assertIsNone(self.engine._restore_task)
 
+    async def test_a_token_txt_the_owner_rewrote_during_a_retry_is_kept(self) -> None:
+        # the old token works on a retry, but by then the file holds another one: only the file that still holds the
+        # token that signed in is deleted, and the same token saved again in another form still counts as it
+        rewritten = TOKEN.replace("fake", "next")
+        for content, kept in (
+            (rewritten.encode(), True),
+            (b'\xef\xbb\xbf"' + TOKEN.encode() + b'"\r\n', False),
+        ):
+            with self.subTest(content=content):
+                self.store.set_token(SAVED, True)
+                folder = self.mando(file=TOKEN.encode())
+                self.engine.session = ScriptedDiscord(
+                    aiohttp.ClientConnectionError("connection refused"), FakeResp('{"id": "7", "username": "ada"}')
+                )
+                await self.engine.restore()
+                (folder / "token.txt").write_bytes(content)
+                await self.engine._restore_task
+                self.assertEqual(self.store.token(), TOKEN)
+                if kept:
+                    self.assertEqual((folder / "token.txt").read_bytes(), content)
+                    self.assertEqual(
+                        self.notes()[1:],
+                        ["token from token.txt accepted and saved, token.txt changed meanwhile and was kept"],
+                    )
+                else:
+                    self.assertFalse((folder / "token.txt").exists())
+                    self.assertEqual(self.notes()[1:], ["token from token.txt accepted and saved, token.txt deleted"])
+
     async def test_a_token_txt_refused_on_a_retry_falls_back_to_the_saved_token(self) -> None:
         page = FakeResp("<html><body>error code: 1020</body></html>", 403)
         refused = FakeResp('{"message": "401: Unauthorized", "code": 0}', 401)
