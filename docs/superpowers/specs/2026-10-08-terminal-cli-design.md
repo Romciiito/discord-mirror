@@ -59,6 +59,11 @@ facts carry the file and line they were measured at (base `main` @ `0416376`).
      shows `✓ token works – signed in as <name>` / `✗ token rejected by Discord` /
      `✗ could not reach Discord (<reason>)`.
    - `Engine.check_token` returns works / rejected / unreachable and stores nothing.
+   - Later (PR #12): a fourth result, blocked, for an answer that is not Discord's JSON,
+     such as a Cloudflare block page. The CLI then shows
+     `✗ Discord was not reached (<reason>): this network may be blocked`, and a
+     rejection names Discord's reason: `✗ token rejected by Discord (<reason>)`.
+     Every check that does not work is logged to `mando.log` without the token.
    - The browser page does not get this report, because it is being removed.
 
 ## Token bug (measured, fixed in 8)

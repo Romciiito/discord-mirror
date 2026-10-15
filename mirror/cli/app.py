@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import functools
 import logging
-from typing import Any
+import sys
+from typing import Any, Callable
 
 from prompt_toolkit.application import Application, get_app
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout, Window
@@ -21,8 +25,58 @@ KEY_NAMES = {
     "enter": "Enter", "escape": "Escape", "backspace": "Backspace",
 }
 
+# Shift+Insert as the Windows console sends it in VT input mode (CSI 2 ; 2 ~). prompt_toolkit 3.0.53 maps
+# Insert (CSI 2 ~) but not this one and would read it as Esc followed by the typed text "[2;2~"
+ANSI_SEQUENCES.setdefault("\x1b[2;2~", Keys.ShiftInsert)
 
-def build(controller: Controller) -> Application:
+CF_UNICODETEXT = 13
+
+
+@functools.lru_cache(maxsize=None)
+def _win32() -> tuple[Any, Any]:
+    from ctypes import wintypes
+
+    # own library objects: types set on the shared ctypes.windll ones would apply to every other caller too.
+    # Handles are pointer-sized, so x86 and x64 need the types spelled out
+    user32 = ctypes.WinDLL("user32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.GetClipboardData.argtypes = [wintypes.UINT]
+    user32.GetClipboardData.restype = wintypes.HANDLE
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalLock.restype = wintypes.LPVOID
+    kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
+    return user32, kernel32
+
+
+def read_clipboard() -> str:
+    """The text on the Windows clipboard. "" when it holds no text, when another program keeps it open, and off
+    Windows, where the terminal pastes by itself as bracketed paste."""
+    if sys.platform != "win32":
+        return ""
+    user32, kernel32 = _win32()
+    if not user32.OpenClipboard(None):
+        return ""
+    try:
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
+            return ""
+        pointer = kernel32.GlobalLock(handle)
+        if not pointer:
+            return ""
+        try:
+            return ctypes.wstring_at(pointer)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+
+def build(controller: Controller, clipboard: Callable[[], str] = read_clipboard) -> Application:
     bindings = KeyBindings()
 
     def text() -> str:
@@ -38,10 +92,22 @@ def build(controller: Controller) -> Application:
     for name, key in KEY_NAMES.items():
         bind(name, key)
 
+    async def paste(event: Any, text: str) -> None:
+        await controller.paste(text.replace("\r\n", "\n").replace("\r", "\n"))
+        event.app.invalidate()
+
     @bindings.add(Keys.BracketedPaste)
     async def _paste(event: Any) -> None:
-        await controller.paste(event.data.replace("\r\n", "\n").replace("\r", "\n"))
-        event.app.invalidate()
+        await paste(event, event.data)
+
+    # prompt_toolkit turns on VT input in the Windows console, and there the console hands Ctrl+V and Shift+Insert
+    # to the app as keys instead of pasting; a right click, and Ctrl+Shift+V where enabled, still paste
+    @bindings.add("c-v")
+    @bindings.add(Keys.ShiftInsert)
+    async def _paste_clipboard(event: Any) -> None:
+        copied = clipboard()
+        if copied:
+            await paste(event, copied)
 
     @bindings.add(Keys.Any)
     async def _any(event: Any) -> None:

@@ -11,8 +11,8 @@ from unittest import mock
 
 import aiohttp
 
-from mirror import access, engine as engine_mod
-from mirror.discord_api import ApiError
+from mirror import access, discord_api, engine as engine_mod
+from mirror.discord_api import ApiError, DiscordHTTP, build_properties
 from mirror.engine import Engine
 from mirror.store import Store
 
@@ -171,6 +171,18 @@ class FakeDiscord:
 
     async def close(self) -> None:
         pass
+
+
+class ScriptedDiscord(FakeDiscord):
+    """A FakeDiscord that gives its answers in turn and keeps giving the last one."""
+
+    def __init__(self, *answers: FakeResp | BaseException) -> None:
+        super().__init__(answers[0])
+        self.answers = list(answers)
+
+    def request(self, method: str, url: str, **kw: Any) -> FakeResp:
+        self.answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        return super().request(method, url, **kw)
 
 
 class FakeGateway:
@@ -403,6 +415,40 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 2)
         self.assertIn("saved token was rejected", self.notes())
 
+    async def test_restore_keeps_token_when_the_answer_is_not_discords(self) -> None:
+        # a Cloudflare block page (403, error code 1020) at start and at the first retry: Discord was not
+        # reached, so the token is kept and tried again until Discord itself answers
+        page = FakeResp("<html><body>error code: 1020</body></html>", 403)
+        self.store.set_token(TOKEN, True)
+        discord = ScriptedDiscord(page, page, FakeResp('{"id": "7", "username": "ada"}'))
+        self.engine.session = discord
+        await self.engine.restore()
+        self.assertEqual(self.store.token(), TOKEN)
+        self.assertIn(
+            "saved token check failed (GET /users/@me failed (HTTP 403, Cloudflare error code 1020)), retrying",
+            self.notes(),
+        )
+        await self.engine._restore_task
+        self.assertEqual(self.store.token(), TOKEN)
+        self.assertEqual(len(discord.sent), 3)
+        self.assertEqual(self.delays, [5.0, 10.0])
+        self.assertNotIn("saved token was rejected", self.notes())
+        self.assertIn("saved token accepted", self.notes())
+
+    async def test_restore_forgets_token_discord_itself_rejects(self) -> None:
+        refused = FakeResp('{"message": "401: Unauthorized", "code": 0}', 401)
+        page = FakeResp("<html><body>error code: 1020</body></html>", 403)
+        for answers in ((refused,), (page, refused)):
+            with self.subTest(answers=[answer.status for answer in answers]):
+                self.store.set_token(TOKEN, True)
+                self.engine.lines.clear()
+                self.engine.session = ScriptedDiscord(*answers)
+                await self.engine.restore()
+                if self.engine._restore_task is not None:
+                    await self.engine._restore_task
+                self.assertEqual(self.store.token(), "")
+                self.assertIn("saved token was rejected", self.notes())
+
     async def test_restore_retry_stops_on_manual_token(self) -> None:
         self.store.set_token("x" * 50, True)
         calls: list[str] = []
@@ -451,7 +497,8 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
     async def test_checked_token_reports_the_user_and_keeps_nothing(self) -> None:
         discord = FakeDiscord()
         self.engine.session = discord
-        report = await self.engine.check_token(' "' + TOKEN + '"\n')
+        with self.assertNoLogs("mirror.engine", "WARNING"):
+            report = await self.engine.check_token(' "' + TOKEN + '"\n')
         self.assertEqual(report, {"result": "works", "user": {"id": "7", "username": "ada", "global_name": ""}})
         self.assertEqual(discord.sent, [("https://discord.com/api/v9/users/@me", TOKEN)])
         self.assertEqual(self.store.token(), "")
@@ -468,20 +515,90 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(caught.exception.status, 400)
         self.assertEqual(discord.sent, [])
 
-    async def test_checked_token_refused_by_discord_is_rejected(self) -> None:
-        for answer in (
-            FakeResp('{"message": "401: Unauthorized"}', 401),
-            FakeResp('{"message": "Forbidden"}', 403),
-            FakeResp("{}"),
+    async def test_checked_token_refused_by_discord_is_rejected_with_its_reason(self) -> None:
+        verify = "You need to verify your account in order to perform this action"
+        for answer, status, reason in (
+            (FakeResp('{"message": "401: Unauthorized", "code": 0}', 401), 401, "401: Unauthorized"),
+            (FakeResp('{"message": "%s", "code": 40002}' % verify, 403), 403, f"403: {verify} (code 40002)"),
+            (FakeResp('{"message": "Forbidden"}', 403), 403, "403: Forbidden"),
         ):
             with self.subTest(status=answer.status, body=answer.body):
                 self.engine.session = FakeDiscord(answer)
-                self.assertEqual(await self.engine.check_token(TOKEN), {"result": "rejected"})
+                report = await self.engine.check_token(TOKEN)
+                self.assertEqual(report, {"result": "rejected", "status": status, "reason": reason})
+
+    async def test_checked_token_answered_by_something_else_than_discord_is_blocked(self) -> None:
+        page = "<html><head><title>Access denied</title></head><body>error code: 1020</body></html>"
+        for answer, status, reason in (
+            (FakeResp(page, 403), 403, "HTTP 403, Cloudflare error code 1020"),
+            (FakeResp("<html><body>Forbidden</body></html>", 403), 403, "HTTP 403, not a Discord answer"),
+            (FakeResp("<html><body>Discord</body></html>"), 200, "HTTP 200, not a Discord answer"),
+            (FakeResp("{}"), 200, "HTTP 200, not a Discord answer"),
+            (FakeResp("error code: 1015", 429), 429, "HTTP 429, Cloudflare error code 1015"),
+        ):
+            with self.subTest(status=answer.status, body=answer.body):
+                discord = FakeDiscord(answer)
+                self.engine.session = discord
+                with mock.patch.object(discord_api.asyncio, "sleep", mock.AsyncMock()):
+                    report = await self.engine.check_token(TOKEN)
+                self.assertEqual(report, {"result": "blocked", "status": status, "reason": reason})
+                self.assertEqual(len(discord.sent), 5 if status == 429 else 1)
+
+    async def test_checked_token_that_stays_rate_limited_by_discord_still_raises(self) -> None:
+        self.engine.session = FakeDiscord(FakeResp('{"retry_after": 0.5}', 429))
+        with mock.patch.object(discord_api.asyncio, "sleep", mock.AsyncMock()):
+            with self.assertRaises(ApiError) as caught:
+                await self.engine.check_token(TOKEN)
+        self.assertEqual((caught.exception.status, str(caught.exception)), (429, "GET /users/@me stayed rate limited"))
+
+    async def test_a_token_check_that_does_not_work_is_logged_without_the_token(self) -> None:
+        page = "<html><body>error code: 1020</body></html>"
+        for answer, line in (
+            (FakeResp('{"message": "401: Unauthorized", "code": 0}', 401), "token check rejected (HTTP 401): 401: Unauthorized"),
+            (FakeResp(page, 403), "token check blocked (HTTP 403): HTTP 403, Cloudflare error code 1020"),
+            (FakeResp("bad gateway", 502), "token check unreachable (HTTP 502): GET /users/@me failed (HTTP 502)"),
+            (aiohttp.ClientConnectionError("connection refused"), "token check unreachable: connection refused"),
+            (FakeResp('{"message": "404: Not Found", "code": 0}', 404), "token check failed (HTTP 404): 404: Not Found"),
+        ):
+            with self.subTest(line=line):
+                self.engine.session = FakeDiscord(answer)
+                with self.assertLogs("mirror.engine", "WARNING") as logs:
+                    try:
+                        await self.engine.check_token(TOKEN)
+                    except ApiError:
+                        pass
+                self.assertEqual([(item.levelname, item.getMessage()) for item in logs.records], [("WARNING", line)])
+                self.assertNotIn(TOKEN, "\n".join(logs.output))
 
     async def test_checked_token_on_discord_5xx_is_unreachable(self) -> None:
         self.engine.session = FakeDiscord(FakeResp("bad gateway", 502))
         report = await self.engine.check_token(TOKEN)
-        self.assertEqual(report, {"result": "unreachable", "reason": "GET /users/@me failed"})
+        self.assertEqual(report, {"result": "unreachable", "reason": "GET /users/@me failed (HTTP 502)"})
+
+    async def test_an_answer_without_a_user_is_not_a_discord_answer(self) -> None:
+        for body, status, detail in (
+            ("<html><body>error code: 1020</body></html>", 200, "GET /users/@me failed (HTTP 200, Cloudflare error code 1020)"),
+            ("", 204, "GET /users/@me failed (HTTP 204, not a Discord answer)"),
+        ):
+            with self.subTest(body=body):
+                http = DiscordHTTP(FakeDiscord(FakeResp(body, status)), TOKEN, build_properties(1, 131))
+                with self.assertRaises(discord_api.NotDiscordAnswer) as caught:
+                    await http.me()
+                self.assertEqual((caught.exception.status, str(caught.exception)), (status, detail))
+
+    async def test_a_request_that_stays_rate_limited_names_the_cloudflare_code(self) -> None:
+        for body, detail in (
+            ("error code: 1015", "GET /users/@me stayed rate limited (Cloudflare error code 1015)"),
+            ('{"retry_after": 0.5}', "GET /users/@me stayed rate limited"),
+        ):
+            with self.subTest(body=body):
+                discord = FakeDiscord(FakeResp(body, 429))
+                http = DiscordHTTP(discord, TOKEN, build_properties(1, 131))
+                with mock.patch.object(discord_api.asyncio, "sleep", mock.AsyncMock()):
+                    with self.assertRaises(ApiError) as caught:
+                        await http.call("GET", "/users/@me")
+                self.assertEqual((caught.exception.status, str(caught.exception)), (429, detail))
+                self.assertEqual(len(discord.sent), 5)
 
     async def test_checked_token_on_network_error_is_unreachable(self) -> None:
         for error, reason in (

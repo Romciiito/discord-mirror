@@ -11,7 +11,7 @@ ignored by git, so copy the graphs there locally (the global copies do not resol
 
 ## Checks
 
-- Unit: `python -m unittest tests.test_core tests.test_store tests.test_keychain tests.test_provision tests.test_relay tests.test_gateway tests.test_engine tests.test_web tests.test_cli_flow tests.test_cli_controller tests.test_cli_render -q`
+- Unit: `python -m unittest tests.test_core tests.test_store tests.test_keychain tests.test_provision tests.test_relay tests.test_gateway tests.test_engine tests.test_web tests.test_cli_flow tests.test_cli_controller tests.test_cli_render tests.test_cli_app -q`
 - CI: `.github/workflows/test.yml` runs the unit tests on Ubuntu and Windows (x64, x86) and, on every leg, the smoke step (`python -m mirror` without a terminal serves `/api/state` and `/api/stop`).
 
 ## Agent skills

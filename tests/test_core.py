@@ -377,9 +377,24 @@ class CoreTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in owned["channels"]], ["general", "staff", "news", "lobby"])
 
     def test_captcha_error_is_plain(self) -> None:
-        detail = _fail_detail("POST", "/guilds", '{"captcha_sitekey":"x","message":"captcha"}')
+        detail = _fail_detail("POST", "/guilds", 400, '{"captcha_sitekey":"x","message":"captcha"}')
         self.assertIn("captcha", detail.casefold())
         self.assertNotIn("sitekey", detail)
+
+    def test_discord_message_is_the_failure_detail(self) -> None:
+        self.assertEqual(_fail_detail("POST", "/guilds", 403, '{"message": "Missing Access", "code": 50001}'), "Missing Access")
+
+    def test_failure_detail_names_the_status_and_the_cloudflare_code(self) -> None:
+        page = "<html><head><title>Access denied</title></head><body>error code: 1020</body></html>"
+        for status, text, detail in (
+            (403, page, "GET /users/@me failed (HTTP 403, Cloudflare error code 1020)"),
+            (429, "error code: 1015", "GET /users/@me failed (HTTP 429, Cloudflare error code 1015)"),
+            (502, "bad gateway", "GET /users/@me failed (HTTP 502)"),
+            (404, "", "GET /users/@me failed (HTTP 404)"),
+            (400, '{"code": 0}', "GET /users/@me failed (HTTP 400)"),
+        ):
+            with self.subTest(status=status, text=text):
+                self.assertEqual(_fail_detail("GET", "/users/@me", status, text), detail)
 
 
 if __name__ == "__main__":

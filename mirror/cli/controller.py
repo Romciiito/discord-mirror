@@ -353,12 +353,17 @@ class Controller:
         finally:
             self.busy = False
         result = report.get("result")
+        reason = report.get("reason") or ""
+        why = f" ({reason})" if reason else ""
         if result == "works":
             self.token_check = f"✓ token works – signed in as {_display(report.get('user') or {})}"
         elif result == "rejected":
-            self.token_check = "✗ token rejected by Discord"
+            self.token_check = f"✗ token rejected by Discord{why}"
+        elif result == "blocked":
+            # the answer did not come from Discord, such as a Cloudflare block page (Engine.check_token)
+            self.token_check = f"✗ Discord was not reached{why}: this network may be blocked"
         else:
-            self.token_check = f"✗ could not reach Discord ({report.get('reason') or 'network error'})"
+            self.token_check = f"✗ could not reach Discord ({reason or 'network error'})"
 
     async def _token_action(self) -> None:
         target = TOKEN_ROWS[self.token_index]
