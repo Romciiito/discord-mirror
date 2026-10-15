@@ -718,6 +718,35 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.token(), "")
         self.assertIsNone(self.engine.http)
 
+    async def test_a_token_longer_than_256_characters_is_refused_before_discord(self) -> None:
+        discord = FakeDiscord()
+        self.engine.session = discord
+        with self.assertRaises(ApiError) as caught:
+            await self.engine.use_token("a" * 257, True)
+        self.assertEqual((caught.exception.status, str(caught.exception)), (400, "token looks too long"))
+        self.assertEqual(discord.sent, [])
+        await self.engine.use_token("a" * 256, True)
+        self.assertEqual(discord.sent, [(ME, "a" * 256)])
+
+    async def test_a_token_too_long_or_a_token_txt_too_large_is_not_used_and_the_saved_token_is(self) -> None:
+        # a whole document pasted into token.txt or MANDO_TOKEN never becomes a header; a file over 4 KB is not read
+        for file, env, note in (
+            (b"a" * 4097, None, "token.txt was not read (too large, over 4 KB)"),
+            (b"a" * 4096, None, "token in token.txt was not used (token looks too long)"),
+            (None, "a" * 300, "token in MANDO_TOKEN was not used (token looks too long)"),
+        ):
+            with self.subTest(note=note):
+                self.store.set_token(SAVED, True)
+                folder = self.mando(file=file, env=env)
+                discord = FakeDiscord()
+                self.engine.session = discord
+                await self.engine.restore()
+                self.assertEqual(discord.sent, [(ME, SAVED)])
+                self.assertEqual(self.notes(), [note, "saved token accepted"])
+                if file is not None:
+                    self.assertEqual((folder / "token.txt").read_bytes(), file)
+                self.assertIsNone(self.engine._restore_task)
+
     async def test_a_token_txt_broken_over_two_lines_is_not_used_and_the_saved_token_is(self) -> None:
         self.store.set_token(SAVED, True)
         half = len(TOKEN) // 2

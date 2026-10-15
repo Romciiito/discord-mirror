@@ -29,6 +29,8 @@ log = logging.getLogger("mirror.engine")
 WINDOWS = sys.platform == "win32"
 TOKEN_ENV = "MANDO_TOKEN"
 TOKEN_FILE = "token.txt"
+TOKEN_FILE_LIMIT = 4096  # bytes: a token is under 100 characters, so a larger file holds something else
+TOKEN_LONGEST = 256  # characters, well above any Discord token
 
 
 def _rejected(exc: ApiError) -> bool:
@@ -36,10 +38,19 @@ def _rejected(exc: ApiError) -> bool:
     return exc.status in (401, 403) and not isinstance(exc, NotDiscordAnswer)
 
 
+class _TooLarge(ValueError):
+    """A token file larger than TOKEN_FILE_LIMIT, left unread."""
+
+
 def _file_token(path: Path) -> str:
     """The token in a token file, cleaned like a pasted one: clean_token strips spaces and line ends, then a pair of
-    quotes, and Notepad's UTF-8 BOM is dropped. Raises OSError, or UnicodeDecodeError for a file that is not UTF-8."""
-    return clean_token(path.read_text(encoding="utf-8-sig"))
+    quotes, and Notepad's UTF-8 BOM is dropped. Raises OSError, _TooLarge, or UnicodeDecodeError for a file that is
+    not UTF-8."""
+    with path.open("rb") as file:
+        data = file.read(TOKEN_FILE_LIMIT + 1)
+    if len(data) > TOKEN_FILE_LIMIT:
+        raise _TooLarge(TOKEN_FILE_LIMIT)
+    return clean_token(data.decode("utf-8-sig"))
 
 
 class _Outside(NamedTuple):
@@ -142,6 +153,9 @@ class Engine:
         try:
             token = _file_token(path)
         except FileNotFoundError:
+            return None
+        except _TooLarge:
+            self._said(f"{TOKEN_FILE} was not read (too large, over {TOKEN_FILE_LIMIT // 1024} KB)")
             return None
         except UnicodeDecodeError:
             self._said(f"{TOKEN_FILE} could not be read (not UTF-8 text)")
@@ -270,6 +284,8 @@ class Engine:
         token = clean_token(token)
         if len(token) < 40:
             raise ApiError(400, "token looks too short")
+        if len(token) > TOKEN_LONGEST:
+            raise ApiError(400, "token looks too long")
         if not all("!" <= char <= "~" for char in token):
             # a token is letters, digits, dots, dashes and underscores; a line end or another control character
             # never reaches Discord (aiohttp refuses the header), so it is no network failure to retry
