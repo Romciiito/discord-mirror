@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -19,6 +20,8 @@ from mirror.store import Store
 HOOK = "https://discord.com/api/webhooks/111/aaa"
 HOOK_B = "https://discord.com/api/webhooks/222/bbb"
 TOKEN = "fake-token_for.tests_only-0123456789.abcdefghij_klmnop"
+SAVED = "kept-token_for.tests_only-9876543210.zyxwvutsrq_ponmlk"
+ME = "https://discord.com/api/v9/users/@me"
 
 OLD_SCHEMA = """
 CREATE TABLE account (id INTEGER PRIMARY KEY CHECK (id = 1), token TEXT, keep INTEGER NOT NULL DEFAULT 0);
@@ -242,6 +245,26 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
 
     def notes(self) -> list[str]:
         return list(reversed(self.engine.lines))
+
+    def mando(self, file: bytes | None = None, env: str | None = None) -> Path:
+        """A Mando folder of its own (token.txt holding `file` when given), MANDO_TOKEN set to `env` or unset, and
+        the test's engine started from that folder."""
+        folder = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        if file is not None:
+            (folder / "token.txt").write_bytes(file)
+        environ = mock.patch.dict(os.environ)
+        environ.start()
+        self.addCleanup(environ.stop)
+        os.environ.pop("MANDO_TOKEN", None)
+        if env is not None:
+            os.environ["MANDO_TOKEN"] = env
+        self.engine = Engine(self.store, home=folder)
+
+        async def fast(seconds: float) -> None:
+            self.delays.append(seconds)
+
+        self.engine._wait = fast
+        return folder
 
     def test_store_hooks_survive_untick_and_retick(self) -> None:
         self.store.replace_selection([row("10"), row("11", name="lobby")])
@@ -486,6 +509,196 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         await self.engine.forget()
         self.assertTrue(task.cancelled())
         self.assertIsNone(self.engine._restore_task)
+
+    async def test_a_token_in_token_txt_wins_over_the_saved_one_and_the_file_is_deleted(self) -> None:
+        self.store.set_token(SAVED, True)
+        folder = self.mando(file=TOKEN.encode())
+        discord = FakeDiscord()
+        self.engine.session = discord
+        await self.engine.restore()
+        self.assertEqual(discord.sent, [(ME, TOKEN)])
+        self.assertEqual(self.store.token(), TOKEN)
+        self.assertEqual(self.engine.user["username"], "ada")
+        self.assertFalse((folder / "token.txt").exists())
+        self.assertEqual(self.notes(), ["token from token.txt accepted and saved, token.txt deleted"])
+        self.assertIsNone(self.engine._restore_task)
+
+    async def test_a_token_txt_that_cannot_be_deleted_is_named_in_the_note(self) -> None:
+        folder = self.mando(file=TOKEN.encode())
+        self.engine.session = FakeDiscord()
+        with mock.patch.object(Path, "unlink", side_effect=PermissionError(13, "Permission denied")):
+            await self.engine.restore()
+        self.assertEqual(self.store.token(), TOKEN)
+        self.assertTrue((folder / "token.txt").exists())
+        self.assertEqual(
+            self.notes(),
+            ["token from token.txt accepted and saved, token.txt could not be deleted (Permission denied), delete it"],
+        )
+
+    async def test_token_txt_saved_by_notepad_is_cleaned(self) -> None:
+        # Notepad's UTF-8 BOM, Windows line ends, blank lines and the quotes of a copied token
+        folder = self.mando(file=b'\xef\xbb\xbf  "' + TOKEN.encode() + b'"\r\n\r\n')
+        discord = FakeDiscord()
+        self.engine.session = discord
+        await self.engine.restore()
+        self.assertEqual(discord.sent, [(ME, TOKEN)])
+        self.assertEqual(self.store.token(), TOKEN)
+        self.assertFalse((folder / "token.txt").exists())
+
+    async def test_mando_token_wins_over_token_txt_and_the_saved_token(self) -> None:
+        self.store.set_token(SAVED, True)
+        other = SAVED.replace("kept", "file")
+        folder = self.mando(file=other.encode(), env=f' "{TOKEN}"\n')
+        discord = FakeDiscord()
+        self.engine.session = discord
+        await self.engine.restore()
+        self.assertEqual(discord.sent, [(ME, TOKEN)])
+        self.assertEqual(self.store.token(), TOKEN)
+        self.assertEqual((folder / "token.txt").read_bytes(), other.encode())
+
+    async def test_a_working_mando_token_is_saved_and_deletes_no_file(self) -> None:
+        folder = self.mando(file=TOKEN.encode(), env=TOKEN)
+        discord = FakeDiscord()
+        self.engine.session = discord
+        await self.engine.restore()
+        self.assertEqual(discord.sent, [(ME, TOKEN)])
+        self.assertEqual(self.store.token(), TOKEN)
+        self.assertEqual(self.notes(), ["token from MANDO_TOKEN accepted"])
+        self.assertEqual((folder / "token.txt").read_bytes(), TOKEN.encode())
+
+    async def test_a_token_discord_refuses_keeps_the_file_and_the_saved_token_signs_in(self) -> None:
+        refused = FakeResp('{"message": "401: Unauthorized", "code": 0}', 401)
+        for source, file, env in (("token.txt", TOKEN.encode(), None), ("MANDO_TOKEN", None, TOKEN)):
+            with self.subTest(source=source):
+                self.store.set_token(SAVED, True)
+                folder = self.mando(file=file, env=env)
+                discord = ScriptedDiscord(refused, FakeResp('{"id": "7", "username": "ada"}'))
+                self.engine.session = discord
+                await self.engine.restore()
+                self.assertEqual(discord.sent, [(ME, TOKEN), (ME, SAVED)])
+                self.assertEqual(
+                    self.notes(), [f"token in {source} was rejected (401: Unauthorized)", "saved token accepted"]
+                )
+                self.assertEqual(self.store.token(), SAVED)
+                self.assertIsNotNone(self.engine.http)
+                self.assertIsNone(self.engine._restore_task)
+                if file is not None:
+                    self.assertEqual((folder / "token.txt").read_bytes(), file)
+
+    async def test_a_token_txt_that_does_not_reach_discord_is_kept_and_tried_again(self) -> None:
+        # a Cloudflare block page is not Discord's answer: the file stays, the saved token is left alone, and the
+        # token is tried again with the saved token's backoff until a sign-in works
+        page = FakeResp("<html><body>error code: 1020</body></html>", 403)
+        self.store.set_token(SAVED, True)
+        folder = self.mando(file=TOKEN.encode())
+        discord = ScriptedDiscord(page, page, FakeResp('{"id": "7", "username": "ada"}'))
+        self.engine.session = discord
+        await self.engine.restore()
+        self.assertTrue((folder / "token.txt").exists())
+        self.assertEqual(self.store.token(), SAVED)
+        self.assertEqual(
+            self.notes(),
+            ["token in token.txt check failed (GET /users/@me failed (HTTP 403, Cloudflare error code 1020)), retrying"],
+        )
+        await self.engine._restore_task
+        self.assertEqual(discord.sent, [(ME, TOKEN)] * 3)
+        self.assertEqual(self.delays, [5.0, 10.0])
+        self.assertEqual(self.store.token(), TOKEN)
+        self.assertFalse((folder / "token.txt").exists())
+        self.assertEqual(self.notes()[1:], ["token from token.txt accepted and saved, token.txt deleted"])
+        self.assertIsNone(self.engine._restore_task)
+
+    async def test_a_token_txt_refused_on_a_retry_falls_back_to_the_saved_token(self) -> None:
+        page = FakeResp("<html><body>error code: 1020</body></html>", 403)
+        refused = FakeResp('{"message": "401: Unauthorized", "code": 0}', 401)
+        self.store.set_token(SAVED, True)
+        folder = self.mando(file=TOKEN.encode())
+        discord = ScriptedDiscord(page, refused, FakeResp('{"id": "7", "username": "ada"}'))
+        self.engine.session = discord
+        await self.engine.restore()
+        await self.engine._restore_task
+        self.assertEqual(discord.sent, [(ME, TOKEN), (ME, TOKEN), (ME, SAVED)])
+        self.assertEqual(self.notes()[1:], ["token in token.txt was rejected (401: Unauthorized)", "saved token accepted"])
+        self.assertEqual(self.store.token(), SAVED)
+        self.assertTrue((folder / "token.txt").exists())
+        self.assertIsNone(self.engine._restore_task)
+
+    async def test_an_empty_token_txt_or_mando_token_is_no_source(self) -> None:
+        self.store.set_token(SAVED, True)
+        folder = self.mando(file=b'\xef\xbb\xbf \r\n""\r\n', env="  \n")
+        discord = FakeDiscord()
+        self.engine.session = discord
+        await self.engine.restore()
+        self.assertEqual(discord.sent, [(ME, SAVED)])
+        self.assertEqual(self.notes(), ["saved token accepted"])
+        self.assertTrue((folder / "token.txt").exists())
+
+    async def test_a_token_txt_too_short_is_not_used_and_the_saved_token_is(self) -> None:
+        # a cut-off paste: no request, nothing retried, the file kept for the owner to fix
+        self.store.set_token(SAVED, True)
+        folder = self.mando(file=b"MTIz.Gx_y-Z\r\n")
+        discord = FakeDiscord()
+        self.engine.session = discord
+        await self.engine.restore()
+        self.assertEqual(discord.sent, [(ME, SAVED)])
+        self.assertEqual(self.notes(), ["token in token.txt was not used (token looks too short)", "saved token accepted"])
+        self.assertTrue((folder / "token.txt").exists())
+        self.assertIsNone(self.engine._restore_task)
+
+    async def test_a_token_txt_that_cannot_be_read_is_not_used_and_the_saved_token_is(self) -> None:
+        for name, make, note in (
+            ("utf-16", lambda path: path.write_bytes(TOKEN.encode("utf-16")), "token.txt could not be read (not UTF-8 text)"),
+            ("folder", lambda path: path.mkdir(), "token.txt could not be read ("),
+        ):
+            with self.subTest(name=name):
+                self.store.set_token(SAVED, True)
+                folder = self.mando()
+                make(folder / "token.txt")
+                discord = FakeDiscord()
+                self.engine.session = discord
+                await self.engine.restore()
+                self.assertEqual(discord.sent, [(ME, SAVED)])
+                self.assertTrue(self.notes()[0].startswith(note), self.notes())
+                self.assertEqual(self.notes()[1:], ["saved token accepted"])
+                self.assertTrue((folder / "token.txt").exists())
+
+    async def test_an_engine_without_a_mando_folder_takes_no_token_from_outside(self) -> None:
+        # only Mando started from its folder reads MANDO_TOKEN and token.txt; an engine of the tests never does
+        self.store.set_token(SAVED, True)
+        discord = FakeDiscord()
+        self.engine.session = discord
+        with mock.patch.dict(os.environ, {"MANDO_TOKEN": TOKEN}):
+            await self.engine.restore()
+        self.assertEqual(discord.sent, [(ME, SAVED)])
+        self.assertEqual(self.notes(), ["saved token accepted"])
+
+    async def test_a_token_from_outside_is_in_no_note_and_no_log_line(self) -> None:
+        ok = FakeResp('{"id": "7", "username": "ada"}')
+        page = FakeResp("<html><body>error code: 1020</body></html>", 403)
+        refused = FakeResp('{"message": "401: Unauthorized", "code": 0}', 401)
+        for source, answers in (
+            ("token.txt", (ok,)),
+            ("MANDO_TOKEN", (ok,)),
+            ("token.txt", (refused, ok)),
+            ("MANDO_TOKEN", (refused, ok)),
+            ("token.txt", (page, ok)),
+            ("token.txt", (aiohttp.ClientConnectionError("connection refused"), page, refused, ok)),
+        ):
+            with self.subTest(source=source, answers=answers):
+                self.store.set_token(SAVED, True)
+                if source == "token.txt":
+                    self.mando(file=TOKEN.encode())
+                else:
+                    self.mando(env=TOKEN)
+                self.engine.session = ScriptedDiscord(*answers)
+                with self.assertLogs("mirror", "DEBUG") as logs:
+                    await self.engine.restore()
+                    if self.engine._restore_task is not None:
+                        await self.engine._restore_task
+                said = "\n".join(self.notes() + logs.output)
+                self.assertNotIn(TOKEN, said)
+                self.assertNotIn(SAVED, said)
+                self.assertTrue(any(source in line for line in logs.output), logs.output)
 
     async def test_pasted_token_is_cleaned_before_check_and_store(self) -> None:
         discord = FakeDiscord()

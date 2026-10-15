@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from collections import defaultdict, deque
-from typing import Any
+from pathlib import Path
+from typing import Any, NamedTuple
 
 import aiohttp
 
@@ -25,6 +27,8 @@ from .store import Store
 
 log = logging.getLogger("mirror.engine")
 WINDOWS = sys.platform == "win32"
+TOKEN_ENV = "MANDO_TOKEN"
+TOKEN_FILE = "token.txt"
 
 
 def _rejected(exc: ApiError) -> bool:
@@ -32,9 +36,21 @@ def _rejected(exc: ApiError) -> bool:
     return exc.status in (401, 403) and not isinstance(exc, NotDiscordAnswer)
 
 
+class _Outside(NamedTuple):
+    """A token given at start from outside state.db: `name` is where it came from (MANDO_TOKEN or token.txt), `path`
+    the file to delete once a sign-in with it works (None for the environment variable)."""
+
+    token: str
+    name: str
+    path: Path | None
+
+
 class Engine:
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, home: Path | str | None = None) -> None:
         self.store = store
+        # the Mando folder (start.bat, mirror/): only an engine started from it takes a token from MANDO_TOKEN or
+        # its token.txt; None (the tests, an embedded engine) reads neither
+        self.home = Path(home) if home is not None else None
         self.session: aiohttp.ClientSession | None = None
         self.http: DiscordHTTP | None = None
         self.gateway: Gateway | None = None
@@ -95,44 +111,125 @@ class Engine:
         return [self.feed[mid] for mid in self.order if mid in self.feed]
 
     async def restore(self) -> None:
-        token = self.store.token()
-        if not token:
+        """Sign in at start. A token in MANDO_TOKEN, else in token.txt of the Mando folder, wins over the one saved in
+        state.db; the saved one signs in when there is none, or when that one is refused."""
+        outside = self._outside_token()
+        if outside is not None and await self._start_token(outside.token, outside):
             return
+        await self._restore_saved()
+
+    async def _restore_saved(self) -> None:
+        token = self.store.token()
+        if token:
+            await self._start_token(token, None)
+
+    def _outside_token(self) -> _Outside | None:
+        """The token in MANDO_TOKEN, else the one in token.txt of the Mando folder, read once and cleaned like a
+        pasted one (clean_token strips spaces and line ends, then a pair of quotes; Notepad's UTF-8 BOM is dropped).
+        None for an engine without a folder, and when both are missing or empty."""
+        if self.home is None:
+            return None
+        token = clean_token(os.environ.get(TOKEN_ENV, ""))
+        if token:
+            return _Outside(token, TOKEN_ENV, None)
+        path = self.home / TOKEN_FILE
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except FileNotFoundError:
+            return None
+        except UnicodeDecodeError:
+            self._said(f"{TOKEN_FILE} could not be read (not UTF-8 text)")
+            return None
+        except OSError as exc:
+            self._said(f"{TOKEN_FILE} could not be read ({exc.strerror or type(exc).__name__})")
+            return None
+        token = clean_token(text)
+        return _Outside(token, TOKEN_FILE, path) if token else None
+
+    async def _start_token(self, token: str, outside: _Outside | None) -> bool:
+        """One sign-in at start with the saved token (`outside` None) or a token from outside, retried later when
+        Discord is not reached. False when the token is refused, so that one from outside gives way to the saved one."""
         try:
             await self.use_token(token, keep=True)
-            self.note("saved token accepted")
         except ApiError as exc:
-            if _rejected(exc):
-                self.note("saved token was rejected")
-                self.store.forget_token()
-                return
-            self._retry_later(token, exc)
+            if self._refused(exc, outside):
+                return False
+            self._retry_later(token, exc, outside)
         except Exception as exc:
-            self._retry_later(token, exc)
+            self._retry_later(token, exc, outside)
+        else:
+            self._accepted(outside)
+        return True
 
-    def _retry_later(self, token: str, exc: Exception) -> None:
+    def _refused(self, exc: ApiError, outside: _Outside | None) -> bool:
+        """Whether the token is refused for good, noted: Discord itself refused it, or a token from outside does not
+        even look like one (use_token refuses it before any request, so trying again changes nothing). A refused
+        saved token is forgotten; a token from outside is left where it is."""
+        if outside is None:
+            if not _rejected(exc):
+                return False
+            self.note("saved token was rejected")
+            self.store.forget_token()
+            return True
+        if _rejected(exc):
+            self._said(f"token in {outside.name} was rejected ({exc.reason})")
+        elif exc.status == 400:
+            self._said(f"token in {outside.name} was not used ({exc})")
+        else:
+            return False
+        return True
+
+    def _accepted(self, outside: _Outside | None) -> None:
+        if outside is None:
+            self.note("saved token accepted")
+        elif outside.path is None:
+            self._said(f"token from {outside.name} accepted", logging.INFO)
+        else:
+            # state.db now keeps the token protected; the plain-text copy must not stay on disk
+            try:
+                outside.path.unlink(missing_ok=True)
+            except OSError as exc:
+                reason = exc.strerror or type(exc).__name__
+                self._said(
+                    f"token from {outside.name} accepted and saved, {outside.name} could not be deleted ({reason}), "
+                    "delete it"
+                )
+            else:
+                self._said(f"token from {outside.name} accepted and saved, {outside.name} deleted", logging.INFO)
+
+    def _said(self, text: str, level: int = logging.WARNING) -> None:
+        """A note that mando.log keeps too; never one with the token in it."""
+        self.note(text)
+        log.log(level, text)
+
+    def _retry_later(self, token: str, exc: Exception, outside: _Outside | None = None) -> None:
         reason = str(exc) or "network error"
-        self.note(f"saved token check failed ({reason}), retrying")
-        self._restore_task = asyncio.create_task(self._retry_token(token))
+        if outside is None:
+            self.note(f"saved token check failed ({reason}), retrying")
+        else:
+            self._said(f"token in {outside.name} check failed ({reason}), retrying")
+        self._restore_task = asyncio.create_task(self._retry_token(token, outside))
 
-    async def _retry_token(self, token: str) -> None:
+    async def _retry_token(self, token: str, outside: _Outside | None = None) -> None:
         delay = 5.0
         try:
             while True:
                 await self._wait(delay)
-                if self.http is not None or self.store.token() != token:
+                # a sign-in meanwhile ends the retry, and so does a saved token that changed; a token from outside
+                # is in the store only once it works
+                if self.http is not None or (outside is None and self.store.token() != token):
                     return
                 try:
                     await self.use_token(token, keep=True)
                 except ApiError as exc:
-                    if _rejected(exc):
-                        self.note("saved token was rejected")
-                        self.store.forget_token()
+                    if self._refused(exc, outside):
+                        if outside is not None:
+                            await self._restore_saved()
                         return
                 except Exception:
                     pass
                 else:
-                    self.note("saved token accepted")
+                    self._accepted(outside)
                     return
                 delay = min(delay * 2, 120.0)
         finally:
