@@ -192,7 +192,8 @@ class Engine:
             return True
         if _rejected(exc):
             self._said(f"token in {outside.name} was rejected ({exc.reason})")
-        elif exc.status == 400:
+        elif exc.status == 400 and not isinstance(exc, NotDiscordAnswer):
+            # use_token's own refusal or Discord's; a 400 that is not Discord's answer means it was not reached
             self._said(f"token in {outside.name} was not used ({exc})")
         else:
             return False

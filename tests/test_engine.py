@@ -664,6 +664,34 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((folder / "token.txt").exists())
         self.assertEqual(self.notes()[1:], ["token from token.txt accepted and saved, token.txt deleted"])
 
+    async def test_a_400_that_is_not_discords_answer_is_tried_again(self) -> None:
+        # a proxy or block page answering 400 means Discord was not reached, as for a 401 or 403 (_rejected); only
+        # Discord's own 400 is final
+        ok = FakeResp('{"id": "7", "username": "ada"}')
+        self.store.set_token(SAVED, True)
+        folder = self.mando(file=TOKEN.encode())
+        discord = ScriptedDiscord(FakeResp("<html><body>400 Bad Request</body></html>", 400), ok)
+        self.engine.session = discord
+        await self.engine.restore()
+        self.assertEqual(self.notes(), ["token in token.txt check failed (GET /users/@me failed (HTTP 400)), retrying"])
+        self.assertTrue((folder / "token.txt").exists())
+        self.assertEqual(self.store.token(), SAVED)
+        await self.engine._restore_task
+        self.assertEqual(discord.sent, [(ME, TOKEN)] * 2)
+        self.assertEqual(self.store.token(), TOKEN)
+        self.assertFalse((folder / "token.txt").exists())
+        self.assertEqual(self.notes()[1:], ["token from token.txt accepted and saved, token.txt deleted"])
+
+        self.store.set_token(SAVED, True)
+        folder = self.mando(file=TOKEN.encode())
+        discord = ScriptedDiscord(FakeResp('{"message": "400: Bad Request", "code": 0}', 400), ok)
+        self.engine.session = discord
+        await self.engine.restore()
+        self.assertEqual(discord.sent, [(ME, TOKEN), (ME, SAVED)])
+        self.assertEqual(self.notes(), ["token in token.txt was not used (400: Bad Request)", "saved token accepted"])
+        self.assertTrue((folder / "token.txt").exists())
+        self.assertIsNone(self.engine._restore_task)
+
     async def test_a_token_txt_refused_on_a_retry_falls_back_to_the_saved_token(self) -> None:
         page = FakeResp("<html><body>error code: 1020</body></html>", 403)
         refused = FakeResp('{"message": "401: Unauthorized", "code": 0}', 401)
