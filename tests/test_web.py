@@ -290,11 +290,19 @@ class MainTests(unittest.TestCase):
                 entry, "create_app"
             ) as make, mock.patch.object(entry, "serve") as run, mock.patch.object(entry, "serve_and_cli") as both:
                 entry.main()
-            make.assert_called_once_with(tmp, "0.0.0.0", 9000)
+            make.assert_called_once_with(tmp, "0.0.0.0", 9000, home=ROOT)
             run.assert_called_once_with(make.return_value, "0.0.0.0", 9000)
             both.assert_not_called()
             self.assertTrue(os.path.isfile(os.path.join(tmp, "mando.log")))
             self.tearDown()
+
+    def test_the_engine_gets_the_mando_folder_it_was_started_from(self) -> None:
+        # the folder of start.bat and mirror/, where token.txt is read; an app made without it reads none
+        with tempfile.TemporaryDirectory() as tmp:
+            started, plain = create_app(tmp, home=ROOT)["engine"], create_app(tmp)["engine"]
+            started.store.close()
+            plain.store.close()
+            self.assertEqual((started.home, plain.home), (ROOT, None))
 
     def test_main_runs_server_and_cli_with_a_tty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -314,7 +322,8 @@ class MainTests(unittest.TestCase):
         raised: Any = None
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
 
-            def make(*args: Any) -> Any:
+            def make(*args: Any, home: Any = None) -> Any:
+                # without the Mando folder: a real start in a test never signs in with its token.txt or MANDO_TOKEN
                 app = create_app(*args)
                 made["close"] = stack.enter_context(
                     mock.patch.object(app["engine"], "close", wraps=app["engine"].close)
@@ -460,13 +469,23 @@ class MainTests(unittest.TestCase):
             with open(out, encoding="utf-8") as seen:
                 self.assertEqual(seen.read(), "True")
 
+    def _no_outside_token(self, env: dict[str, str]) -> dict[str, str]:
+        """`python -m mirror` run from ROOT signs in with MANDO_TOKEN, else ROOT/token.txt: a test start takes
+        neither, so no real token reaches Discord from a test."""
+        if (ROOT / "token.txt").exists():
+            self.skipTest("token.txt in the Mando folder: a test start of Mando would sign in with it")
+        env.pop("MANDO_TOKEN", None)
+        return env
+
     def test_without_a_terminal_the_api_server_runs(self) -> None:
         # story 36: stdin and stdout on the null device (a hidden start, a scheduler, `start /b` with
         # redirects) must still serve the API
         port = _free_port()
         tmp = tempfile.mkdtemp()
         self.addCleanup(_remove_when_free, tmp)
-        env = dict(os.environ, HOST="127.0.0.1", DATA_DIR=os.path.join(tmp, "data"), PORT=str(port), PYTHONUTF8="1")
+        env = self._no_outside_token(
+            dict(os.environ, HOST="127.0.0.1", DATA_DIR=os.path.join(tmp, "data"), PORT=str(port), PYTHONUTF8="1")
+        )
         err_path = os.path.join(tmp, "err.txt")
         with open(err_path, "wb") as err:
             proc = subprocess.Popen(
@@ -486,7 +505,9 @@ class MainTests(unittest.TestCase):
         port = _free_port()
         tmp = tempfile.mkdtemp()
         self.addCleanup(_remove_when_free, tmp)
-        env = dict(os.environ, HOST="127.0.0.1", DATA_DIR=os.path.join(tmp, "data"), PORT=str(port), PYTHONUTF8="1")
+        env = self._no_outside_token(
+            dict(os.environ, HOST="127.0.0.1", DATA_DIR=os.path.join(tmp, "data"), PORT=str(port), PYTHONUTF8="1")
+        )
         out_path, err_path = os.path.join(tmp, "out.txt"), os.path.join(tmp, "err.txt")
         with open(out_path, "wb") as out, open(err_path, "wb") as err:
             proc = subprocess.Popen(
@@ -684,7 +705,8 @@ class ServeAndCliTests(unittest.TestCase):
         err = io.StringIO()
         with socket.socket() as taken, contextlib.ExitStack() as stack:
 
-            def make(*args: Any) -> Any:
+            def make(*args: Any, home: Any = None) -> Any:
+                # without the Mando folder: a real start in a test never signs in with its token.txt or MANDO_TOKEN
                 app = create_app(*args)
                 made["close"] = stack.enter_context(
                     mock.patch.object(app["engine"], "close", wraps=app["engine"].close)
@@ -737,7 +759,8 @@ class ServeAndCliTests(unittest.TestCase):
 
         with contextlib.ExitStack() as stack:
 
-            def make(*args: Any) -> Any:
+            def make(*args: Any, home: Any = None) -> Any:
+                # without the Mando folder: a real start in a test never signs in with its token.txt or MANDO_TOKEN
                 app = create_app(*args)
                 made["close"] = stack.enter_context(
                     mock.patch.object(app["engine"], "close", wraps=app["engine"].close)

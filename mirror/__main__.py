@@ -212,11 +212,13 @@ def serve_and_cli(app: web.Application, host: str, port: int) -> None:
 def main() -> None:
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8765"))
+    # the Mando folder, which holds start.bat and mirror/: token.txt is read there, never in DATA_DIR
+    home = Path(__file__).resolve().parent.parent
     data = os.environ.get("DATA_DIR")
     if not data:
-        data = str(Path(__file__).resolve().parent.parent / "data")
+        data = str(home / "data")
     configure_logging(data)
-    app = create_app(data, host, port)
+    app = create_app(data, host, port, home=home)
     try:
         if wants_cli():
             serve_and_cli(app, host, port)

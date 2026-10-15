@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from aiohttp import web
@@ -207,10 +208,14 @@ async def _stop(app: web.Application) -> None:
     await app["engine"].close()
 
 
-def create_app(data_dir: str, host: str = "127.0.0.1", port: int = 8765) -> web.Application:
+def create_app(
+    data_dir: str, host: str = "127.0.0.1", port: int = 8765, home: Path | None = None
+) -> web.Application:
+    """The API app. `home` is the Mando folder the engine takes MANDO_TOKEN and token.txt from at start; without
+    it the engine signs in with the saved token only."""
     app = web.Application(middlewares=[origin_guard, guard], client_max_size=1024 * 512)
     app["bind"] = (host, port)
-    app["engine"] = Engine(Store(data_dir))
+    app["engine"] = Engine(Store(data_dir), home)
     app["streams"] = set()
     app.on_startup.append(_start)
     app.on_shutdown.append(_end_streams)
