@@ -506,6 +506,18 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(gate.resubscribe(), 1.0)
         self.assertEqual(ws.sent, [])
 
+    async def test_each_subscription_is_logged_with_its_server_channel_count_and_size(self) -> None:
+        ws = FakeWS([hello(10000), ready(), {"op": 7}])
+        gate = self.build([ws])
+        gate.set_subscriptions({"111": ["1", "2", "3"], "222": []}, False)
+        with self.assertLogs("mirror.gateway", logging.INFO) as seen:
+            await self.once(gate)
+        sent = [p for p in ws.sent if p["op"] == 14]
+        self.assertEqual(len(sent), 1)
+        size = len(json.dumps(sent[0], separators=(",", ":")).encode())
+        lines = [line for line in seen.output if "subscribing" in line]
+        self.assertEqual(lines, [f"INFO:mirror.gateway:gateway subscribing server 111: 3 channel(s), {size} bytes"])
+
     async def test_a_session_that_raised_is_logged_with_the_error_and_the_next_step(self) -> None:
         ws = FakeWS([])
         gate = self.build([ws])

@@ -356,20 +356,21 @@ class Gateway:
         for guild_id, channels in self._channels.items():
             if not channels:
                 continue
-            await self._send(
-                ws,
-                {
-                    "op": 14,
-                    "d": {
-                        "guild_id": guild_id,
-                        "typing": False,
-                        "threads": self._threads,
-                        "activities": False,
-                        "members": [],
-                        "channels": {channel_id: [[0, 99]] for channel_id in channels},
-                    },
+            payload = {
+                "op": 14,
+                "d": {
+                    "guild_id": guild_id,
+                    "typing": False,
+                    "threads": self._threads,
+                    "activities": False,
+                    "members": [],
+                    "channels": {channel_id: [[0, 99]] for channel_id in channels},
                 },
-            )
+            }
+            # the server, its channel count and the size Discord gets, so mando.log can tie a close to this send
+            size = len(json.dumps(payload, separators=(",", ":")).encode())
+            log.info("gateway subscribing server %s: %d channel(s), %d bytes", guild_id, len(channels), size)
+            await self._send(ws, payload)
             await asyncio.sleep(0.25)
 
     async def _recv_json(self, ws: aiohttp.ClientWebSocketResponse, inflator: Inflate, timeout: float | None = None) -> dict | None:
