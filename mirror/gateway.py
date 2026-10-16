@@ -26,8 +26,8 @@ TOO_MANY = 4015  # discord-userdoccers: too many Gateway sessions open for the u
 # or RESUMED; in mando.log 2026-10-16 sessions that ended seconds after READY got a new READY every 5-6 s,
 # since any READY put the backoff back to 1 s
 HEALTHY_AFTER = 60.0
-# this many sessions in a row that end within HEALTHY_AFTER of READY stop the gateway: each READY took an
-# IDENTIFY, and repeated rapid identifies risk the account
+# this many connections in a row that sent IDENTIFY and ended before READY or within HEALTHY_AFTER of it stop
+# the gateway: repeated rapid identifies risk the account
 SHORT_LIMIT = 3
 
 
@@ -68,7 +68,7 @@ class Gateway:
         self._sub_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
         self._acked = True
-        self._short = 0  # sessions in a row that ended within HEALTHY_AFTER of READY
+        self._short = 0  # IDENTIFY connections in a row that ended before READY or within HEALTHY_AFTER of it
         self._fatal_text = ""
         self._begin()
 
@@ -79,6 +79,7 @@ class Gateway:
         self._close_code: int | None = None  # the code of Discord's close frame, None without one
         self._close_reason = ""
         self._why = ""  # what else ended the connection: op 7, op 9, a timeout, a missing ack, an error
+        self._identified = False  # this connection sent IDENTIFY (op 2), so it started a new session
 
     def _note_end(self, why: str) -> None:
         if not self._why:
@@ -168,8 +169,9 @@ class Gateway:
             if lived is not None and lived >= HEALTHY_AFTER:
                 delay = 1.0
                 self._short = 0
-            elif lived is not None and self._live_event == "READY":
-                # a RESUMED connection started no new session; it neither counts nor resets the count
+            elif self._identified:
+                # an IDENTIFY that ended before READY or soon after it; a RESUME, a refused one included, and a
+                # connection that never got to IDENTIFY started no new session: they neither count nor reset
                 self._short += 1
                 short = True
             if not self._stop.is_set() and self._short >= SHORT_LIMIT:
@@ -273,6 +275,7 @@ class Gateway:
                 },
             )
             return
+        self._identified = True
         props = dict(self.http.properties)
         await self._send(
             ws,

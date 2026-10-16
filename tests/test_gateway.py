@@ -338,6 +338,7 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
             lived = gw.HEALTHY_AFTER + 1 if step == "ok" else 2.0
             gate._live_at = time.monotonic() - lived
             gate._live_event = "RESUMED" if step == "resumed" else "READY"
+            gate._identified = step != "resumed"  # a READY follows an IDENTIFY, a RESUMED a RESUME
             gate._close_code = 4000
 
         gate._once = once
@@ -395,6 +396,34 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.http.session.calls), 5)
         self.assertEqual([ws.login()["op"] for ws in sockets], [2, 6, 2, 6, 2])
         self.assertEqual([int(w) for w in self.waits], [1, 2, 4, 8])
+
+    async def test_identifies_that_discord_closes_before_ready_stop_the_gateway(self) -> None:
+        # review of PR #14: without READY the session was never counted and the loop identified every ~21 s
+        sockets = [FakeWS([hello(10000), (4000, "")]) for _ in range(3)]
+        gate = self.build(sockets, resume=False)
+        lines = (await self.ended(gate)).splitlines()
+        self.assertEqual(self.fatal, ["Discord keeps closing (close code 4000), mirror stopped"])
+        self.assertEqual([ws.login()["op"] for ws in sockets], [2, 2, 2])
+        self.assertEqual([int(w) for w in self.waits], [1, 2])
+        self.assertIn("no READY or RESUMED, short session 1 of 3, next identify", lines[0])
+
+    async def test_identifies_answered_with_op9_stop_the_gateway(self) -> None:
+        sockets = [FakeWS([hello(10000), {"op": 9, "d": False}]) for _ in range(3)]
+        gate = self.build(sockets, resume=False)
+        await asyncio.wait_for(gate._run(), 1.0)
+        self.assertEqual(self.fatal, ["Discord keeps closing (no close code), mirror stopped"])
+        self.assertEqual([ws.login()["op"] for ws in sockets], [2, 2, 2])
+
+    async def test_connections_without_an_identify_are_not_counted(self) -> None:
+        # a missing HELLO sends no IDENTIFY; a refused RESUME is covered by the storm test above
+        sockets = [FakeWS([]) for _ in range(3)]
+        gate = self.build(sockets, resume=False)
+        self.stop_at_first_wait(gate, 3)
+        with mock.patch.object(gw, "HELLO_WAIT", 0.02):
+            await asyncio.wait_for(gate._run(), 1.0)
+        self.assertEqual(self.fatal, [])
+        self.assertEqual([ws.sent for ws in sockets], [[], [], []])
+        self.assertEqual(gate._short, 0)
 
     async def test_backoff_caps_at_20(self) -> None:
         gate = self.build([])
@@ -485,11 +514,12 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gate._live_event, "READY")
         self.assertEqual(self.events, ["READY"])
 
-    def stop_at_first_wait(self, gate: Gateway) -> None:
-        # the session's end is logged before the backoff wait; stopping there ends _run after one session
+    def stop_at_first_wait(self, gate: Gateway, waits: int = 1) -> None:
+        # the session's end is logged before the backoff wait; stopping there ends _run after `waits` sessions
         async def wait(seconds: float) -> None:
             self.waits.append(seconds)
-            gate._stop.set()
+            if len(self.waits) >= waits:
+                gate._stop.set()
 
         gate._wait = wait
 
