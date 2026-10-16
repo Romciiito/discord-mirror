@@ -307,6 +307,16 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(0.1, ws.timeouts)
         self.assertEqual(gate.session_id, "s")
 
+    async def test_a_receive_timeout_without_a_set_timeout_ends_the_read(self) -> None:
+        # aiohttp can time out on its own receive timeout while ours is None
+        class Timing(FakeWS):
+            async def receive(self, timeout: float | None = None) -> aiohttp.WSMessage:
+                raise asyncio.TimeoutError()
+
+        gate = self.build([])
+        self.assertIsNone(await gate._recv_json(Timing([]), gw.Inflate(), None))
+        self.assertEqual(gate._why, "receive timed out")
+
     async def test_read_timeout_follows_interval(self) -> None:
         gate = self.build([])
         self.assertEqual(gate._patience(41.25), 92.5)

@@ -400,7 +400,7 @@ class Gateway:
             try:
                 msg = await ws.receive(timeout=timeout)
             except asyncio.TimeoutError:
-                self._note_end(f"no packet for {timeout:g} s")
+                self._note_end(f"no packet for {timeout} s" if timeout else "receive timed out")
                 return None
             if msg.type == aiohttp.WSMsgType.CLOSE:
                 # Discord's close frame: data is the close code, extra the reason
