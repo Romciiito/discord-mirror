@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import unittest
 from typing import Any
 from unittest import mock
@@ -33,15 +34,20 @@ CLOSED = aiohttp.WSMessage(aiohttp.WSMsgType.CLOSED, None, None)
 
 
 class FakeWS:
-    def __init__(self, packets: list[Any], end: str = "block", ack: bool = True) -> None:
+    def __init__(self, packets: list[Any], end: str = "block", ack: bool = True, fail_ops: frozenset[int] = frozenset()) -> None:
         self.queue: asyncio.Queue = asyncio.Queue()
         for item in packets:
             if isinstance(item, int):
                 self.queue.put_nowait(aiohttp.WSMessage(aiohttp.WSMsgType.CLOSE, item, ""))
+            elif isinstance(item, tuple):
+                # Discord's close frame with a reason: (code, reason)
+                self.queue.put_nowait(aiohttp.WSMessage(aiohttp.WSMsgType.CLOSE, item[0], item[1]))
             else:
                 self.queue.put_nowait(text(item))
         self.end = end
         self.ack = ack
+        # ops whose send meets a closing transport, as aiohttp raises it (mando.log 2026-10-16 21:39:17)
+        self.fail_ops = fail_ops
         self.closed = False
         self.close_code: int | None = None
         self.codes: list[int] = []
@@ -71,8 +77,13 @@ class FakeWS:
         self.queue.put_nowait(CLOSED)
         return True
 
+    def exception(self) -> BaseException | None:
+        return None
+
     async def send_str(self, raw: str) -> None:
         packet = json.loads(raw)
+        if packet.get("op") in self.fail_ops:
+            raise aiohttp.ClientConnectionResetError("Cannot write to closing transport")
         self.sent.append(packet)
         if packet.get("op") == 40 and self.ack:
             self.queue.put_nowait(text({"op": 11}))
@@ -296,6 +307,16 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(0.1, ws.timeouts)
         self.assertEqual(gate.session_id, "s")
 
+    async def test_a_receive_timeout_without_a_set_timeout_ends_the_read(self) -> None:
+        # aiohttp can time out on its own receive timeout while ours is None
+        class Timing(FakeWS):
+            async def receive(self, timeout: float | None = None) -> aiohttp.WSMessage:
+                raise asyncio.TimeoutError()
+
+        gate = self.build([])
+        self.assertIsNone(await gate._recv_json(Timing([]), gw.Inflate(), None))
+        self.assertEqual(gate._why, "receive timed out")
+
     async def test_read_timeout_follows_interval(self) -> None:
         gate = self.build([])
         self.assertEqual(gate._patience(41.25), 92.5)
@@ -304,26 +325,130 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         steps = iter(plan)
 
         async def once() -> None:
+            gate._begin()
             step = next(steps, None)
             if step is None:
                 gate._stop.set()
                 return
-            if step == "ok":
-                gate._healthy = True
-                return
             if step == "quiet":
                 return
-            raise RuntimeError("boom")
+            if step == "fail":
+                raise RuntimeError("boom")
+            # "ok": READY and 61 s of life; "short": READY and Discord's close 2 s later; "resumed": RESUMED, 2 s
+            lived = gw.HEALTHY_AFTER + 1 if step == "ok" else 2.0
+            gate._live_at = time.monotonic() - lived
+            gate._live_event = "RESUMED" if step == "resumed" else "READY"
+            gate._identified = step != "resumed"  # a READY follows an IDENTIFY, a RESUMED a RESUME
+            gate._close_code = 4000
 
         gate._once = once
 
-    async def test_backoff_resets_only_after_ready(self) -> None:
+    async def test_backoff_resets_only_after_a_session_that_lived_60_s(self) -> None:
         gate = self.build([])
         self.script(gate, ["fail", "fail", "quiet", "ok", "fail"])
         await asyncio.wait_for(gate._run(), 1.0)
         self.assertEqual([int(w) for w in self.waits], [1, 2, 4, 1, 2])
         for w in self.waits:
             self.assertLess(w - int(w), 1.0)
+
+    async def test_short_sessions_keep_the_backoff_growing(self) -> None:
+        gate = self.build([])
+        self.script(gate, ["short", "short", "ok", "short", "short"])
+        await asyncio.wait_for(gate._run(), 1.0)
+        self.assertEqual([int(w) for w in self.waits], [1, 2, 1, 2, 4])
+        self.assertEqual(self.fatal, [])
+
+    async def test_three_short_sessions_in_a_row_stop_the_gateway(self) -> None:
+        gate = self.build([])
+        self.script(gate, ["short", "quiet", "short", "fail", "short", "short"])
+        await asyncio.wait_for(gate._run(), 1.0)
+        self.assertEqual(self.fatal, ["close 4000: Discord keeps closing, stopped"])
+        self.assertTrue(gate._stop.is_set())
+        self.assertEqual([int(w) for w in self.waits], [1, 2, 4, 8])
+
+    async def test_short_resumed_sessions_do_not_stop_the_gateway(self) -> None:
+        # a RESUME starts no new session; the stop guards against repeated IDENTIFY
+        gate = self.build([])
+        self.script(gate, ["resumed"] * 4)
+        await asyncio.wait_for(gate._run(), 1.0)
+        self.assertEqual(self.fatal, [])
+        self.assertEqual([int(w) for w in self.waits], [1, 2, 4, 8])
+
+    async def test_a_storm_of_short_sessions_identifies_three_times_and_stops(self) -> None:
+        # mando.log 2026-10-16 21:35-21:40: READY every 5-6 s, never RESUMED. Here Discord closes each session
+        # right after READY with 4000 and refuses the resume (op 9, false), so each READY needs an IDENTIFY
+        sockets = []
+        for at in range(5):
+            if at % 2:
+                sockets.append(FakeWS([hello(10000), {"op": 9, "d": False}]))
+            else:
+                sockets.append(FakeWS([hello(10000), ready(), (4000, "")]))
+        gate = self.build(sockets, resume=False)
+        lines = (await self.ended(gate)).splitlines()
+        self.assertEqual(len(lines), 5)
+        self.assertIn("short session 1 of 3, next resume", lines[0])
+        self.assertIn("no READY or RESUMED, next identify", lines[1])
+        self.assertIn(
+            "short session 3 of 3, next stop: close 4000: Discord keeps closing, stopped",
+            lines[4],
+        )
+        self.assertEqual(self.fatal, ["close 4000: Discord keeps closing, stopped"])
+        self.assertEqual(len(self.http.session.calls), 5)
+        self.assertEqual([ws.login()["op"] for ws in sockets], [2, 6, 2, 6, 2])
+        self.assertEqual([int(w) for w in self.waits], [1, 2, 4, 8])
+
+    async def test_identifies_that_discord_closes_before_ready_stop_the_gateway(self) -> None:
+        # review of PR #14: without READY the session was never counted and the loop identified every ~21 s
+        sockets = [FakeWS([hello(10000), (4000, "")]) for _ in range(3)]
+        gate = self.build(sockets, resume=False)
+        lines = (await self.ended(gate)).splitlines()
+        self.assertEqual(self.fatal, ["close 4000: Discord keeps closing, stopped"])
+        self.assertEqual([ws.login()["op"] for ws in sockets], [2, 2, 2])
+        self.assertEqual([int(w) for w in self.waits], [1, 2])
+        self.assertIn("no READY or RESUMED, short session 1 of 3, next identify", lines[0])
+
+    async def test_identifies_answered_with_op9_stop_the_gateway(self) -> None:
+        sockets = [FakeWS([hello(10000), {"op": 9, "d": False}]) for _ in range(3)]
+        gate = self.build(sockets, resume=False)
+        await asyncio.wait_for(gate._run(), 1.0)
+        self.assertEqual(self.fatal, ["connection keeps ending, stopped"])
+        self.assertEqual([ws.login()["op"] for ws in sockets], [2, 2, 2])
+
+    async def test_a_short_ready_counts_also_on_a_connection_that_sent_resume(self) -> None:
+        # a READY is always a new session; the review's engine scenario answers each RESUME with READY
+        sockets = [FakeWS([hello(10000), ready(), (4000, "Unknown error")]) for _ in range(3)]
+        gate = self.build(sockets, resume=False)
+        await asyncio.wait_for(gate._run(), 1.0)
+        self.assertEqual([ws.login()["op"] for ws in sockets], [2, 6, 6])
+        self.assertEqual(self.fatal, ["close 4000: Discord keeps closing, stopped"])
+
+    async def test_a_new_start_after_the_stop_counts_from_zero(self) -> None:
+        # review of PR #14: start() on the same object kept _short and _fatal_text, so its first short session
+        # stopped the gateway again and a stop by Mando was logged as a stop for Discord's closes
+        sockets = [FakeWS([hello(10000), ready(), 4009]) for _ in range(4)]
+        sockets.append(FakeWS([hello(10000), ready()]))
+        gate = self.build(sockets, resume=False)
+        await asyncio.wait_for(gate._run(), 1.0)
+        self.assertEqual(self.fatal, ["close 4009: Discord keeps closing, stopped"])
+        with self.assertLogs("mirror.gateway", logging.WARNING) as seen:
+            gate.start()
+            self.assertTrue(await until(lambda: self.events.count("READY") == 5, 1.0), self.fatal)
+            await asyncio.wait_for(gate.stop(), 1.0)
+        ended = [line for line in seen.output if "gateway session ended" in line]
+        self.assertEqual(len(ended), 1, ended)
+        self.assertIn("short session 1 of 3, next identify", ended[0])
+        self.assertEqual(self.fatal, ["close 4009: Discord keeps closing, stopped"])
+
+    async def test_connections_without_an_identify_are_not_counted(self) -> None:
+        # a missing HELLO sends no IDENTIFY; a refused RESUME is covered by the storm test above
+        sockets = [FakeWS([]) for _ in range(3)]
+        gate = self.build(sockets, resume=False)
+        self.stop_at_first_wait(gate, 3)
+        with mock.patch.object(gw, "HELLO_WAIT", 0.02):
+            await asyncio.wait_for(gate._run(), 1.0)
+        self.assertEqual(self.fatal, [])
+        self.assertEqual([ws.sent for ws in sockets], [[], [], []])
+        self.assertEqual(gate._short, 0)
 
     async def test_backoff_caps_at_20(self) -> None:
         gate = self.build([])
@@ -356,6 +481,17 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(gate._run(), 1.0)
         self.assertEqual(self.fatal, ["gateway refused the session"])
         self.assertEqual(ws.codes, [4000])
+
+    async def test_server_close_4015_too_many_sessions_is_fatal(self) -> None:
+        # discord-userdoccers: 4015 "Too many sessions", at most 50 active Gateway sessions for a user account;
+        # another IDENTIFY would only add one
+        ws = FakeWS([hello(), ready(), 4015])
+        gate = self.build([ws])
+        await asyncio.wait_for(gate._run(), 1.0)
+        self.assertEqual(self.fatal, ["close 4015: too many sessions, stopped"])
+        self.assertTrue(gate._stop.is_set())
+        self.assertEqual(len(self.http.session.calls), 1)
+        self.assertEqual(self.waits, [])
 
     async def test_4009_clears_session(self) -> None:
         ws = FakeWS([hello(), ready(7), 4009])
@@ -394,13 +530,132 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(login["d"], {"token": "t", "session_id": "s", "seq": 9})
         self.assertEqual(self.http.session.calls[0][0].split("?")[0], "wss://r")
 
-    async def test_ready_sends_op41_and_marks_healthy(self) -> None:
+    async def test_ready_sends_op41_and_marks_the_session_live(self) -> None:
         ws = FakeWS([hello(), ready(), {"op": 7}])
         gate = self.build([ws])
         await self.once(gate)
         self.assertIn(41, ws.ops())
-        self.assertTrue(gate._healthy)
+        self.assertIsNotNone(gate._live_at)
+        self.assertEqual(gate._live_event, "READY")
         self.assertEqual(self.events, ["READY"])
+
+    def stop_at_first_wait(self, gate: Gateway, waits: int = 1) -> None:
+        # the session's end is logged before the backoff wait; stopping there ends _run after `waits` sessions
+        async def wait(seconds: float) -> None:
+            self.waits.append(seconds)
+            if len(self.waits) >= waits:
+                gate._stop.set()
+
+        gate._wait = wait
+
+    async def ended(self, gate: Gateway) -> str:
+        with self.assertLogs("mirror.gateway", logging.WARNING) as seen:
+            await asyncio.wait_for(gate._run(), 1.0)
+        return "\n".join(line for line in seen.output if "gateway session ended" in line)
+
+    async def test_a_session_end_is_logged_with_the_close_code_reason_age_and_next_step(self) -> None:
+        ws = FakeWS([hello(), ready(3), (4000, "Unknown error")])
+        gate = self.build([ws], resume=False)
+        self.http.token = "TOKEN-THAT-MUST-NOT-BE-LOGGED"
+        self.stop_at_first_wait(gate)
+        line = await self.ended(gate)
+        self.assertIn("close code 4000", line)
+        self.assertIn("reason 'Unknown error'", line)
+        self.assertRegex(line, r"\d+\.\d s after READY")
+        self.assertRegex(line, r"next resume in \d+\.\d s")
+        self.assertNotIn("TOKEN-THAT-MUST-NOT-BE-LOGGED", line)
+        self.assertEqual(len(self.waits), 1)
+
+    async def test_a_session_end_with_4009_says_it_identifies_next(self) -> None:
+        ws = FakeWS([hello(), ready(), 4009])
+        gate = self.build([ws])
+        self.stop_at_first_wait(gate)
+        line = await self.ended(gate)
+        self.assertIn("close code 4009", line)
+        self.assertIn("next identify", line)
+
+    async def test_an_invalid_session_end_names_op9_without_a_close_code(self) -> None:
+        ws = FakeWS([hello(), ready(), {"op": 9, "d": False}])
+        gate = self.build([ws])
+        self.stop_at_first_wait(gate)
+        line = await self.ended(gate)
+        self.assertIn("no close code", line)
+        self.assertIn("invalid session (op 9, resumable false)", line)
+        self.assertIn("next identify", line)
+
+    async def test_a_resume_that_is_refused_is_logged_as_an_end_before_ready(self) -> None:
+        ws = FakeWS([hello(), {"op": 9, "d": False}])
+        gate = self.build([ws])
+        gate.session_id = "s"
+        gate.sequence = 4
+        self.stop_at_first_wait(gate)
+        line = await self.ended(gate)
+        self.assertEqual(ws.login()["op"], 6)
+        self.assertIn("no READY or RESUMED", line)
+        self.assertIn("next identify", line)
+
+    async def test_a_fatal_close_is_logged_with_its_code_and_the_stop(self) -> None:
+        ws = FakeWS([hello(), ready(), (4004, "Authentication failed")])
+        gate = self.build([ws])
+        line = await self.ended(gate)
+        self.assertIn("close code 4004, reason 'Authentication failed'", line)
+        self.assertIn("next stop: token was rejected", line)
+        self.assertEqual(self.fatal, ["token was rejected"])
+
+    async def test_a_stop_by_mando_is_not_logged_as_a_session_end(self) -> None:
+        ws = FakeWS([hello(), ready()])
+        gate = self.build([ws])
+        log = logging.getLogger("mirror.gateway")
+        log.setLevel(logging.WARNING)
+        with mock.patch.object(log, "warning") as warning:
+            gate.start()
+            self.assertTrue(await until(lambda: "READY" in self.events))
+            await asyncio.wait_for(gate.stop(), 1.0)
+        self.assertEqual([c for c in warning.call_args_list if "gateway session ended" in str(c)], [])
+
+    async def test_a_send_on_a_closing_transport_reads_discords_close_frame(self) -> None:
+        # mando.log 2026-10-16 21:39:17: op 14 after READY raised "Cannot write to closing transport" out of
+        # _once, so the close frame waiting in the reader, and its code, were never read
+        ws = FakeWS([hello(10000), ready(), (4000, "")], fail_ops=frozenset({14}))
+        gate = self.build([ws])
+        gate.set_subscriptions({"111": ["1"]}, False)
+        self.stop_at_first_wait(gate)
+        line = await self.ended(gate)
+        self.assertIn("close code 4000", line)
+        self.assertIn("send failed: ClientConnectionResetError('Cannot write to closing transport')", line)
+        self.assertNotIn("gateway session failed", line)
+        self.assertEqual(self.events, ["READY"])
+
+    async def test_resubscribe_on_a_closing_transport_does_not_raise(self) -> None:
+        ws = FakeWS([], fail_ops=frozenset({14}))
+        gate = self.build([])
+        gate._ws = ws  # type: ignore[assignment]
+        gate.set_subscriptions({"111": ["1"]}, False)
+        await asyncio.wait_for(gate.resubscribe(), 1.0)
+        self.assertEqual(ws.sent, [])
+
+    async def test_each_subscription_is_logged_with_its_server_channel_count_and_size(self) -> None:
+        ws = FakeWS([hello(10000), ready(), {"op": 7}])
+        gate = self.build([ws])
+        gate.set_subscriptions({"111": ["1", "2", "3"], "222": []}, False)
+        with self.assertLogs("mirror.gateway", logging.INFO) as seen:
+            await self.once(gate)
+        sent = [p for p in ws.sent if p["op"] == 14]
+        self.assertEqual(len(sent), 1)
+        size = len(json.dumps(sent[0], separators=(",", ":")).encode())
+        lines = [line for line in seen.output if "subscribing" in line]
+        self.assertEqual(lines, [f"INFO:mirror.gateway:gateway subscribing server 111: 3 channel(s), {size} bytes"])
+
+    async def test_a_session_that_raised_is_logged_with_the_error_and_the_next_step(self) -> None:
+        ws = FakeWS([])
+        gate = self.build([ws])
+        gate.session_id = "s"
+        gate.sequence = 4
+        self.stop_at_first_wait(gate)
+        with mock.patch.object(gw, "HELLO_WAIT", 0.05):
+            line = await self.ended(gate)
+        self.assertIn("RuntimeError('gateway hello missing')", line)
+        self.assertIn("next resume", line)
 
 
 if __name__ == "__main__":

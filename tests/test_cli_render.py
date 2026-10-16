@@ -167,6 +167,26 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(lines[3], "  2  threads  off")
         self.assertEqual(lines[4], "  3  back")
 
+    def test_a_gateway_stop_keeps_its_close_code_on_an_80_column_line(self) -> None:
+        # review of PR #14: render cuts each line at the width, and with a 32-character name the code at the
+        # end of the old stop text was cut off
+        from mirror import gateway as gw
+
+        cases = (
+            (gw.keeps_closing(4000), "close 4000:"),
+            (gw.keeps_closing(None), "connection keeps"),
+            (gw.TOO_MANY_TEXT, "close 4015:"),
+        )
+        for text, seen in cases:
+            with self.subTest(text=text):
+                user = {"id": "1", "username": "u", "global_name": "N" * 32}
+                ui = ui_on("running", user=user, running=True, status="live", mirrored=12345)
+                ui.on_event({"kind": "log", "text": text})
+                ui.on_event({"kind": "status", "running": False, "status": "error"})
+                line = render(ui, 80, 8)[0]
+                self.assertTrue(line.startswith("N" * 32 + " · stopped · 12345 mirrored · "), line)
+                self.assertIn(seen, line)
+
     def test_status_line_shows_why_the_engine_stopped(self) -> None:
         # the engine reports a failed run only as a log note followed by a status event "error"
         # (Engine._fatal, e.g. the gateway closing with 4004); the status line must carry that reason
