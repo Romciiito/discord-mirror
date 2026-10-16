@@ -362,7 +362,7 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         gate = self.build([])
         self.script(gate, ["short", "quiet", "short", "fail", "short", "short"])
         await asyncio.wait_for(gate._run(), 1.0)
-        self.assertEqual(self.fatal, ["Discord keeps closing (close code 4000), mirror stopped"])
+        self.assertEqual(self.fatal, ["close 4000: Discord keeps closing, stopped"])
         self.assertTrue(gate._stop.is_set())
         self.assertEqual([int(w) for w in self.waits], [1, 2, 4, 8])
 
@@ -389,10 +389,10 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("short session 1 of 3, next resume", lines[0])
         self.assertIn("no READY or RESUMED, next identify", lines[1])
         self.assertIn(
-            "short session 3 of 3, next stop: Discord keeps closing (close code 4000), mirror stopped",
+            "short session 3 of 3, next stop: close 4000: Discord keeps closing, stopped",
             lines[4],
         )
-        self.assertEqual(self.fatal, ["Discord keeps closing (close code 4000), mirror stopped"])
+        self.assertEqual(self.fatal, ["close 4000: Discord keeps closing, stopped"])
         self.assertEqual(len(self.http.session.calls), 5)
         self.assertEqual([ws.login()["op"] for ws in sockets], [2, 6, 2, 6, 2])
         self.assertEqual([int(w) for w in self.waits], [1, 2, 4, 8])
@@ -402,7 +402,7 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         sockets = [FakeWS([hello(10000), (4000, "")]) for _ in range(3)]
         gate = self.build(sockets, resume=False)
         lines = (await self.ended(gate)).splitlines()
-        self.assertEqual(self.fatal, ["Discord keeps closing (close code 4000), mirror stopped"])
+        self.assertEqual(self.fatal, ["close 4000: Discord keeps closing, stopped"])
         self.assertEqual([ws.login()["op"] for ws in sockets], [2, 2, 2])
         self.assertEqual([int(w) for w in self.waits], [1, 2])
         self.assertIn("no READY or RESUMED, short session 1 of 3, next identify", lines[0])
@@ -411,7 +411,7 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         sockets = [FakeWS([hello(10000), {"op": 9, "d": False}]) for _ in range(3)]
         gate = self.build(sockets, resume=False)
         await asyncio.wait_for(gate._run(), 1.0)
-        self.assertEqual(self.fatal, ["Discord keeps closing (no close code), mirror stopped"])
+        self.assertEqual(self.fatal, ["connection keeps ending, stopped"])
         self.assertEqual([ws.login()["op"] for ws in sockets], [2, 2, 2])
 
     async def test_connections_without_an_identify_are_not_counted(self) -> None:
@@ -463,7 +463,7 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         ws = FakeWS([hello(), ready(), 4015])
         gate = self.build([ws])
         await asyncio.wait_for(gate._run(), 1.0)
-        self.assertEqual(self.fatal, ["too many sessions (close code 4015), mirror stopped"])
+        self.assertEqual(self.fatal, ["close 4015: too many sessions, stopped"])
         self.assertTrue(gate._stop.is_set())
         self.assertEqual(len(self.http.session.calls), 1)
         self.assertEqual(self.waits, [])

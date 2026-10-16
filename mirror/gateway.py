@@ -29,6 +29,15 @@ HEALTHY_AFTER = 60.0
 # this many connections in a row that sent IDENTIFY and ended before READY or within HEALTHY_AFTER of it stop
 # the gateway: repeated rapid identifies risk the account
 SHORT_LIMIT = 3
+# the stop texts reach the CLI status line, which render cuts at the width: the close code comes first
+TOO_MANY_TEXT = f"close {TOO_MANY}: too many sessions, stopped"
+
+
+def keeps_closing(code: int | None) -> str:
+    """The stop text after SHORT_LIMIT short sessions in a row, with the last one's close code."""
+    if code is None:
+        return "connection keeps ending, stopped"
+    return f"close {code}: Discord keeps closing, stopped"
 
 
 def ws_timeout() -> Any:
@@ -175,7 +184,7 @@ class Gateway:
                 self._short += 1
                 short = True
             if not self._stop.is_set() and self._short >= SHORT_LIMIT:
-                await self._fail(None, f"Discord keeps closing ({self._code_text()}), mirror stopped")
+                await self._fail(None, keeps_closing(self._close_code))
             if self._stop.is_set():
                 self._log_end(f"stop: {self._fatal_text}", short)
                 return
@@ -245,7 +254,7 @@ class Gateway:
                     await self._fail(ws, "token was rejected")
                 elif code == TOO_MANY:
                     # another IDENTIFY would open one more session
-                    await self._fail(ws, "too many sessions (close code 4015), mirror stopped")
+                    await self._fail(ws, TOO_MANY_TEXT)
                 elif code in REFUSED:
                     await self._fail(ws, "gateway refused the session")
                 elif code in FORGET:
