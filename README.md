@@ -93,7 +93,7 @@ In Webhook settings, left and right change backfill and threads. Enter or the nu
 - With threads on, active threads under a selected channel are mirrored to that channel's webhook.
 - When two selected channels share one webhook URL, each message starts with a `server / #channel` line.
 - An edit always sends the embeds the message has left, so an edit that removes every embed removes them in the mirrored message too. At most 10 embeds are posted, and an embed that would take their text past Discord's 6000-character total is left out, with the ones after it.
-- If the connection to Discord drops, Mando resumes the same session and catches up on what it missed. Each new try waits longer, from 1 s up to 20 s. The wait starts again at 1 s only after a session that lasted a minute.
+- If the connection to Discord drops, Mando resumes the same session and catches up on what it missed. Each new try waits longer: 1, 2, 4, 8 and 16 s, then 20 s each time, plus up to 1 s at random. The wait starts again at 1 s only after a session that lasted a minute.
 - If three new sessions in a row end before READY or within a minute after it, Mando stops the mirror. The status line then shows `close <n>: Discord keeps closing, stopped`, with the close code first. Without a close code it shows `connection keeps ending, stopped`. Close code 4015 stops it at once with `close 4015: too many sessions, stopped`. Start/Resume mirror tries again.
 
 ## Account
