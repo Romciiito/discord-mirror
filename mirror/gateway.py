@@ -23,7 +23,8 @@ FORGET = frozenset({4007, 4009})
 REFUSED = frozenset({4010, 4011, 4012, 4013, 4014})
 TOO_MANY = 4015  # discord-userdoccers: too many Gateway sessions open for the user account (at most 50)
 # a session counts as healthy, and the backoff starts again at 1 s, only once it lived this long after READY
-# or RESUMED; mando.log 2026-10-16 had a new READY every 5-6 s because any READY reset the backoff
+# or RESUMED; in mando.log 2026-10-16 sessions that ended seconds after READY got a new READY every 5-6 s,
+# since any READY put the backoff back to 1 s
 HEALTHY_AFTER = 60.0
 # this many sessions in a row that end within HEALTHY_AFTER of READY stop the gateway: each READY took an
 # IDENTIFY, and repeated rapid identifies risk the account
