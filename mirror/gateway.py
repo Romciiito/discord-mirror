@@ -181,9 +181,10 @@ class Gateway:
             if lived is not None and lived >= HEALTHY_AFTER:
                 delay = 1.0
                 self._short = 0
-            elif self._identified:
-                # an IDENTIFY that ended before READY or soon after it; a RESUME, a refused one included, and a
-                # connection that never got to IDENTIFY started no new session: they neither count nor reset
+            elif self._identified or self._live_event == "READY":
+                # a new session that ended before READY or soon after it: an IDENTIFY was sent, or READY came,
+                # which always opens a new session; a RESUME, a refused one included, and a connection that never
+                # got to IDENTIFY started no new session: they neither count nor reset
                 self._short += 1
                 short = True
             if not self._stop.is_set() and self._short >= SHORT_LIMIT:

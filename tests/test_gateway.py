@@ -414,6 +414,14 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fatal, ["connection keeps ending, stopped"])
         self.assertEqual([ws.login()["op"] for ws in sockets], [2, 2, 2])
 
+    async def test_a_short_ready_counts_also_on_a_connection_that_sent_resume(self) -> None:
+        # a READY is always a new session; the review's engine scenario answers each RESUME with READY
+        sockets = [FakeWS([hello(10000), ready(), (4000, "Unknown error")]) for _ in range(3)]
+        gate = self.build(sockets, resume=False)
+        await asyncio.wait_for(gate._run(), 1.0)
+        self.assertEqual([ws.login()["op"] for ws in sockets], [2, 6, 6])
+        self.assertEqual(self.fatal, ["close 4000: Discord keeps closing, stopped"])
+
     async def test_a_new_start_after_the_stop_counts_from_zero(self) -> None:
         # review of PR #14: start() on the same object kept _short and _fatal_text, so its first short session
         # stopped the gateway again and a stop by Mando was logged as a stop for Discord's closes
