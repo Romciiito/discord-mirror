@@ -47,7 +47,7 @@ Mando shows the CLI when its input and output are a terminal (on Windows, a cons
 Start Mando as described under Start (`sh start.sh`, or `start.bat` on Windows), then:
 
 1. Press any key, open Settings, then Add token.
-2. Type or paste the token on the token row and press Enter. The line under the list says whether Discord accepts it. Then pick save token. Or fill in the keychain service and account and pick read keychain.
+2. Type or paste the token on the token row and press Enter. The line under the list says whether Discord accepts it. Then pick save token. Or fill in the keychain service and account and pick read keychain. If the console does not take a paste, close Mando instead. Create `token.txt` next to `start.bat`, paste the token into it with a text editor such as Notepad, save it and start Mando. Mando signs in, saves the token protected and deletes the file.
 3. In Discord, create a server for the copy, unless you already own one to use. Mando creates channels and webhooks only in servers your account owns. To use your own webhooks instead, create a webhook in each channel the messages should go to and copy its URL; it can be in any server, also one the account is not in.
 4. Select servers. Enter on a source server ticks all its listed channels. To tick only a few, open its channels with the right arrow, press `a` to tick them all, then untick the others: Enter on a channel that shows `no webhook`, then Enter on its empty webhook row (Enter alone unticks one that shows `webhook set`). Back in the server list (Esc), `c` on the server lists the servers you own: Enter on one fills it with the ticked channels, their categories and one webhook per channel. For your own webhooks instead, Enter on a channel that is not ticked, or that shows `no webhook`, opens its webhook row: paste the URL and press Enter.
 5. Webhook settings: pick backfill and threads.
@@ -117,6 +117,8 @@ On Linux there is no keychain. Paste the token.
 
 "Keep on this machine" stores the token in `data/state.db`. On macOS and Linux the file is mode 600. On Windows the token inside it is protected with DPAPI for the current Windows user, so it only opens on this machine and account. A saved token is only forgotten when Discord rejects it; if Discord cannot be reached at start, Mando keeps it and tries again. The token is sent only to `discord.com`.
 
+Mando can also take the token at start, without the console. It reads the environment variable `MANDO_TOKEN`, else the file `token.txt` in the Mando folder, the one that holds `start.bat` and `mirror/` (not `DATA_DIR`). `MANDO_TOKEN` wins over `token.txt`, and either one wins over a saved token. Spaces and line ends around the token, quotes around it and the mark Notepad puts at the start of a UTF-8 file are dropped; an empty one is ignored. Mando signs in with the token and saves it in `state.db` as above. After a sign-in that works it deletes `token.txt`, so the token does not stay on disk in plain text. If the file holds another token by then, written while Mando was still trying, Mando keeps it. `MANDO_TOKEN` is left as it is. When Discord rejects the token, Mando keeps `token.txt` and the saved token, and signs in with the saved token if there is one. When Discord cannot be reached, Mando keeps the file and tries again. A token that looks too short or too long (over 256 characters), or has a space, a line break or another character a token cannot have, is not used, and neither is a file that is not UTF-8 text or is larger than 4 KB. Each outcome is written to `mando.log`, such as `token from token.txt accepted and saved, token.txt deleted` or `token in token.txt was rejected (<reason>)`, never the token itself. git ignores `token.txt`, so `git pull` never touches it. A token typed on the command line, as with `set MANDO_TOKEN=...`, lands in the console history.
+
 ## Settings
 
 | Variable | Default | Meaning |
@@ -125,6 +127,7 @@ On Linux there is no keychain. Paste the token.
 | `PORT` | `8765` | Port of the API |
 | `DATA_DIR` | `data` next to `mirror/` | Where `state.db` and the log file `mando.log` live |
 | `LOG_LEVEL` | `INFO` | Level of `mando.log` |
+| `MANDO_TOKEN` | not set | Token to sign in with at start; it wins over `token.txt` and a saved token (see Account) |
 
 `export PORT=9000` before `sh start.sh`, `set PORT=9000` before `start.bat`, or `$env:PORT = "9000"` before `start.ps1`.
 

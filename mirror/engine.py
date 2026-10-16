@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from collections import defaultdict, deque
-from typing import Any
+from pathlib import Path
+from typing import Any, NamedTuple
 
 import aiohttp
 
@@ -25,6 +27,10 @@ from .store import Store
 
 log = logging.getLogger("mirror.engine")
 WINDOWS = sys.platform == "win32"
+TOKEN_ENV = "MANDO_TOKEN"
+TOKEN_FILE = "token.txt"
+TOKEN_FILE_LIMIT = 4096  # bytes: a token is under 100 characters, so a larger file holds something else
+TOKEN_LONGEST = 256  # characters, well above any Discord token
 
 
 def _rejected(exc: ApiError) -> bool:
@@ -32,9 +38,50 @@ def _rejected(exc: ApiError) -> bool:
     return exc.status in (401, 403) and not isinstance(exc, NotDiscordAnswer)
 
 
+def _shaped_token(raw: str) -> str:
+    """The cleaned token, or ApiError(400) before any request when it cannot be one: the one rule of the token check
+    (check_token) and the sign-in (use_token). A token is letters, digits, dots, dashes and underscores; a line end or
+    another control character never reaches Discord (aiohttp refuses the header), so it is no network failure."""
+    token = clean_token(raw)
+    if len(token) < 40:
+        raise ApiError(400, "token looks too short")
+    if len(token) > TOKEN_LONGEST:
+        raise ApiError(400, "token looks too long")
+    if not all("!" <= char <= "~" for char in token):
+        raise ApiError(400, "token has characters a token cannot have")
+    return token
+
+
+class _TooLarge(ValueError):
+    """A token file larger than TOKEN_FILE_LIMIT, left unread."""
+
+
+def _file_token(path: Path) -> str:
+    """The token in a token file, cleaned like a pasted one: clean_token strips spaces and line ends, then a pair of
+    quotes, and Notepad's UTF-8 BOM is dropped. Raises OSError, _TooLarge, or UnicodeDecodeError for a file that is
+    not UTF-8."""
+    with path.open("rb") as file:
+        data = file.read(TOKEN_FILE_LIMIT + 1)
+    if len(data) > TOKEN_FILE_LIMIT:
+        raise _TooLarge(TOKEN_FILE_LIMIT)
+    return clean_token(data.decode("utf-8-sig"))
+
+
+class _Outside(NamedTuple):
+    """A token given at start from outside state.db: `name` is where it came from (MANDO_TOKEN or token.txt), `path`
+    the file to delete once a sign-in with it works (None for the environment variable)."""
+
+    token: str
+    name: str
+    path: Path | None
+
+
 class Engine:
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, home: Path | str | None = None) -> None:
         self.store = store
+        # the Mando folder (start.bat, mirror/): only an engine started from it takes a token from MANDO_TOKEN or
+        # its token.txt; None (the tests, an embedded engine) reads neither
+        self.home = Path(home) if home is not None else None
         self.session: aiohttp.ClientSession | None = None
         self.http: DiscordHTTP | None = None
         self.gateway: Gateway | None = None
@@ -95,44 +142,141 @@ class Engine:
         return [self.feed[mid] for mid in self.order if mid in self.feed]
 
     async def restore(self) -> None:
-        token = self.store.token()
-        if not token:
+        """Sign in at start. A token in MANDO_TOKEN, else in token.txt of the Mando folder, wins over the one saved in
+        state.db; the saved one signs in when there is none, or when that one is refused."""
+        outside = self._outside_token()
+        if outside is not None and await self._start_token(outside.token, outside):
             return
+        await self._restore_saved()
+
+    async def _restore_saved(self) -> None:
+        token = self.store.token()
+        if token:
+            await self._start_token(token, None)
+
+    def _outside_token(self) -> _Outside | None:
+        """The token in MANDO_TOKEN, else the one in token.txt of the Mando folder, read once and cleaned like a
+        pasted one (clean_token strips spaces and line ends, then a pair of quotes; Notepad's UTF-8 BOM is dropped).
+        None for an engine without a folder, and when both are missing or empty."""
+        if self.home is None:
+            return None
+        token = clean_token(os.environ.get(TOKEN_ENV, ""))
+        if token:
+            return _Outside(token, TOKEN_ENV, None)
+        path = self.home / TOKEN_FILE
+        try:
+            token = _file_token(path)
+        except FileNotFoundError:
+            return None
+        except _TooLarge:
+            self._said(f"{TOKEN_FILE} was not read (too large, over {TOKEN_FILE_LIMIT // 1024} KB)")
+            return None
+        except UnicodeDecodeError:
+            self._said(f"{TOKEN_FILE} could not be read (not UTF-8 text)")
+            return None
+        except OSError as exc:
+            self._said(f"{TOKEN_FILE} could not be read ({exc.strerror or type(exc).__name__})")
+            return None
+        return _Outside(token, TOKEN_FILE, path) if token else None
+
+    async def _start_token(self, token: str, outside: _Outside | None) -> bool:
+        """One sign-in at start with the saved token (`outside` None) or a token from outside, retried later when
+        Discord is not reached. False when the token is refused, so that one from outside gives way to the saved one."""
         try:
             await self.use_token(token, keep=True)
-            self.note("saved token accepted")
         except ApiError as exc:
-            if _rejected(exc):
-                self.note("saved token was rejected")
-                self.store.forget_token()
-                return
-            self._retry_later(token, exc)
+            if self._refused(exc, outside):
+                return False
+            self._retry_later(token, exc, outside)
         except Exception as exc:
-            self._retry_later(token, exc)
+            self._retry_later(token, exc, outside)
+        else:
+            self._accepted(outside)
+        return True
 
-    def _retry_later(self, token: str, exc: Exception) -> None:
+    def _refused(self, exc: ApiError, outside: _Outside | None) -> bool:
+        """Whether the token is refused for good, noted: Discord itself refused it, or a token from outside does not
+        even look like one (use_token refuses it before any request, so trying again changes nothing). A refused
+        saved token is forgotten; a token from outside is left where it is."""
+        if outside is None:
+            if not _rejected(exc):
+                return False
+            self.note("saved token was rejected")
+            self.store.forget_token()
+            return True
+        if _rejected(exc):
+            self._said(f"token in {outside.name} was rejected ({exc.reason})")
+        elif exc.status == 400 and not isinstance(exc, NotDiscordAnswer):
+            # use_token's own refusal or Discord's; a 400 that is not Discord's answer means it was not reached
+            self._said(f"token in {outside.name} was not used ({exc})")
+        else:
+            return False
+        return True
+
+    def _accepted(self, outside: _Outside | None) -> None:
+        if outside is None:
+            self.note("saved token accepted")
+        elif outside.path is None:
+            self._said(f"token from {outside.name} accepted", logging.INFO)
+        else:
+            # the owner may have written another token into the file while a retry waited: only the file that still
+            # holds the token that signed in is deleted
+            try:
+                now = _file_token(outside.path)
+            except FileNotFoundError:
+                now = outside.token
+            except (OSError, ValueError):
+                now = ""
+            if now != outside.token:
+                self._said(
+                    f"token from {outside.name} accepted and saved, {outside.name} changed meanwhile and was kept"
+                )
+                return
+            # state.db now keeps the token protected; the plain-text copy must not stay on disk
+            try:
+                outside.path.unlink(missing_ok=True)
+            except OSError as exc:
+                reason = exc.strerror or type(exc).__name__
+                self._said(
+                    f"token from {outside.name} accepted and saved, {outside.name} could not be deleted ({reason}), "
+                    "delete it"
+                )
+            else:
+                self._said(f"token from {outside.name} accepted and saved, {outside.name} deleted", logging.INFO)
+
+    def _said(self, text: str, level: int = logging.WARNING) -> None:
+        """A note that mando.log keeps too; never one with the token in it."""
+        self.note(text)
+        log.log(level, text)
+
+    def _retry_later(self, token: str, exc: Exception, outside: _Outside | None = None) -> None:
         reason = str(exc) or "network error"
-        self.note(f"saved token check failed ({reason}), retrying")
-        self._restore_task = asyncio.create_task(self._retry_token(token))
+        if outside is None:
+            self.note(f"saved token check failed ({reason}), retrying")
+        else:
+            self._said(f"token in {outside.name} check failed ({reason}), retrying")
+        self._restore_task = asyncio.create_task(self._retry_token(token, outside))
 
-    async def _retry_token(self, token: str) -> None:
+    async def _retry_token(self, token: str, outside: _Outside | None = None) -> None:
         delay = 5.0
         try:
             while True:
                 await self._wait(delay)
-                if self.http is not None or self.store.token() != token:
+                # a sign-in meanwhile ends the retry, and so does a saved token that changed; a token from outside
+                # is in the store only once it works
+                if self.http is not None or (outside is None and self.store.token() != token):
                     return
                 try:
                     await self.use_token(token, keep=True)
                 except ApiError as exc:
-                    if _rejected(exc):
-                        self.note("saved token was rejected")
-                        self.store.forget_token()
+                    if self._refused(exc, outside):
+                        if outside is not None:
+                            await self._restore_saved()
                         return
                 except Exception:
                     pass
                 else:
-                    self.note("saved token accepted")
+                    self._accepted(outside)
                     return
                 delay = min(delay * 2, 120.0)
         finally:
@@ -152,29 +296,26 @@ class Engine:
 
     async def use_token(self, token: str, keep: bool) -> dict[str, Any]:
         await self._cancel_restore()
-        token = clean_token(token)
-        if len(token) < 40:
-            raise ApiError(400, "token looks too short")
+        token = _shaped_token(token)
         if self.session is None:
             raise ApiError(500, "session is not ready")
         if self._properties is None:
             self._properties = await load_properties(self.session)
         http = DiscordHTTP(self.session, token, self._properties)
         me = await http.me()
+        # saved first: a write state.db refuses leaves the engine signed out, so a retry at start still runs
+        self.store.set_token(token, keep)
         self.http = http
         self.user = {
             "id": str(me.get("id") or ""),
             "username": me.get("username") or "",
             "global_name": me.get("global_name") or "",
         }
-        self.store.set_token(token, keep)
         self.status = "ready"
         return self.user
 
     async def check_token(self, raw: str) -> dict[str, Any]:
-        token = clean_token(raw)
-        if len(token) < 40:
-            raise ApiError(400, "token looks too short")
+        token = _shaped_token(raw)
         if self._properties is None:
             self._properties = await load_properties(self.session)
         # mando.log gets the status and the reason of every check that does not work, never the token
