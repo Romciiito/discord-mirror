@@ -93,7 +93,8 @@ In Webhook settings, left and right change backfill and threads. Enter or the nu
 - With threads on, active threads under a selected channel are mirrored to that channel's webhook.
 - When two selected channels share one webhook URL, each message starts with a `server / #channel` line.
 - An edit always sends the embeds the message has left, so an edit that removes every embed removes them in the mirrored message too. At most 10 embeds are posted, and an embed that would take their text past Discord's 6000-character total is left out, with the ones after it.
-- If the connection to Discord drops, Mando resumes the same session and catches up on what it missed.
+- If the connection to Discord drops, Mando resumes the same session and catches up on what it missed. Each new try waits longer, from 1 s up to 20 s. The wait starts again at 1 s only after a session that lasted a minute.
+- If Discord closes three new sessions in a row within a minute of their start, Mando stops the mirror. The status line then shows `Discord keeps closing (close code <n>), mirror stopped`. Close code 4015 stops it at once with `too many sessions (close code 4015), mirror stopped`. Start/Resume mirror tries again.
 
 ## Account
 
@@ -132,6 +133,8 @@ Mando can also take the token at start, without the console. It reads the enviro
 `export PORT=9000` before `sh start.sh`, `set PORT=9000` before `start.bat`, or `$env:PORT = "9000"` before `start.ps1`.
 
 Logs go to `mando.log`, never to the terminal. The file is rotated at 1 MB and three old files are kept.
+
+Each time the connection to Discord ends, `mando.log` gets a `gateway session ended` line. It names Discord's close code and reason, how many seconds the session lived after READY, and whether Mando resumes, starts a new session or stops. Each subscription to a server's channels gets a `gateway subscribing server` line with the number of channels and the size in bytes. The token is never logged.
 
 The API answers under `/api/`; `/` only says "UI unavailable now". It refuses requests sent from other websites. Bound to `127.0.0.1`, it also refuses requests for any other host name.
 
