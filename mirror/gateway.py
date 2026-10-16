@@ -124,6 +124,9 @@ class Gateway:
 
     def start(self) -> None:
         self._stop.clear()
+        # a run starts with no short sessions and no stop reason, also on a Gateway that ran before
+        self._short = 0
+        self._fatal_text = ""
         self._task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:

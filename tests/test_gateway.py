@@ -414,6 +414,23 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fatal, ["connection keeps ending, stopped"])
         self.assertEqual([ws.login()["op"] for ws in sockets], [2, 2, 2])
 
+    async def test_a_new_start_after_the_stop_counts_from_zero(self) -> None:
+        # review of PR #14: start() on the same object kept _short and _fatal_text, so its first short session
+        # stopped the gateway again and a stop by Mando was logged as a stop for Discord's closes
+        sockets = [FakeWS([hello(10000), ready(), 4009]) for _ in range(4)]
+        sockets.append(FakeWS([hello(10000), ready()]))
+        gate = self.build(sockets, resume=False)
+        await asyncio.wait_for(gate._run(), 1.0)
+        self.assertEqual(self.fatal, ["close 4009: Discord keeps closing, stopped"])
+        with self.assertLogs("mirror.gateway", logging.WARNING) as seen:
+            gate.start()
+            self.assertTrue(await until(lambda: self.events.count("READY") == 5, 1.0), self.fatal)
+            await asyncio.wait_for(gate.stop(), 1.0)
+        ended = [line for line in seen.output if "gateway session ended" in line]
+        self.assertEqual(len(ended), 1, ended)
+        self.assertIn("short session 1 of 3, next identify", ended[0])
+        self.assertEqual(self.fatal, ["close 4009: Discord keeps closing, stopped"])
+
     async def test_connections_without_an_identify_are_not_counted(self) -> None:
         # a missing HELLO sends no IDENTIFY; a refused RESUME is covered by the storm test above
         sockets = [FakeWS([]) for _ in range(3)]
