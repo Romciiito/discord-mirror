@@ -120,6 +120,24 @@ On Linux there is no keychain. Paste the token.
 
 Mando can also take the token at start, without the console. It reads the environment variable `MANDO_TOKEN`, else the file `token.txt` in the Mando folder, the one that holds `start.bat` and `mirror/` (not `DATA_DIR`). `MANDO_TOKEN` wins over `token.txt`, and either one wins over a saved token. Spaces and line ends around the token, quotes around it and the mark Notepad puts at the start of a UTF-8 file are dropped; an empty one is ignored. Mando signs in with the token and saves it in `state.db` as above. After a sign-in that works it deletes `token.txt`, so the token does not stay on disk in plain text. If the file holds another token by then, written while Mando was still trying, Mando keeps it. `MANDO_TOKEN` is left as it is. When Discord rejects the token, Mando keeps `token.txt` and the saved token, and signs in with the saved token if there is one. When Discord cannot be reached, Mando keeps the file and tries again. A token that looks too short or too long (over 256 characters), or has a space, a line break or another character a token cannot have, is not used, and neither is a file that is not UTF-8 text or is larger than 4 KB. Each outcome is written to `mando.log`, such as `token from token.txt accepted and saved, token.txt deleted` or `token in token.txt was rejected (<reason>)`, never the token itself. git ignores `token.txt`, so `git pull` never touches it. A token typed on the command line, as with `set MANDO_TOKEN=...`, lands in the console history.
 
+### Test a token without Mando
+
+To see whether Discord accepts a token, ask Discord directly, without Mando. On Windows copy the token, open PowerShell and run:
+
+```powershell
+$t = (Get-Clipboard).Trim(); try { $r = Invoke-WebRequest -UseBasicParsing -Uri https://discord.com/api/v9/users/@me -Headers @{Authorization=$t}; "$($r.StatusCode) ok" } catch { $_.Exception.Response.StatusCode.value__; $_.ErrorDetails.Message }; Remove-Variable t
+```
+
+It reads the token from the clipboard, so the token does not land in the PowerShell history, and it prints only Discord's answer, never the token. It works in Windows PowerShell and in PowerShell 7, which prints the same answer over several lines.
+
+| Output | Meaning |
+|---|---|
+| `200 ok` | Discord accepts the token from this network. If Mando still rejects it, the cause is in Mando: report it with the lines of `mando.log`. |
+| `401` and the message `401: Unauthorized` | The token is wrong or no longer valid, for example after a log out of the Discord session it came from or a password change. Get a fresh one. |
+| `403` and a message with `"code": 40002` | Discord wants the account verified first. Open Discord and follow its prompt. |
+| `403` and an HTML page with `error code: 1020` or `Access denied` | This network or IP is blocked before Discord. |
+| `429` and `error code: 1015` | This network or IP is blocked for a while for too many requests. |
+
 ## Settings
 
 | Variable | Default | Meaning |
