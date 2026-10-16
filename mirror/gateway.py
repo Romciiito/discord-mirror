@@ -21,6 +21,12 @@ HELLO_WAIT = 20.0
 STOP_WAIT = 8.0
 FORGET = frozenset({4007, 4009})
 REFUSED = frozenset({4010, 4011, 4012, 4013, 4014})
+# a session counts as healthy, and the backoff starts again at 1 s, only once it lived this long after READY
+# or RESUMED; mando.log 2026-10-16 had a new READY every 5-6 s because any READY reset the backoff
+HEALTHY_AFTER = 60.0
+# this many sessions in a row that end within HEALTHY_AFTER of READY stop the gateway: each READY took an
+# IDENTIFY, and repeated rapid identifies risk the account
+SHORT_LIMIT = 3
 
 
 def ws_timeout() -> Any:
@@ -60,7 +66,7 @@ class Gateway:
         self._sub_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
         self._acked = True
-        self._healthy = False
+        self._short = 0  # sessions in a row that ended within HEALTHY_AFTER of READY
         self._fatal_text = ""
         self._begin()
 
@@ -84,16 +90,20 @@ class Gateway:
             return None
         return time.monotonic() - self._live_at
 
-    def _log_end(self, step: str) -> None:
+    def _code_text(self) -> str:
+        return f"close code {self._close_code}" if self._close_code is not None else "no close code"
+
+    def _log_end(self, step: str, short: bool = False) -> None:
         # never the token or a payload: the close frame's code and reason, what else ended it, and when
+        how = self._code_text()
         if self._close_code is not None:
-            how = f"close code {self._close_code}, reason {self._close_reason!r}"
-        else:
-            how = "no close code"
+            how += f", reason {self._close_reason!r}"
         if self._why:
             how += f", {self._why}"
         lived = self._lived()
         age = f"{lived:.1f} s after {self._live_event}" if lived is not None else "no READY or RESUMED"
+        if short:
+            age += f", short session {self._short} of {SHORT_LIMIT}"
         log.warning("gateway session ended: %s, %s, next %s", how, age, step)
 
     def set_subscriptions(self, guild_channels: dict[str, list[str]], threads: bool) -> None:
@@ -142,7 +152,6 @@ class Gateway:
     async def _run(self) -> None:
         delay = 1.0
         while not self._stop.is_set():
-            self._healthy = False
             try:
                 await self._once()
             except asyncio.CancelledError:
@@ -150,14 +159,24 @@ class Gateway:
             except Exception as exc:
                 log.exception("gateway session failed")
                 self._why = ", ".join(part for part in (self._why, repr(exc)) if part)
-            if self._stop.is_set():
-                if self._fatal_text:
-                    self._log_end(f"stop: {self._fatal_text}")
-                return
-            if self._healthy:
+            if self._stop.is_set() and not self._fatal_text:
+                return  # Mando stopped it
+            lived = self._lived()
+            short = False
+            if lived is not None and lived >= HEALTHY_AFTER:
                 delay = 1.0
+                self._short = 0
+            elif lived is not None and self._live_event == "READY":
+                # a RESUMED connection started no new session; it neither counts nor resets the count
+                self._short += 1
+                short = True
+            if not self._stop.is_set() and self._short >= SHORT_LIMIT:
+                await self._fail(None, f"Discord keeps closing the connection ({self._code_text()}), mirror stopped")
+            if self._stop.is_set():
+                self._log_end(f"stop: {self._fatal_text}", short)
+                return
             pause = delay + random.random()
-            self._log_end(f"{'resume' if self._can_resume() else 'identify'} in {pause:.1f} s")
+            self._log_end(f"{'resume' if self._can_resume() else 'identify'} in {pause:.1f} s", short)
             await self._wait(pause)
             delay = min(delay * 2, 20.0)
 
@@ -169,8 +188,9 @@ class Gateway:
         except Exception:
             pass
 
-    async def _fail(self, ws: aiohttp.ClientWebSocketResponse, text: str) -> None:
-        await self._drop(ws)
+    async def _fail(self, ws: aiohttp.ClientWebSocketResponse | None, text: str) -> None:
+        if ws is not None:
+            await self._drop(ws)
         self._fatal_text = text
         self._stop.set()
         if self.on_fatal is not None:
@@ -338,12 +358,10 @@ class Gateway:
                         },
                     },
                 )
-                self._healthy = True
                 self._live_at, self._live_event = time.monotonic(), "READY"
                 await self.resubscribe()
                 log.info("gateway ready")
             elif event == "RESUMED":
-                self._healthy = True
                 self._live_at, self._live_event = time.monotonic(), "RESUMED"
                 await self.resubscribe()
                 log.info("gateway resumed")
