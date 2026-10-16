@@ -21,6 +21,7 @@ HELLO_WAIT = 20.0
 STOP_WAIT = 8.0
 FORGET = frozenset({4007, 4009})
 REFUSED = frozenset({4010, 4011, 4012, 4013, 4014})
+TOO_MANY = 4015  # discord-userdoccers: too many Gateway sessions open for the user account (at most 50)
 # a session counts as healthy, and the backoff starts again at 1 s, only once it lived this long after READY
 # or RESUMED; mando.log 2026-10-16 had a new READY every 5-6 s because any READY reset the backoff
 HEALTHY_AFTER = 60.0
@@ -239,6 +240,9 @@ class Gateway:
                 code = self._close_code
                 if code == 4004:
                     await self._fail(ws, "token was rejected")
+                elif code == TOO_MANY:
+                    # another IDENTIFY would open one more session
+                    await self._fail(ws, "Discord says too many sessions are open for this account (close code 4015), mirror stopped")
                 elif code in REFUSED:
                     await self._fail(ws, "gateway refused the session")
                 elif code in FORGET:

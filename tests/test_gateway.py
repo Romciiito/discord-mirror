@@ -418,6 +418,17 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fatal, ["gateway refused the session"])
         self.assertEqual(ws.codes, [4000])
 
+    async def test_server_close_4015_too_many_sessions_is_fatal(self) -> None:
+        # discord-userdoccers: 4015 "Too many sessions", at most 50 active Gateway sessions for a user account;
+        # another IDENTIFY would only add one
+        ws = FakeWS([hello(), ready(), 4015])
+        gate = self.build([ws])
+        await asyncio.wait_for(gate._run(), 1.0)
+        self.assertEqual(self.fatal, ["Discord says too many sessions are open for this account (close code 4015), mirror stopped"])
+        self.assertTrue(gate._stop.is_set())
+        self.assertEqual(len(self.http.session.calls), 1)
+        self.assertEqual(self.waits, [])
+
     async def test_4009_clears_session(self) -> None:
         ws = FakeWS([hello(), ready(7), 4009])
         gate = self.build([ws])
