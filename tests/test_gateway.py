@@ -38,6 +38,9 @@ class FakeWS:
         for item in packets:
             if isinstance(item, int):
                 self.queue.put_nowait(aiohttp.WSMessage(aiohttp.WSMsgType.CLOSE, item, ""))
+            elif isinstance(item, tuple):
+                # Discord's close frame with a reason: (code, reason)
+                self.queue.put_nowait(aiohttp.WSMessage(aiohttp.WSMsgType.CLOSE, item[0], item[1]))
             else:
                 self.queue.put_nowait(text(item))
         self.end = end
@@ -70,6 +73,9 @@ class FakeWS:
             self.close_code = code
         self.queue.put_nowait(CLOSED)
         return True
+
+    def exception(self) -> BaseException | None:
+        return None
 
     async def send_str(self, raw: str) -> None:
         packet = json.loads(raw)
@@ -401,6 +407,90 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(41, ws.ops())
         self.assertTrue(gate._healthy)
         self.assertEqual(self.events, ["READY"])
+
+    def stop_at_first_wait(self, gate: Gateway) -> None:
+        # the session's end is logged before the backoff wait; stopping there ends _run after one session
+        async def wait(seconds: float) -> None:
+            self.waits.append(seconds)
+            gate._stop.set()
+
+        gate._wait = wait
+
+    async def ended(self, gate: Gateway) -> str:
+        with self.assertLogs("mirror.gateway", logging.WARNING) as seen:
+            await asyncio.wait_for(gate._run(), 1.0)
+        return "\n".join(line for line in seen.output if "gateway session ended" in line)
+
+    async def test_a_session_end_is_logged_with_the_close_code_reason_age_and_next_step(self) -> None:
+        ws = FakeWS([hello(), ready(3), (4000, "Unknown error")])
+        gate = self.build([ws], resume=False)
+        self.http.token = "TOKEN-THAT-MUST-NOT-BE-LOGGED"
+        self.stop_at_first_wait(gate)
+        line = await self.ended(gate)
+        self.assertIn("close code 4000", line)
+        self.assertIn("reason 'Unknown error'", line)
+        self.assertRegex(line, r"\d+\.\d s after READY")
+        self.assertRegex(line, r"next resume in \d+\.\d s")
+        self.assertNotIn("TOKEN-THAT-MUST-NOT-BE-LOGGED", line)
+        self.assertEqual(len(self.waits), 1)
+
+    async def test_a_session_end_with_4009_says_it_identifies_next(self) -> None:
+        ws = FakeWS([hello(), ready(), 4009])
+        gate = self.build([ws])
+        self.stop_at_first_wait(gate)
+        line = await self.ended(gate)
+        self.assertIn("close code 4009", line)
+        self.assertIn("next identify", line)
+
+    async def test_an_invalid_session_end_names_op9_without_a_close_code(self) -> None:
+        ws = FakeWS([hello(), ready(), {"op": 9, "d": False}])
+        gate = self.build([ws])
+        self.stop_at_first_wait(gate)
+        line = await self.ended(gate)
+        self.assertIn("no close code", line)
+        self.assertIn("invalid session (op 9, resumable false)", line)
+        self.assertIn("next identify", line)
+
+    async def test_a_resume_that_is_refused_is_logged_as_an_end_before_ready(self) -> None:
+        ws = FakeWS([hello(), {"op": 9, "d": False}])
+        gate = self.build([ws])
+        gate.session_id = "s"
+        gate.sequence = 4
+        self.stop_at_first_wait(gate)
+        line = await self.ended(gate)
+        self.assertEqual(ws.login()["op"], 6)
+        self.assertIn("no READY or RESUMED", line)
+        self.assertIn("next identify", line)
+
+    async def test_a_fatal_close_is_logged_with_its_code_and_the_stop(self) -> None:
+        ws = FakeWS([hello(), ready(), (4004, "Authentication failed")])
+        gate = self.build([ws])
+        line = await self.ended(gate)
+        self.assertIn("close code 4004, reason 'Authentication failed'", line)
+        self.assertIn("next stop: token was rejected", line)
+        self.assertEqual(self.fatal, ["token was rejected"])
+
+    async def test_a_stop_by_mando_is_not_logged_as_a_session_end(self) -> None:
+        ws = FakeWS([hello(), ready()])
+        gate = self.build([ws])
+        log = logging.getLogger("mirror.gateway")
+        log.setLevel(logging.WARNING)
+        with mock.patch.object(log, "warning") as warning:
+            gate.start()
+            self.assertTrue(await until(lambda: "READY" in self.events))
+            await asyncio.wait_for(gate.stop(), 1.0)
+        self.assertEqual([c for c in warning.call_args_list if "gateway session ended" in str(c)], [])
+
+    async def test_a_session_that_raised_is_logged_with_the_error_and_the_next_step(self) -> None:
+        ws = FakeWS([])
+        gate = self.build([ws])
+        gate.session_id = "s"
+        gate.sequence = 4
+        self.stop_at_first_wait(gate)
+        with mock.patch.object(gw, "HELLO_WAIT", 0.05):
+            line = await self.ended(gate)
+        self.assertIn("RuntimeError('gateway hello missing')", line)
+        self.assertIn("next resume", line)
 
 
 if __name__ == "__main__":

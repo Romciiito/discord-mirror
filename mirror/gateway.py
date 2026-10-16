@@ -61,6 +61,40 @@ class Gateway:
         self._send_lock = asyncio.Lock()
         self._acked = True
         self._healthy = False
+        self._fatal_text = ""
+        self._begin()
+
+    def _begin(self) -> None:
+        """Forget how the last connection went; each connection records its own end for the session-end log."""
+        self._live_at: float | None = None  # time.monotonic() of this connection's READY or RESUMED
+        self._live_event = ""
+        self._close_code: int | None = None  # the code of Discord's close frame, None without one
+        self._close_reason = ""
+        self._why = ""  # what else ended the connection: op 7, op 9, a timeout, a missing ack, an error
+
+    def _note_end(self, why: str) -> None:
+        if not self._why:
+            self._why = why
+
+    def _can_resume(self) -> bool:
+        return bool(self.session_id and self.sequence is not None and self.resume_url)
+
+    def _lived(self) -> float | None:
+        if self._live_at is None:
+            return None
+        return time.monotonic() - self._live_at
+
+    def _log_end(self, step: str) -> None:
+        # never the token or a payload: the close frame's code and reason, what else ended it, and when
+        if self._close_code is not None:
+            how = f"close code {self._close_code}, reason {self._close_reason!r}"
+        else:
+            how = "no close code"
+        if self._why:
+            how += f", {self._why}"
+        lived = self._lived()
+        age = f"{lived:.1f} s after {self._live_event}" if lived is not None else "no READY or RESUMED"
+        log.warning("gateway session ended: %s, %s, next %s", how, age, step)
 
     def set_subscriptions(self, guild_channels: dict[str, list[str]], threads: bool) -> None:
         self._channels = {str(k): [str(c) for c in v] for k, v in guild_channels.items()}
@@ -113,13 +147,18 @@ class Gateway:
                 await self._once()
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                log.exception("gateway session ended")
+            except Exception as exc:
+                log.exception("gateway session failed")
+                self._why = ", ".join(part for part in (self._why, repr(exc)) if part)
             if self._stop.is_set():
+                if self._fatal_text:
+                    self._log_end(f"stop: {self._fatal_text}")
                 return
             if self._healthy:
                 delay = 1.0
-            await self._wait(delay + random.random())
+            pause = delay + random.random()
+            self._log_end(f"{'resume' if self._can_resume() else 'identify'} in {pause:.1f} s")
+            await self._wait(pause)
             delay = min(delay * 2, 20.0)
 
     async def _drop(self, ws: aiohttp.ClientWebSocketResponse) -> None:
@@ -132,6 +171,7 @@ class Gateway:
 
     async def _fail(self, ws: aiohttp.ClientWebSocketResponse, text: str) -> None:
         await self._drop(ws)
+        self._fatal_text = text
         self._stop.set()
         if self.on_fatal is not None:
             await self.on_fatal(text)
@@ -145,6 +185,7 @@ class Gateway:
         return interval * 2 + 10
 
     async def _once(self) -> None:
+        self._begin()
         base = self.resume_url or await self.http.gateway_url()
         url = f"{base}?v=9&encoding=json&compress=zlib-stream"
         headers = {
@@ -175,7 +216,7 @@ class Gateway:
                 await self._read_loop(ws, inflator, interval)
                 if self._stop.is_set():
                     return
-                code = ws.close_code
+                code = self._close_code
                 if code == 4004:
                     await self._fail(ws, "token was rejected")
                 elif code in REFUSED:
@@ -194,7 +235,7 @@ class Gateway:
                     await self._drop(ws)
 
     async def _identify_or_resume(self, ws: aiohttp.ClientWebSocketResponse) -> None:
-        if self.session_id and self.sequence is not None and self.resume_url:
+        if self._can_resume():
             await self._send(
                 ws,
                 {
@@ -232,6 +273,7 @@ class Gateway:
                     return
                 if not self._acked:
                     log.warning("heartbeat not acked")
+                    self._note_end("heartbeat not acked, closed by Mando")
                     await self._drop(ws)
                     return
                 await self._beat(ws)
@@ -269,8 +311,10 @@ class Gateway:
                 await self._beat(ws)
                 continue
             if op == 7:
+                self._note_end("reconnect asked (op 7)")
                 return
             if op == 9:
+                self._note_end(f"invalid session (op 9, resumable {'true' if data is True else 'false'})")
                 if data is not True:
                     self._forget()
                 return
@@ -295,10 +339,12 @@ class Gateway:
                     },
                 )
                 self._healthy = True
+                self._live_at, self._live_event = time.monotonic(), "READY"
                 await self.resubscribe()
                 log.info("gateway ready")
             elif event == "RESUMED":
                 self._healthy = True
+                self._live_at, self._live_event = time.monotonic(), "RESUMED"
                 await self.resubscribe()
                 log.info("gateway resumed")
             try:
@@ -331,10 +377,18 @@ class Gateway:
             try:
                 msg = await ws.receive(timeout=timeout)
             except asyncio.TimeoutError:
+                self._note_end(f"no packet for {timeout:g} s")
                 return None
-            if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING):
+            if msg.type == aiohttp.WSMsgType.CLOSE:
+                # Discord's close frame: data is the close code, extra the reason
+                self._close_code = msg.data if isinstance(msg.data, int) else None
+                self._close_reason = str(msg.extra or "")
+                return None
+            if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING):
+                self._note_end(self._without_frame(ws))
                 return None
             if msg.type == aiohttp.WSMsgType.ERROR:
+                self._note_end(f"connection error {msg.data!r}")
                 return None
             text = None
             if msg.type == aiohttp.WSMsgType.BINARY:
@@ -349,7 +403,16 @@ class Gateway:
                 continue
             if isinstance(parsed, dict):
                 return parsed
+        self._note_end(self._without_frame(ws))
         return None
+
+    def _without_frame(self, ws: aiohttp.ClientWebSocketResponse) -> str:
+        # the connection closed without a close frame from Discord: aiohttp's own code and error say why
+        text = f"connection closed without a close frame (aiohttp code {ws.close_code}"
+        error = ws.exception()
+        if error is not None:
+            text += f", error {error!r}"
+        return text + ")"
 
     async def _send(self, ws: aiohttp.ClientWebSocketResponse, payload: dict) -> None:
         if ws.closed:
