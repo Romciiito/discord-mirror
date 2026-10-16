@@ -33,7 +33,7 @@ CLOSED = aiohttp.WSMessage(aiohttp.WSMsgType.CLOSED, None, None)
 
 
 class FakeWS:
-    def __init__(self, packets: list[Any], end: str = "block", ack: bool = True) -> None:
+    def __init__(self, packets: list[Any], end: str = "block", ack: bool = True, fail_ops: frozenset[int] = frozenset()) -> None:
         self.queue: asyncio.Queue = asyncio.Queue()
         for item in packets:
             if isinstance(item, int):
@@ -45,6 +45,8 @@ class FakeWS:
                 self.queue.put_nowait(text(item))
         self.end = end
         self.ack = ack
+        # ops whose send meets a closing transport, as aiohttp raises it (mando.log 2026-10-16 21:39:17)
+        self.fail_ops = fail_ops
         self.closed = False
         self.close_code: int | None = None
         self.codes: list[int] = []
@@ -79,6 +81,8 @@ class FakeWS:
 
     async def send_str(self, raw: str) -> None:
         packet = json.loads(raw)
+        if packet.get("op") in self.fail_ops:
+            raise aiohttp.ClientConnectionResetError("Cannot write to closing transport")
         self.sent.append(packet)
         if packet.get("op") == 40 and self.ack:
             self.queue.put_nowait(text({"op": 11}))
@@ -480,6 +484,27 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await until(lambda: "READY" in self.events))
             await asyncio.wait_for(gate.stop(), 1.0)
         self.assertEqual([c for c in warning.call_args_list if "gateway session ended" in str(c)], [])
+
+    async def test_a_send_on_a_closing_transport_reads_discords_close_frame(self) -> None:
+        # mando.log 2026-10-16 21:39:17: op 14 after READY raised "Cannot write to closing transport" out of
+        # _once, so the close frame waiting in the reader, and its code, were never read
+        ws = FakeWS([hello(10000), ready(), (4000, "")], fail_ops=frozenset({14}))
+        gate = self.build([ws])
+        gate.set_subscriptions({"111": ["1"]}, False)
+        self.stop_at_first_wait(gate)
+        line = await self.ended(gate)
+        self.assertIn("close code 4000", line)
+        self.assertIn("send failed: ClientConnectionResetError('Cannot write to closing transport')", line)
+        self.assertNotIn("gateway session failed", line)
+        self.assertEqual(self.events, ["READY"])
+
+    async def test_resubscribe_on_a_closing_transport_does_not_raise(self) -> None:
+        ws = FakeWS([], fail_ops=frozenset({14}))
+        gate = self.build([])
+        gate._ws = ws  # type: ignore[assignment]
+        gate.set_subscriptions({"111": ["1"]}, False)
+        await asyncio.wait_for(gate.resubscribe(), 1.0)
+        self.assertEqual(ws.sent, [])
 
     async def test_a_session_that_raised_is_logged_with_the_error_and_the_next_step(self) -> None:
         ws = FakeWS([])

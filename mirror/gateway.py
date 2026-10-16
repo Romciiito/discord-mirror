@@ -421,4 +421,9 @@ class Gateway:
         async with self._send_lock:
             if ws.closed:
                 return
-            await ws.send_str(raw)
+            try:
+                await ws.send_str(raw)
+            except ConnectionResetError as exc:
+                # aiohttp's "Cannot write to closing transport" (ClientConnectionResetError): the connection is
+                # ending, so the read loop goes on to the close frame Discord sent and logs its code
+                self._note_end(f"send failed: {exc!r}")
