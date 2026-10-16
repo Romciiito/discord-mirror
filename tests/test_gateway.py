@@ -351,7 +351,7 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         gate = self.build([])
         self.script(gate, ["short", "quiet", "short", "fail", "short", "short"])
         await asyncio.wait_for(gate._run(), 1.0)
-        self.assertEqual(self.fatal, ["Discord keeps closing the connection (close code 4000), mirror stopped"])
+        self.assertEqual(self.fatal, ["Discord keeps closing (close code 4000), mirror stopped"])
         self.assertTrue(gate._stop.is_set())
         self.assertEqual([int(w) for w in self.waits], [1, 2, 4, 8])
 
@@ -378,10 +378,10 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("short session 1 of 3, next resume", lines[0])
         self.assertIn("no READY or RESUMED, next identify", lines[1])
         self.assertIn(
-            "short session 3 of 3, next stop: Discord keeps closing the connection (close code 4000), mirror stopped",
+            "short session 3 of 3, next stop: Discord keeps closing (close code 4000), mirror stopped",
             lines[4],
         )
-        self.assertEqual(self.fatal, ["Discord keeps closing the connection (close code 4000), mirror stopped"])
+        self.assertEqual(self.fatal, ["Discord keeps closing (close code 4000), mirror stopped"])
         self.assertEqual(len(self.http.session.calls), 5)
         self.assertEqual([ws.login()["op"] for ws in sockets], [2, 6, 2, 6, 2])
         self.assertEqual([int(w) for w in self.waits], [1, 2, 4, 8])
@@ -424,7 +424,7 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         ws = FakeWS([hello(), ready(), 4015])
         gate = self.build([ws])
         await asyncio.wait_for(gate._run(), 1.0)
-        self.assertEqual(self.fatal, ["Discord says too many sessions are open for this account (close code 4015), mirror stopped"])
+        self.assertEqual(self.fatal, ["too many sessions (close code 4015), mirror stopped"])
         self.assertTrue(gate._stop.is_set())
         self.assertEqual(len(self.http.session.calls), 1)
         self.assertEqual(self.waits, [])

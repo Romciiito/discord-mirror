@@ -172,7 +172,7 @@ class Gateway:
                 self._short += 1
                 short = True
             if not self._stop.is_set() and self._short >= SHORT_LIMIT:
-                await self._fail(None, f"Discord keeps closing the connection ({self._code_text()}), mirror stopped")
+                await self._fail(None, f"Discord keeps closing ({self._code_text()}), mirror stopped")
             if self._stop.is_set():
                 self._log_end(f"stop: {self._fatal_text}", short)
                 return
@@ -242,7 +242,7 @@ class Gateway:
                     await self._fail(ws, "token was rejected")
                 elif code == TOO_MANY:
                     # another IDENTIFY would open one more session
-                    await self._fail(ws, "Discord says too many sessions are open for this account (close code 4015), mirror stopped")
+                    await self._fail(ws, "too many sessions (close code 4015), mirror stopped")
                 elif code in REFUSED:
                     await self._fail(ws, "gateway refused the session")
                 elif code in FORGET:
